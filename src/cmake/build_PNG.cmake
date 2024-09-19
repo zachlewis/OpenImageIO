@@ -34,7 +34,7 @@ set (PNG_DIR ${PNG_LOCAL_INSTALL_DIR})
 # Signal to caller that we need to find again at the installed location
 set (PNG_REFIND TRUE)
 set (PNG_REFIND_VERSION ${PNG_BUILD_VERSION})
-if ({$PNG_BUILD_VERSION} VERSION_GREATER_EQUAL "1.6.44")
+if  (${PNG_BUILD_VERSION} VERSION_GREATER_EQUAL "1.6.44")
     # CMake configs added in libpng 1.6.44
     set (PNG_REFIND_ARGS CONFIG)  
 endif ()

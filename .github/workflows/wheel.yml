@@ -122,33 +122,32 @@ jobs:
       github.event_name != 'schedule' ||
       github.repository == 'zachlewis/OpenImageIO'
 
-    # strategy:
-    #   matrix:
-    #     arch: [arm64]
-    #     include:
-    #       # -------------------------------------------------------------------
-    #       # CPython ARM 64 bits manylinux2014
-    #       # -------------------------------------------------------------------
-    #       - build: CPython 3.8 ARM 64 bits manylinux2014
-    #         manylinux: manylinux2014
-    #         python: cp38-manylinux_aarch64
-    #         arch: aarch64
-    #       - build: CPython 3.9 ARM 64 bits manylinux2014
-    #         manylinux: manylinux2014
-    #         python: cp39-manylinux_aarch64
-    #         arch: aarch64
-    #       - build: CPython 3.10 ARM 64 bits manylinux2014
-    #         manylinux: manylinux2014
-    #         python: cp310-manylinux_aarch64
-    #         arch: aarch64
-    #       - build: CPython 3.11 ARM 64 bits manylinux2014
-    #         manylinux: manylinux2014
-    #         python: cp311-manylinux_aarch64
-    #         arch: aarch64
-    #       - build: CPython 3.12 ARM 64 bits manylinux2014
-    #         manylinux: manylinux2014
-    #         python: cp312-manylinux_aarch64
-    #         arch: aarch64
+    strategy:
+      matrix:
+        include:
+          # -------------------------------------------------------------------
+          # CPython ARM 64 bits manylinux2014
+          # -------------------------------------------------------------------
+          - build: CPython 3.8 ARM 64 bits manylinux2014
+            manylinux: manylinux2014
+            python: cp38-manylinux_aarch64
+            arch: aarch64
+          - build: CPython 3.9 ARM 64 bits manylinux2014
+            manylinux: manylinux2014
+            python: cp39-manylinux_aarch64
+            arch: aarch64
+          - build: CPython 3.10 ARM 64 bits manylinux2014
+            manylinux: manylinux2014
+            python: cp310-manylinux_aarch64
+            arch: aarch64
+          - build: CPython 3.11 ARM 64 bits manylinux2014
+            manylinux: manylinux2014
+            python: cp311-manylinux_aarch64
+            arch: aarch64
+          - build: CPython 3.12 ARM 64 bits manylinux2014
+            manylinux: manylinux2014
+            python: cp312-manylinux_aarch64
+            arch: aarch64
     
     steps:
       - uses: actions/checkout@v4
@@ -169,11 +168,15 @@ jobs:
           output-dir: wheelhouse
 
         env:
-          CIBW_ARCHS: aarch64
+          CIBW_BUILD: ${{ matrix.python }}
+          CIBW_ARCHS: ${{ matrix.arch }}
+          CIBW_MANYLINUX_AARCH64_IMAGE: ${{ matrix.manylinux }}
+          #TODO: Reenable tests when Linux ARM64 runners are available
+          CIBW_TEST_SKIP: "*"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheelhouse
+          name: cibw-wheels-${{ matrix.arch }}-${{ matrix.manylinux }}
           path: ./wheelhouse/*.whl
           
   # ---------------------------------------------------------------------------
@@ -220,27 +223,27 @@ jobs:
       github.event_name != 'schedule' ||
       github.repository == 'zachlewis/OpenImageIO'
 
-    strategy:
-      matrix:
-        include:
-          # -------------------------------------------------------------------
-          # CPython ARM 64 bits
-          # -------------------------------------------------------------------
-          - build: CPython 3.8 ARM 64 bits
-            python: cp38-macosx_arm64
-            arch: arm64
-          - build: CPython 3.9 ARM 64 bits
-            python: cp39-macosx_arm64
-            arch: arm64
-          - build: CPython 3.10 ARM 64 bits
-            python: cp310-macosx_arm64
-            arch: arm64
-          - build: CPython 3.11 ARM 64 bits
-            python: cp311-macosx_arm64
-            arch: arm64
-          - build: CPython 3.12 ARM 64 bits
-            python: cp312-macosx_arm64
-            arch: arm64
+    # strategy:
+    #   matrix:
+    #     include:
+    #       # -------------------------------------------------------------------
+    #       # CPython ARM 64 bits
+    #       # -------------------------------------------------------------------
+    #       - build: CPython 3.8 ARM 64 bits
+    #         python: cp38-macosx_arm64
+    #         arch: arm64
+    #       - build: CPython 3.9 ARM 64 bits
+    #         python: cp39-macosx_arm64
+    #         arch: arm64
+    #       - build: CPython 3.10 ARM 64 bits
+    #         python: cp310-macosx_arm64
+    #         arch: arm64
+    #       - build: CPython 3.11 ARM 64 bits
+    #         python: cp311-macosx_arm64
+    #         arch: arm64
+    #       - build: CPython 3.12 ARM 64 bits
+    #         python: cp312-macosx_arm64
+    #         arch: arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -252,13 +255,10 @@ jobs:
     
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.21.1
-        env:
-          CIBW_BUILD: ${{ matrix.python }}
-          CIBW_ARCHS: ${{ matrix.arch }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cibw-wheels-${{ matrix.python }}
+          name: cibw-wheels-macos-arm64
           path: ./wheelhouse/*.whl
 
 

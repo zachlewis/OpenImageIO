@@ -55,7 +55,6 @@ build-backend = "scikit_build_core.build"
 requires = [
     "scikit-build-core>=0.10.6,<1",
     "pybind11",
-    "oldest-supported-numpy",
 ]
 
 [tool.scikit-build]
@@ -115,8 +114,8 @@ skip = [
 # If the following command returns code 0, we know the CLI Python scripts
 # are able to import the OpenImageIO module, which is able to invoke the
 # CLI binary executables and find and load all shared libraries. The 
-# '--help' flag outputs a list of dependencies with which OIIO was compiled.
-test-command = "oiiotool --help"
+# '--buildinfo' flag outputs a list of dependencies with which OIIO was compiled.
+test-command = "oiiotool --buildinfo"
 # Enable free-threaded support
 #free-threaded-support = true
 # Default images to use when building manylinux wheels locally.

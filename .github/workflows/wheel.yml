@@ -7,9 +7,9 @@ name: Wheel
 on:
   push:
     # Workflow run on tags for v2.6 and v3 only.
-    tags:
-      - v2.6.*
-      - v3.*
+    # tags:
+    #   - v2.6.*
+    #   - v3.*
   pull_request:
     # Workflow run on pull_request only when related files change.
     branches-ignore:
@@ -45,7 +45,7 @@ jobs:
     # Don't run on OIIO forks
     if: |
       github.event_name != 'schedule' ||
-      github.repository == 'AcademySoftwareFoundation/OpenImageIO'
+      github.repository == 'zachlewis/OpenImageIO'
 
     steps:
 
@@ -72,59 +72,21 @@ jobs:
     # Don't run on OIIO forks
     if: |
       github.event_name != 'schedule' ||
-      github.repository == 'AcademySoftwareFoundation/OpenImageIO'
+      github.repository == 'zachlewis/OpenImageIO'
 
     strategy:
       matrix:
         include:
-          # -------------------------------------------------------------------
-          # CPython 64 bits manylinux_2_28
-          # -------------------------------------------------------------------
-          - build: CPython 3.8 64 bits manylinux_2_28
+          - build: CPython x86_64 manylinux_2_28
             manylinux: manylinux_2_28
-            python: cp38-manylinux_x86_64
             arch: x86_64
-          - build: CPython 3.9 64 bits manylinux_2_28
-            manylinux: manylinux_2_28
-            python: cp39-manylinux_x86_64
-            arch: x86_64
-          - build: CPython 3.10 64 bits manylinux_2_28
-            manylinux: manylinux_2_28
-            python: cp310-manylinux_x86_64
-            arch: x86_64
-          - build: CPython 3.11 64 bits manylinux_2_28
-            manylinux: manylinux_2_28
-            python: cp311-manylinux_x86_64
-            arch: x86_64
-          - build: CPython 3.12 64 bits manylinux_2_28
-            manylinux: manylinux_2_28
-            python: cp312-manylinux_x86_64
-            arch: x86_64
-          # -------------------------------------------------------------------
-          # CPython 64 bits manylinux2014
-          # -------------------------------------------------------------------
-          - build: CPython 3.8 64 bits manylinux2014
+          - build: CPython x86_64 manylinux2014
             manylinux: manylinux2014
-            python: cp38-manylinux_x86_64
             arch: x86_64
-          - build: CPython 3.9 64 bits manylinux2014
-            manylinux: manylinux2014
-            python: cp39-manylinux_x86_64
-            arch: x86_64
-          - build: CPython 3.10 64 bits manylinux2014
-            manylinux: manylinux2014
-            python: cp310-manylinux_x86_64
-            arch: x86_64
-          - build: CPython 3.11 64 bits manylinux2014
-            manylinux: manylinux2014
-            python: cp311-manylinux_x86_64
-            arch: x86_64
-          - build: CPython 3.12 64 bits manylinux2014
-            manylinux: manylinux2014
-            python: cp312-manylinux_x86_64
-            arch: x86_64
+          # - build: CPython x86_64 manylinux2014
+          #   manylinux: manylinux2014
+          #   arch: aarch64
           
-
     steps:
       - uses: actions/checkout@v4
 
@@ -141,13 +103,13 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.21.1
         env:
-          CIBW_BUILD: ${{ matrix.python }}
           CIBW_ARCHS: ${{ matrix.arch }}
           CIBW_MANYLINUX_X86_64_IMAGE: ${{ matrix.manylinux }}
+          SKBUILD_BUILD_DIR: /tmp/build_oiio_wheel/${{ matrix.arch }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cibw-wheels-${{ matrix.python }}-${{ matrix.manylinux }}
+          name: cibw-wheels-${{ matrix.arch }}-${{ matrix.manylinux }}
           path: ./wheelhouse/*.whl
 
 
@@ -158,7 +120,7 @@ jobs:
     # Don't run on OIIO forks
     if: |
       github.event_name != 'schedule' ||
-      github.repository == 'AcademySoftwareFoundation/OpenImageIO'
+      github.repository == 'zachlewis/OpenImageIO'
 
     # strategy:
     #   matrix:
@@ -224,28 +186,12 @@ jobs:
     # Don't run on OIIO forks
     if: |
       github.event_name != 'schedule' ||
-      github.repository == 'AcademySoftwareFoundation/OpenImageIO'
+      github.repository == 'zachlewis/OpenImageIO'
 
     strategy:
       matrix:
         include:
-          # -------------------------------------------------------------------
-          # CPython 64 bits
-          # -------------------------------------------------------------------
-          - build: CPython 3.8 64 bits
-            python: cp38-macosx_x86_64
-            arch: x86_64
-          - build: CPython 3.9 64 bits
-            python: cp39-macosx_x86_64
-            arch: x86_64
-          - build: CPython 3.10 64 bits
-            python: cp310-macosx_x86_64
-            arch: x86_64
-          - build: CPython 3.11 64 bits
-            python: cp311-macosx_x86_64
-            arch: x86_64
-          - build: CPython 3.12 64 bits
-            python: cp312-macosx_x86_64
+          - build: CPython x86_64
             arch: x86_64
     
     steps:
@@ -259,12 +205,11 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.21.1
         env:
-          CIBW_BUILD: ${{ matrix.python }}
           CIBW_ARCHS: ${{ matrix.arch }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cibw-wheels-${{ matrix.python }}
+          name: cibw-wheels-macos-${{ matrix.arch }}
           path: ./wheelhouse/*.whl
 
   macos_arm64:
@@ -273,7 +218,7 @@ jobs:
     # Don't run on OIIO forks
     if: |
       github.event_name != 'schedule' ||
-      github.repository == 'AcademySoftwareFoundation/OpenImageIO'
+      github.repository == 'zachlewis/OpenImageIO'
 
     strategy:
       matrix:
@@ -328,7 +273,7 @@ jobs:
     # Don't run on OIIO forks
     if: |
       github.event_name != 'schedule' ||
-      github.repository == 'AcademySoftwareFoundation/OpenImageIO'
+      github.repository == 'zachlewis/OpenImageIO'
 
     strategy:
       matrix:

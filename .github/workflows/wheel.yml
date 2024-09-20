@@ -176,7 +176,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cibw-wheels-${{ matrix.arch }}-${{ matrix.manylinux }}
+          name: cibw-wheels-${{ matrix.python }}-${{ matrix.manylinux }}
           path: ./wheelhouse/*.whl
           
   # ---------------------------------------------------------------------------
@@ -191,12 +191,6 @@ jobs:
       github.event_name != 'schedule' ||
       github.repository == 'zachlewis/OpenImageIO'
 
-    strategy:
-      matrix:
-        include:
-          - build: CPython x86_64
-            arch: x86_64
-    
     steps:
       - uses: actions/checkout@v4
 
@@ -207,12 +201,10 @@ jobs:
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.21.1
-        env:
-          CIBW_ARCHS: ${{ matrix.arch }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cibw-wheels-macos-${{ matrix.arch }}
+          name: cibw-wheels-macos-x86_64
           path: ./wheelhouse/*.whl
 
   macos_arm64:

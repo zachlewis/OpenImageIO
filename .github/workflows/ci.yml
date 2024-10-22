@@ -189,7 +189,7 @@ jobs:
             python_ver: 3.7
             simd: 0
             setenvs: export  EMBEDPLUGINS=0
-                             CMAKE_VERSION=3.24.4
+                             CMAKE_VERSION=3.15.5
                              PTEX_VERSION=v2.3.2
                              WEBP_VERSION=v1.1.0
                              USE_JPEGTURBO=0

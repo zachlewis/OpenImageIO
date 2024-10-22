@@ -5,7 +5,6 @@
 #include <cstdio>
 
 #include <OpenImageIO/filesystem.h>
-#include <OpenImageIO/fmath.h>
 #include <OpenImageIO/imageio.h>
 
 #include "bmp_pvt.h"

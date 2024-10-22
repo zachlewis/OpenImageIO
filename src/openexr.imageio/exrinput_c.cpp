@@ -528,13 +528,8 @@ OpenEXRCoreInput::PartInfo::parse_header(OpenEXRCoreInput* in,
     spec.deep = (storage == EXR_STORAGE_DEEP_TILED
                  || storage == EXR_STORAGE_DEEP_SCANLINE);
 
-    // Unless otherwise specified, exr files are assumed to be linear Rec709
-    // if the channels appear to be R, G, B.  I know this suspect, but I'm
-    // betting that this heuristic will guess the right thing that users want
-    // more often than if we pretending we have no idea what the color space
-    // is.
-    if (pvt::channels_are_rgb(spec))
-        spec.set_colorspace("lin_rec709");
+    // Unless otherwise specified, exr files are assumed to be linear.
+    spec.attribute("oiio:ColorSpace", "Linear");
 
     if (levelmode != EXR_TILE_ONE_LEVEL)
         spec.attribute("openexr:roundingmode", (int)roundingmode);
@@ -811,7 +806,7 @@ struct CChanNameHolder {
         , xSampling(exrchan.x_sampling)
         , ySampling(exrchan.y_sampling)
     {
-        pvt::split_name(fullname, layer, suffix);
+        split_name(fullname, layer, suffix);
     }
 
     // Compute canoninical channel list sort priority

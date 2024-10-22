@@ -25,7 +25,6 @@ lg@openimageio.org
 * Andy Chan
 * AngryLoki
 * Angus Davis
-* Ankit Sinha
 * Anton Dukhovnikov
 * Anthony Nemoff
 * Aras Pranckevičius
@@ -39,7 +38,6 @@ lg@openimageio.org
 * Blair Tennessy
 * Blazej Floch
 * Brad Smith
-* Bram Stolk
 * Brecht Van Lommel
 * Brent Davis
 * Brian Hall
@@ -66,8 +64,6 @@ lg@openimageio.org
 * Daniel Wyatt
 * Danny Greenstein
 * Darby Johnston
-* Dharshan Vishwanatha
-* David Adler
 * David Aguilar
 * David Gordon
 * Deepak Gopinath
@@ -139,7 +135,6 @@ lg@openimageio.org
 * Lukas Schrangl
 * Lukasz Maliszewski
 * Luke Emrose
-* Lydia Zheng
 * M Joonas Pihlaja
 * Malcolm Humphreys
 * Manuel Gamito
@@ -176,7 +171,6 @@ lg@openimageio.org
 * Pascal Lecocq
 * Patrick Hodoul
 * Patrick Piché
-* Paul Franz
 * Paul Melis
 * Paul Molodowitch
 * Pavel Karneliuk
@@ -218,7 +212,6 @@ lg@openimageio.org
 * Till Dechent
 * Tim D. Smith
 * Tim Grant
-* Todica Ionut
 * Tom Knowles
 * Troy James Sobotka
 * Vic P
@@ -234,5 +227,4 @@ lg@openimageio.org
 * Yang Yang
 * Yann Lanthony
 * Zach Lewis
-* Ziad Khouri
 * zomgrolf

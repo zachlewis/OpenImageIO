@@ -10,8 +10,9 @@ import OpenImageIO as oiio
 test_xres = 3
 test_yres = 3
 test_nchannels = 6
-test_chantypes = (oiio.TypeHalf, oiio.TypeHalf, oiio.TypeHalf, oiio.TypeHalf,
-                  oiio.TypeFloat, oiio.TypeFloat)
+test_chantypes = (oiio.TypeDesc.TypeHalf, oiio.TypeDesc.TypeHalf,
+                  oiio.TypeDesc.TypeHalf, oiio.TypeDesc.TypeHalf,
+                  oiio.TypeDesc.TypeFloat, oiio.TypeDesc.TypeFloat)
 test_channames = ("R", "G", "B", "A", "Z", "Zback")
 print ("test_chantypes ", str(test_chantypes[0]), str(test_chantypes[1]), str(test_chantypes[2]), str(test_chantypes[3]), str(test_chantypes[4]), str(test_chantypes[5]))
 
@@ -255,8 +256,9 @@ def test_iba_deep_holdout () :
     print ("\nTesting ImageBufAlgo.deep_holdout...")
     spec = oiio.ImageSpec (6, 1, 6, oiio.FLOAT)
     spec.deep = True
-    spec.channelformats = (oiio.TypeHalf, oiio.TypeHalf, oiio.TypeHalf,
-                           oiio.TypeHalf, oiio.TypeFloat, oiio.TypeFloat)
+    spec.channelformats = (oiio.TypeDesc.TypeHalf, oiio.TypeDesc.TypeHalf,
+                  oiio.TypeDesc.TypeHalf, oiio.TypeDesc.TypeHalf,
+                  oiio.TypeDesc.TypeFloat, oiio.TypeDesc.TypeFloat)
     spec.channelnames = ("R", "G", "B", "A", "Z", "Zback")
     src = oiio.ImageBuf (spec)
     # Set up source image
@@ -296,7 +298,7 @@ try:
 
     # Try to write the test image to an exr file
     print ("\nWriting image...")
-    spec = oiio.ImageSpec (test_xres, test_yres, test_nchannels, oiio.TypeFloat)
+    spec = oiio.ImageSpec (test_xres, test_yres, test_nchannels, oiio.TypeDesc.TypeFloat)
     spec.channelnames = test_channames
     spec.channelformats = test_chantypes
     spec.deep = True

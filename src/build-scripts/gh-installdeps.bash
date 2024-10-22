@@ -91,16 +91,14 @@ else
         libilmbase-dev libopenexr-dev \
         libtiff-dev libgif-dev libpng-dev
     if [[ "${SKIP_SYSTEM_DEPS_INSTALL}" != "1" ]] ; then
-        time sudo apt-get -q install -y --fix-missing \
+        time sudo apt-get -q install -y \
             libraw-dev libwebp-dev \
             libavcodec-dev libavformat-dev libswscale-dev libavutil-dev \
             dcmtk libopenvdb-dev \
             libfreetype6-dev \
             libopencolorio-dev \
-            libtbb-dev || true
-    fi
-    if [[ "${USE_OPENCV}" != "0" ]] && [[ "${INSTALL_OPENCV}" != "0" ]] ; then
-        sudo apt-get -q install -y --fix-missing libopencv-dev || true
+            libtbb-dev \
+            libopencv-dev
     fi
     if [[ "${QT_VERSION:-5}" == "5" ]] ; then
         time sudo apt-get -q install -y \

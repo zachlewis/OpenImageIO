@@ -275,16 +275,8 @@ inline TypeDesc type_merge (TypeDesc a, TypeDesc b, TypeDesc c)
 }
 
 
-inline bool is_common_pixel_type(TypeDesc t)
-{
-    return t.basetype == TypeDesc::FLOAT || t.basetype == TypeDesc::UINT8 
-        || t.basetype == TypeDesc::UINT16 || t.basetype == TypeDesc::HALF;
-}
-
-
 
 // Macro to call a type-specialized version func<type>(R,...)
-// instantiated for EVERY pixel type we support.
 #define OIIO_DISPATCH_TYPES(ret,name,func,type,R,...)                   \
     switch (type.basetype) {                                            \
     case TypeDesc::FLOAT :                                              \
@@ -337,8 +329,6 @@ inline bool is_common_pixel_type(TypeDesc t)
     }
 
 // Macro to call a type-specialized version func<Rtype,Atype>(R,...).
-// instantiated for EVERY combination of pixel type we support.
-// Note: The combinatorics here are brutal! Only do this if necessary.
 #define OIIO_DISPATCH_TYPES2(ret,name,func,Rtype,Atype,R,...)           \
     switch (Rtype.basetype) {                                           \
     case TypeDesc::FLOAT :                                              \
@@ -390,10 +380,10 @@ inline bool is_common_pixel_type(TypeDesc t)
         /* other types: punt and convert to float, then copy back */    \
         ImageBuf Rtmp;                                                  \
         if ((R).initialized())                                          \
-            Rtmp.copy(R, TypeFloat);                                    \
+            Rtmp.copy (R, TypeDesc::FLOAT);                             \
         ret = func<float> (Rtmp, __VA_ARGS__);                          \
         if (ret)                                                        \
-            (R).copy(Rtmp, (R).pixeltype());                            \
+            (R).copy (Rtmp);                                            \
         else                                                            \
             (R).errorfmt("{}", Rtmp.geterror());                        \
         }                                                               \
@@ -410,199 +400,101 @@ inline bool is_common_pixel_type(TypeDesc t)
         ret = func<Rtype,half> (R, A, __VA_ARGS__); break;              \
     case TypeDesc::UINT16:                                              \
         ret = func<Rtype,unsigned short> (R, A, __VA_ARGS__); break;    \
-    default:                                                            \
-        OIIO_DASSERT(0 && "bad type");                                  \
-        ret = false;                                                    \
-        break;                                                          \
+    default: {                                                          \
+        /* other types: punt and convert to float, then copy back */    \
+        ImageBuf Atmp;                                                  \
+        Atmp.copy (A, TypeDesc::FLOAT);                                 \
+        ret = func<Rtype,float> (R, Atmp, __VA_ARGS__);                 \
+        }                                                               \
     }
 
 // Macro to call a type-specialized version func<Rtype,Atype>(R,A,...) for
-// the most common types. It will auto-convert remaining rare cases to float.
-#define OIIO_DISPATCH_COMMON_TYPES2_FULL(ret, name, func, Rtype_, Atype_, R, A, ...)\
-    {                                                                          \
-        OIIO_ASSERT((R).initialized());                                        \
-        ret       = false;                                                     \
-        auto Rptr = &R;                                                        \
-        auto Aptr = &A;                                                        \
-        ImageBuf Rtmp, Atmp;                                                   \
-        TypeDesc Rtype = Rtype_, Atype = Atype_;                               \
-        if (!ImageBufAlgo::is_common_pixel_type(Atype)) {                      \
-            Atype = TypeDesc::FLOAT;                                           \
-            Atmp.copy(A, Atype);                                               \
-            Aptr = &Atmp;                                                      \
-        }                                                                      \
-        if (!ImageBufAlgo::is_common_pixel_type(Rtype)) {                      \
-            Rtype = TypeDesc::FLOAT;                                           \
-            Rtmp.copy(R, Rtype);                                               \
-            Rptr = &Rtmp;                                                      \
-        }                                                                      \
-        if (Rtype == TypeFloat) {                                              \
-            OIIO_DISPATCH_COMMON_TYPES2_HELP(ret, name, func, float, Atype,    \
-                                             *Rptr, *Aptr, __VA_ARGS__);       \
-        } else if (Rtype == TypeUInt8) {                                       \
-            OIIO_DISPATCH_COMMON_TYPES2_HELP(ret, name, func, uint8_t, Atype,  \
-                                             *Rptr, *Aptr, __VA_ARGS__);       \
-        } else if (Rtype == TypeHalf) {                                        \
-            OIIO_DISPATCH_COMMON_TYPES2_HELP(ret, name, func, half, Atype,     \
-                                             *Rptr, *Aptr, __VA_ARGS__);       \
-        } else if (Rtype == TypeUInt16) {                                      \
-            OIIO_DISPATCH_COMMON_TYPES2_HELP(ret, name, func, uint16_t, Atype, \
-                                             *Rptr, *Aptr, __VA_ARGS__);       \
-        } else {                                                               \
-            OIIO_DASSERT(0 && "bad type");                                     \
-        }                                                                      \
-        if (Rptr != &(R)) {                                                    \
-            /* If we used Rtmp, copy pixels or errors to the real R */         \
-            if (ret)                                                           \
-                (R).copy(*Rptr, (R).pixeltype());                              \
-            else                                                               \
-                (R).errorfmt("{}", Rptr->geterror());                          \
-        }                                                                      \
-    }
-
-
-// Macro to call a type-specialized version func<Rtype,Atype>(R,A,...) for
-// the most common types. It will auto-convert remaining rare cases to float.
-#define OIIO_DISPATCH_COMMON_TYPES2(ret, name, func, Rtype_, Atype_, R, A, ...)\
-    {                                                                          \
-        OIIO_ASSERT((R).initialized());                                        \
-        ret       = false;                                                     \
-        auto Rptr = &R;                                                        \
-        auto Aptr = &A;                                                        \
-        ImageBuf Rtmp, Atmp;                                                   \
-        TypeDesc Rtype = Rtype_, Atype = Atype_;                               \
-        if (!ImageBufAlgo::is_common_pixel_type(Atype)) {                      \
-            Atype = TypeDesc::FLOAT;                                           \
-            Atmp.copy(A, Atype);                                               \
-            Aptr = &Atmp;                                                      \
-        }                                                                      \
-        if (!ImageBufAlgo::is_common_pixel_type(Rtype) || (Rtype != Atype && Rtype != TypeFloat)) {  \
-            Rtype = TypeDesc::FLOAT;                                           \
-            Rtmp.copy(R, Rtype);                                               \
-            Rptr = &Rtmp;                                                      \
-        }                                                                      \
-        OIIO_ASSERT(Rtype == TypeFloat || Rtype == Atype);                     \
-        if (Rtype == TypeFloat) {                                              \
-            switch (Atype.basetype) {                                          \
-            case TypeDesc::FLOAT :                                             \
-                ret = func<float,float> (*Rptr, *Aptr, __VA_ARGS__); break;            \
-            case TypeDesc::UINT8 :                                             \
-                ret = func<float,unsigned char> (*Rptr, *Aptr, __VA_ARGS__); break;    \
-            case TypeDesc::HALF  :                                             \
-                ret = func<float,half> (*Rptr, *Aptr, __VA_ARGS__); break;             \
-            case TypeDesc::UINT16:                                             \
-                ret = func<float,unsigned short> (*Rptr, *Aptr, __VA_ARGS__); break;   \
-            default:                                                           \
-                OIIO_DASSERT(0 && "bad type");                                 \
-                ret = false;                                                   \
-                break;                                                         \
-            }                                                                  \
-        } else if (Rtype == TypeUInt8) {                                       \
-            switch (Atype.basetype) {                                          \
-            case TypeDesc::FLOAT :                                             \
-                ret = func<uint8_t,float> (*Rptr, *Aptr, __VA_ARGS__); break;            \
-            case TypeDesc::UINT8 :                                             \
-                ret = func<uint8_t,unsigned char> (*Rptr, *Aptr, __VA_ARGS__); break;    \
-            /* case TypeDesc::HALF  :*/                                           \
-            /*     ret = func<uint8_t,half> (*Rptr, *Aptr, __VA_ARGS__); break;*/           \
-            /* case TypeDesc::UINT16:*/                                           \
-            /*     ret = func<uint8_t,unsigned short> (*Rptr, *Aptr, __VA_ARGS__); break;*/ \
-            default:                                                           \
-                OIIO_DASSERT(0 && "bad type");                                 \
-                ret = false;                                                   \
-                break;                                                         \
-            }                                                                  \
-        } else if (Rtype == TypeHalf) {                                        \
-            switch (Atype.basetype) {                                          \
-            case TypeDesc::FLOAT :                                             \
-                ret = func<half,float> (*Rptr, *Aptr, __VA_ARGS__); break;            \
-            /* case TypeDesc::UINT8 : */                                            \
-            /*     ret = func<half,unsigned char> (*Rptr, *Aptr, __VA_ARGS__); break; */   \
-            case TypeDesc::HALF  :                                             \
-                ret = func<half,half> (*Rptr, *Aptr, __VA_ARGS__); break;             \
-            /* case TypeDesc::UINT16: */                                            \
-            /*     ret = func<half,unsigned short> (*Rptr, *Aptr, __VA_ARGS__); break; */  \
-            default:                                                           \
-                OIIO_DASSERT(0 && "bad type");                                 \
-                ret = false;                                                   \
-                break;                                                         \
-            }                                                                  \
-        } else if (Rtype == TypeUInt16) {                                      \
-            switch (Atype.basetype) {                                          \
-            case TypeDesc::FLOAT :                                             \
-                ret = func<uint16_t,float> (*Rptr, *Aptr, __VA_ARGS__); break;            \
-            /*case TypeDesc::UINT8 : */                                          \
-            /*    ret = func<uint16_t,unsigned char> (*Rptr, *Aptr, __VA_ARGS__); break; */ \
-            /*case TypeDesc::HALF  : */                                          \
-            /*    ret = func<uint16_t,half> (*Rptr, *Aptr, __VA_ARGS__); break; */          \
-            case TypeDesc::UINT16:                                             \
-                ret = func<uint16_t,unsigned short> (*Rptr, *Aptr, __VA_ARGS__); break;   \
-            default:                                                           \
-                OIIO_DASSERT(0 && "bad type");                                 \
-                ret = false;                                                   \
-                break;                                                         \
-            }                                                                  \
-        } else {                                                               \
-            OIIO_DASSERT(0 && "bad type");                                     \
-        }                                                                      \
-        if (Rptr != &(R)) {                                                    \
-            /* If we used Rtmp, copy pixels or errors to the real R */         \
-            if (ret)                                                           \
-                (R).copy(*Rptr, (R).pixeltype());                              \
-            else                                                               \
-                (R).errorfmt("{}", Rptr->geterror());                          \
-        }                                                                      \
+// the most common types, and even for uncommon types when src and dst types
+// are identical. It will auto-convert remaining rare cases to float.
+#define OIIO_DISPATCH_COMMON_TYPES2(ret,name,func,Rtype,Atype,R,A,...)  \
+    if (Rtype == Atype) {                                               \
+        /* All data types, when Rtype == Atype */                       \
+        switch (Atype.basetype) {                                       \
+        case TypeDesc::FLOAT :                                          \
+            ret = func<float,float> (R, A, __VA_ARGS__); break;         \
+        case TypeDesc::UINT8 :                                          \
+            ret = func<uint8_t,uint8_t> (R, A, __VA_ARGS__); break;     \
+        case TypeDesc::UINT16:                                          \
+            ret = func<uint16_t,uint16_t> (R, A, __VA_ARGS__); break;   \
+        case TypeDesc::HALF  :                                          \
+            ret = func<half,half> (R, A, __VA_ARGS__); break;           \
+        case TypeDesc::INT8 :                                           \
+            ret = func<char,char> (R, A, __VA_ARGS__); break;           \
+        case TypeDesc::INT16 :                                          \
+            ret = func<short,short> (R, A, __VA_ARGS__); break;         \
+        case TypeDesc::UINT :                                           \
+            ret = func<uint32_t,uint32_t> (R, A, __VA_ARGS__); break;   \
+        case TypeDesc::INT :                                            \
+            ret = func<int,int> (R, A, __VA_ARGS__); break;             \
+        case TypeDesc::DOUBLE :                                         \
+            ret = func<double,double> (R, A, __VA_ARGS__); break;       \
+        default:                                                        \
+            (R).errorfmt("{}: Unsupported pixel data format '{}'", name, Atype); \
+            ret = false;                                                \
+        }                                                               \
+    } else {                                                            \
+        /* When Rtype != Atype, handle the common pairs */              \
+        switch (Rtype.basetype) {                                       \
+        case TypeDesc::FLOAT :                                          \
+            OIIO_DISPATCH_COMMON_TYPES2_HELP(ret,name,func,float,Atype,R,A,__VA_ARGS__); \
+            break;                                                      \
+        case TypeDesc::UINT8 :                                          \
+            OIIO_DISPATCH_COMMON_TYPES2_HELP(ret,name,func,uint8_t,Atype,R,A,__VA_ARGS__); \
+            break;                                                      \
+        case TypeDesc::HALF  :                                          \
+            OIIO_DISPATCH_COMMON_TYPES2_HELP(ret,name,func,half,Atype,R,A,__VA_ARGS__); \
+            break;                                                      \
+        case TypeDesc::UINT16:                                          \
+            OIIO_DISPATCH_COMMON_TYPES2_HELP(ret,name,func,uint16_t,Atype,R,A,__VA_ARGS__); \
+            break;                                                      \
+        default: {                                                      \
+            /* other combinations: convert to float, then copy back */  \
+            ImageBuf Rtmp;                                              \
+            if ((R).initialized())                                      \
+                Rtmp.copy (R, TypeDesc::FLOAT);                         \
+            OIIO_DISPATCH_COMMON_TYPES2_HELP(ret,name,func,float,Atype,Rtmp,A,__VA_ARGS__); \
+            if (ret)                                                    \
+                (R).copy (Rtmp);                                        \
+            else                                                        \
+                (R).errorfmt("{}", Rtmp.geterror());                    \
+            }                                                           \
+        }                                                               \
     }
 
 
 // Macro to call a type-specialized version func<Rtype,Atype>(R,A,...) for
 // the most common types. It will auto-convert other cases to/from float.
 // This is the case for when we don't actually write to the read-only R image.
-#define OIIO_DISPATCH_COMMON_TYPES2_CONST(ret,name,func,Rtype_,Atype_,R,A,...)  \
-    {                                                                   \
-        OIIO_ASSERT((R).initialized());                                 \
-        ret = false;                                                    \
-        auto Rptr = &R;                                                 \
-        auto Aptr = &A;                                                 \
-        ImageBuf Rtmp, Atmp;                                            \
-        TypeDesc Rtype = Rtype_, Atype = Atype_;                        \
-        if (!ImageBufAlgo::is_common_pixel_type(Rtype)) {               \
-            Rtype = TypeDesc::FLOAT;                                    \
-            Rtmp.copy(R, Rtype);                                        \
-            Rptr = &Rtmp;                                               \
-        }                                                               \
-        if (!ImageBufAlgo::is_common_pixel_type(Atype)) {               \
-            Atype = TypeDesc::FLOAT;                                    \
-            Atmp.copy(A, Atype);                                        \
-            Aptr = &Atmp;                                               \
-        }                                                               \
-        switch (Rtype.basetype) {                                       \
-        case TypeDesc::FLOAT :                                          \
-            OIIO_DISPATCH_COMMON_TYPES2_HELP(ret,name,func,float,Atype,*Rptr,*Aptr, __VA_ARGS__); \
-            break;                                                      \
-        case TypeDesc::UINT8 :                                          \
-            OIIO_DISPATCH_COMMON_TYPES2_HELP(ret,name,func,uint8_t,Atype,*Rptr,*Aptr, __VA_ARGS__); \
-            break;                                                      \
-        case TypeDesc::HALF  :                                          \
-            OIIO_DISPATCH_COMMON_TYPES2_HELP(ret,name,func,half,Atype,*Rptr,*Aptr, __VA_ARGS__); \
-            break;                                                      \
-        case TypeDesc::UINT16:                                          \
-            OIIO_DISPATCH_COMMON_TYPES2_HELP(ret,name,func,uint16_t,Atype,*Rptr,*Aptr, __VA_ARGS__); \
-            break;                                                      \
-        default:                                                        \
-            OIIO_DASSERT(0 && "bad type");                              \
-            break;                                                      \
-        }                                                               \
-    }
+#define OIIO_DISPATCH_COMMON_TYPES2_CONST(ret,name,func,Rtype,Atype,R,A,...)  \
+    switch (Rtype.basetype) {                                           \
+    case TypeDesc::FLOAT :                                              \
+        OIIO_DISPATCH_COMMON_TYPES2_HELP(ret,name,func,float,Atype,R,A,__VA_ARGS__); \
+        break;                                                          \
+    case TypeDesc::UINT8 :                                              \
+        OIIO_DISPATCH_COMMON_TYPES2_HELP(ret,name,func,unsigned char,Atype,R,A,__VA_ARGS__); \
+        break;                                                          \
+    case TypeDesc::HALF  :                                              \
+        OIIO_DISPATCH_COMMON_TYPES2_HELP(ret,name,func,half,Atype,R,A,__VA_ARGS__); \
+        break;                                                          \
+    case TypeDesc::UINT16:                                              \
+        OIIO_DISPATCH_COMMON_TYPES2_HELP(ret,name,func,unsigned short,Atype,R,A,__VA_ARGS__); \
+        break;                                                          \
+    default: {                                                          \
+        /* other types: punt and convert to float, then copy back */    \
+        ImageBuf Rtmp;                                                  \
+        if ((R).initialized())                                          \
+            Rtmp.copy (R, TypeDesc::FLOAT);                             \
+        OIIO_DISPATCH_COMMON_TYPES2_HELP(ret,name,func,float,Atype,Rtmp,A,__VA_ARGS__); \
+    } }
 
 
 // Helper, do not call from the outside world.
-// This is the the case where we're switching based on the result. Be very
-// stingy about the types directly supported here, for all others, write into
-// a temp float buffer and copy back. Remember that if the result had the same
-// type as both inputs, we wouldn't be here all, so this is already an
-// inefficient case.
-#define OIIO_DISPATCH_COMMON_TYPES3_HELP(ret,name,func,Rtype,Atype,Btype,R,A,B,...) \
+#define OIIO_DISPATCH_COMMON_TYPES3_HELP2(ret,name,func,Rtype,Atype,Btype,R,A,B,...) \
     switch (Rtype.basetype) {                                           \
     case TypeDesc::FLOAT :                                              \
         ret = func<float,Atype,Btype> (R,A,B,__VA_ARGS__); break;       \
@@ -612,114 +504,91 @@ inline bool is_common_pixel_type(TypeDesc t)
         ret = func<half,Atype,Btype> (R,A,B,__VA_ARGS__); break;        \
     case TypeDesc::UINT16:                                              \
         ret = func<unsigned short,Atype,Btype> (R,A,B,__VA_ARGS__); break;  \
-    default:                                                            \
-        OIIO_DASSERT(0 && "bad type");                                  \
+    default: {                                                          \
+        /* other types: punt and convert to float, then copy back */    \
+        ImageBuf Rtmp;                                                  \
+        if ((R).initialized())                                          \
+            Rtmp.copy (R, TypeDesc::FLOAT);                             \
+        ret = func<float,Atype,Btype> (R,A,B,__VA_ARGS__);              \
+        if (ret)                                                        \
+            (R).copy (Rtmp);                                            \
+        else                                                            \
+            (R).errorfmt("{}", Rtmp.geterror());                        \
+        }                                                               \
+    }
+
+// Helper, do not call from the outside world.
+#define OIIO_DISPATCH_COMMON_TYPES3_HELP(ret,name,func,Rtype,Atype,Btype,R,A,B,...) \
+    switch (Btype.basetype) {                                           \
+    case TypeDesc::FLOAT :                                              \
+        OIIO_DISPATCH_COMMON_TYPES3_HELP2(ret,name,func,Rtype,Atype,float,R,A,B,__VA_ARGS__); \
         break;                                                          \
+    case TypeDesc::UINT8 :                                              \
+        OIIO_DISPATCH_COMMON_TYPES3_HELP2(ret,name,func,Rtype,Atype,unsigned char,R,A,B,__VA_ARGS__); \
+        break;                                                          \
+    case TypeDesc::HALF :                                               \
+        OIIO_DISPATCH_COMMON_TYPES3_HELP2(ret,name,func,Rtype,Atype,half,R,A,B,__VA_ARGS__); \
+        break;                                                          \
+    case TypeDesc::UINT16 :                                             \
+        OIIO_DISPATCH_COMMON_TYPES3_HELP2(ret,name,func,Rtype,Atype,unsigned short,R,A,B,__VA_ARGS__); \
+        break;                                                          \
+    default: {                                                          \
+        /* other types: punt and convert to float */                    \
+        ImageBuf Btmp;                                                  \
+        Btmp.copy (B, TypeDesc::FLOAT);                                 \
+        OIIO_DISPATCH_COMMON_TYPES3_HELP2(ret,name,func,Rtype,Atype,float,R,A,Btmp,__VA_ARGS__); \
+        }                                                               \
     }
 
 // Macro to call a type-specialized version func<Rtype,Atype,Btype>(R,A,B,...)
-// the most common type combination. Remaining rare cases will auto-convert to
-// float. Specifically: anything not {float,half,uint8,uint16} is converted
-// to float; if A and B's types don't match, they are converted to float; and
-// if R doesn't either match A and B or is float, then A and B are also
-#define OIIO_DISPATCH_COMMON_TYPES3(ret,name,func,Rtype_,Atype_,Btype_,R,A,B,...)  \
-    {                                                                          \
-        OIIO_ASSERT((R).initialized());                                        \
-        ret       = false;                                                     \
-        auto Rptr = &R;                                                        \
-        auto Aptr = &A;                                                        \
-        auto Bptr = &B;                                                        \
-        ImageBuf Rtmp, Atmp, Btmp;                                             \
-        TypeDesc Rtype = Rtype_, Atype = Atype_, Btype = Btype_;               \
-        if (!ImageBufAlgo::is_common_pixel_type(Atype) || (Atype != Btype && Atype != TypeFloat)) {  \
-            Atype = TypeDesc::FLOAT;                                           \
-            Atmp.copy(A, Atype);                                               \
-            Aptr = &Atmp;                                                      \
-        }                                                                      \
-        if (!ImageBufAlgo::is_common_pixel_type(Btype) || (Atype != Btype && Btype != TypeFloat)) {  \
-            Btype = TypeDesc::FLOAT;                                           \
-            Btmp.copy(B, Btype);                                               \
-            Bptr = &Btmp;                                                      \
-        }                                                                      \
-        OIIO_ASSERT(Atype == Btype);                                           \
-        if (!ImageBufAlgo::is_common_pixel_type(Rtype) || (Rtype != Atype && Rtype != TypeFloat)) {  \
-            Rtype = TypeDesc::FLOAT;                                           \
-            Rtmp.copy(R, Rtype);                                               \
-            Rptr = &Rtmp;                                                      \
-        }                                                                      \
-        OIIO_ASSERT(Rtype == Atype || Rtype == TypeFloat);                     \
+// the most common types, and for all types when all three images have
+// the same type. Remaining rare cases will auto-convert to float.
+#define OIIO_DISPATCH_COMMON_TYPES3(ret,name,func,Rtype,Atype,Btype,R,A,B,...)  \
+    if (Rtype == Atype && Rtype == Btype) {                             \
+        /* All data types, when Rtype == Atype */                       \
         switch (Atype.basetype) {                                       \
         case TypeDesc::FLOAT :                                          \
-            switch (Rtype.basetype) {                                           \
-            case TypeDesc::FLOAT :                                              \
-                ret = func<float,float,float>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break;       \
-            /*case TypeDesc::UINT8 :*/                                              \
-            /*    ret = func<unsigned char,float,float>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break;*/  \
-            /*case TypeDesc::HALF  :*/                                              \
-            /*    ret = func<half,float,float>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break;*/        \
-            /*case TypeDesc::UINT16:*/                                              \
-            /*    ret = func<unsigned short,float,float>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break;*/  \
-            default:                                                            \
-                OIIO_ASSERT(0 && "bad type");                                  \
-                break;                                                          \
-            }                                                           \
+            ret = func<float,float,float> (R, A, B, __VA_ARGS__); break;\
+        case TypeDesc::UINT8 :                                          \
+            ret = func<uint8_t,uint8_t,uint8_t> (R, A, B, __VA_ARGS__); break; \
+        case TypeDesc::UINT16:                                          \
+            ret = func<uint16_t,uint16_t,uint16_t> (R, A, B, __VA_ARGS__); break; \
+        case TypeDesc::HALF  :                                          \
+            ret = func<half,half,half> (R, A, B, __VA_ARGS__); break;   \
+        case TypeDesc::INT8 :                                           \
+            ret = func<char,char,char> (R, A, B, __VA_ARGS__); break;   \
+        case TypeDesc::INT16 :                                          \
+            ret = func<int16_t,int16_t,int16_t> (R, A, B, __VA_ARGS__); break; \
+        case TypeDesc::UINT :                                           \
+            ret = func<uint32_t,uint32_t,uint32_t> (R, A, B, __VA_ARGS__); break; \
+        case TypeDesc::INT :                                            \
+            ret = func<int,int,int> (R, A, B, __VA_ARGS__); break;      \
+        case TypeDesc::DOUBLE :                                         \
+            ret = func<double,double,double> (R, A, B, __VA_ARGS__); break; \
+        default:                                                        \
+            (R).errorfmt("{}: Unsupported pixel data format '{}'", name, Atype); \
+            ret = false;                                                \
+        }                                                               \
+    } else {                                                            \
+        switch (Atype.basetype) {                                       \
+        case TypeDesc::FLOAT :                                          \
+            OIIO_DISPATCH_COMMON_TYPES3_HELP(ret,name,func,Rtype,float,Btype,R,A,B,__VA_ARGS__); \
             break;                                                      \
         case TypeDesc::UINT8 :                                          \
-            switch (Rtype.basetype) {                                           \
-            case TypeDesc::FLOAT :                                              \
-                ret = func<float,uint8_t,uint8_t>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break;       \
-            case TypeDesc::UINT8 :                                              \
-                ret = func<unsigned char,uint8_t,uint8_t>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break;  \
-            /*case TypeDesc::HALF  :*/                                              \
-            /*    ret = func<half,uint8_t,uint8_t>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break;*/        \
-            /*case TypeDesc::UINT16:*/                                              \
-            /*    ret = func<unsigned short,uint8_t,uint8_t>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break;*/  \
-            default:                                                            \
-                OIIO_ASSERT(0 && "bad type");                                  \
-                break;                                                          \
-            }                                                           \
+            OIIO_DISPATCH_COMMON_TYPES3_HELP(ret,name,func,Rtype,unsigned char,Btype,R,A,B,__VA_ARGS__); \
             break;                                                      \
         case TypeDesc::HALF  :                                          \
-            switch (Rtype.basetype) {                                           \
-            case TypeDesc::FLOAT :                                              \
-                ret = func<float,half,half>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break;       \
-            /*case TypeDesc::UINT8 :*/                                              \
-            /*    ret = func<unsigned char,half,half>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break;*/  \
-            case TypeDesc::HALF  :                                              \
-                ret = func<half,half,half>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break;        \
-            /*case TypeDesc::UINT16: */                                             \
-            /*    ret = func<unsigned short,half,half>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break;*/  \
-            default:                                                            \
-                OIIO_ASSERT(0 && "bad type");                                  \
-                break;                                                          \
-            }                                                           \
+            OIIO_DISPATCH_COMMON_TYPES3_HELP(ret,name,func,Rtype,half,Btype,R,A,B,__VA_ARGS__); \
             break;                                                      \
         case TypeDesc::UINT16:                                          \
-            switch (Rtype.basetype) {                                           \
-            case TypeDesc::FLOAT :                                              \
-                ret = func<float,uint16_t,uint16_t>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break;       \
-            /*case TypeDesc::UINT8 :                                              \
-                ret = func<unsigned char,uint16_t,uint16_t>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break; */ \
-            /*case TypeDesc::HALF  :                                              \
-                ret = func<half,uint16_t,uint16_t>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break; */ \
-            case TypeDesc::UINT16:                                              \
-                ret = func<unsigned short,uint16_t,uint16_t>(*Rptr,*Aptr,*Bptr,__VA_ARGS__); break;  \
-            default:                                                            \
-                OIIO_ASSERT(0 && "bad type");                                  \
-                break;                                                          \
-            }                                                           \
+            OIIO_DISPATCH_COMMON_TYPES3_HELP(ret,name,func,Rtype,unsigned short,Btype,R,A,B,__VA_ARGS__); \
             break;                                                      \
         default:                                                        \
-            OIIO_ASSERT(0 && "bad type");                              \
-            break;                                                      \
+            /* other types: punt and convert to float */                \
+            ImageBuf Atmp;                                              \
+            Atmp.copy (A, TypeDesc::FLOAT);                             \
+            OIIO_DISPATCH_COMMON_TYPES3_HELP(ret,name,func,Rtype,float,Btype,R,Atmp,B,__VA_ARGS__); \
         }                                                               \
-        if (Rptr != &(R)) {                                                    \
-            /* If we used Rtmp, copy pixels or errors to the real R */         \
-            if (ret)                                                           \
-                (R).copy(*Rptr, (R).pixeltype());                              \
-            else                                                               \
-                (R).errorfmt("{}", Rptr->geterror());                          \
-        }                                                                      \
     }
 
 
@@ -742,8 +611,8 @@ inline bool is_common_pixel_type(TypeDesc t)
 #define IBA_FIX_PERCHAN_LEN_DEF(av,len)                                 \
     IBA_FIX_PERCHAN_LEN (av, len, 0.0f, av.size() ? av.back() : 0.0f);
 
-
 // clang-format on
+
 
 
 /// Simple image per-pixel unary operation: Given a source image `src`, return

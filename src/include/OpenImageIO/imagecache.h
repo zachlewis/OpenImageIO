@@ -28,7 +28,7 @@
 OIIO_NAMESPACE_BEGIN
 
 // Forward declarations
-class TextureOpt_v2;
+class TextureOpt;
 
 class ImageCachePerThreadInfo;
 class ImageCacheFile;
@@ -128,10 +128,10 @@ public:
     ///           value), any untiled images will be read and cached as if
     ///           they were constructed in tiles of size:
     ///
-    ///           - `autotile * autotile`
-    ///                 if `autoscanline` is 0
-    ///           - `width * autotile`
-    ///                 if `autoscanline` is nonzero.
+    ///               - `autotile * autotile`
+    ///                     if `autoscanline` is 0
+    ///               - `width * autotile`
+    ///                     if `autoscanline` is nonzero.
     ///
     ///           In both cases, this should lead more efficient caching.
     ///           The `autoscanline` determines whether the "virtual tiles"
@@ -520,13 +520,13 @@ public:
     /// or for alternate IC implementations.) The opaque pointer `thread_info`
     /// is thread-specific information returned by `get_perthread_info()`.
     ImageHandle* get_image_handle(ustring filename,
-                                  Perthread* thread_info       = nullptr,
-                                  const TextureOpt_v2* options = nullptr);
+                                  Perthread* thread_info    = nullptr,
+                                  const TextureOpt* options = nullptr);
 
     /// Get an ImageHandle using a UTF-16 encoded wstring filename.
     ImageHandle* get_image_handle(const std::wstring& filename,
-                                  Perthread* thread_info       = nullptr,
-                                  const TextureOpt_v2* options = nullptr)
+                                  Perthread* thread_info    = nullptr,
+                                  const TextureOpt* options = nullptr)
     {
         return get_image_handle(ustring(Strutil::utf16_to_utf8(filename)),
                                 thread_info, options);
@@ -752,15 +752,14 @@ public:
     bool get_imagespec(ImageHandle* file, Perthread* thread_info,
                        ImageSpec& spec, int subimage = 0);
 
-    /// DEPRECATED(3.0) old API. Note that the miplevel and native parameters
-    /// are ignored: it will always get the native spec of miplevel 0. We
-    /// recommend switching to the new API.
+    /// DEPRECATED old API. Note that the miplevel and native parameters are ignored:
+    /// it will always get the native spec of miplevel 0. We recommend switching to
+    /// the new API.
     bool get_imagespec(ustring filename, ImageSpec& spec, int subimage,
                        int miplevel, bool native = false)
     {
         return get_imagespec(filename, spec, subimage);
     }
-    /// DEPRECATED(3.0) old API.
     bool get_imagespec(ImageHandle* file, Perthread* thread_info,
                        ImageSpec& spec, int subimage, int miplevel,
                        bool native = false)
@@ -802,15 +801,14 @@ public:
     const ImageSpec* imagespec(ImageHandle* file, Perthread* thread_info,
                                int subimage = 0);
 
-    /// DEPRECATED(3.0) old API. Note that the miplevel and native parameters
-    /// are ignored: it will always get the native spec of miplevel 0. We
-    /// recommend switching to the new API.
+    /// DEPRECATED old API. Note that the miplevel and native parameters are ignored:
+    /// it will always get the native spec of miplevel 0. We recommend switching to
+    /// the new API.
     const ImageSpec* imagespec(ustring filename, int subimage, int miplevel,
                                bool native = false)
     {
         return imagespec(filename, subimage);
     }
-    /// DEPRECATED(3.0) old API.
     const ImageSpec* imagespec(ImageHandle* file, Perthread* thread_info,
                                int subimage, int miplevel, bool native = false)
     {

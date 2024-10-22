@@ -81,7 +81,7 @@ structure:
   This will be ignored if the file does not have multiple subimages or
   separate per-face textures.
 
-- `Tex::Wrap swrap, twrap` :
+- `Wrap swrap, twrap` :
   Specify the *wrap mode* for 2D texture lookups (and 3D volume texture
   lookups, using the additional `rwrap` field).  These fields are ignored
   for shadow and environment lookups. These specify what happens when
@@ -89,20 +89,20 @@ structure:
   which the texture is defined. `Wrap` is an enumerated type that may take
   on any of the following values:
 
-    - `Wrap::Black` : The texture is black outside the [0,1] range.
+    - `WrapBlack` : The texture is black outside the [0,1] range.
 
-    - `Wrap::Clamp` : The texture coordinates will be clamped to [0,1], i.e.,
+    - `WrapClamp` : The texture coordinates will be clamped to [0,1], i.e.,
       the value outside [0,1] will be the same as the color at the nearest
       point on the border.
 
-    - `Wrap::Periodic` : The texture is periodic, i.e., wraps back to 0 after
+    - `WrapPeriodic` : The texture is periodic, i.e., wraps back to 0 after
       going past 1.
 
-    - `Wrap::Mirror` : The texture presents a mirror image at the edges, i.e.,
+    - `WrapMirror` : The texture presents a mirror image at the edges, i.e.,
       the coordinates go from 0 to 1, then back down to 0, then back up to
       1, etc.
 
-    - `Wrap::Default` : Use whatever wrap might be specified in the texture
+    - `WrapDefault` : Use whatever wrap might be specified in the texture
       file itself, or some other suitable default (caveat emptor).
 
   The wrap mode does not need to be identical in the `s` and `t`
@@ -140,45 +140,50 @@ structure:
   will return `false`. Note: When not NULL, the data must point to
   `nchannels` contiguous floats.
 
-- `Tex::Wrap rwrap, float rblur, rwidth` :
+..
+  - `float bias` :
+  For shadow map lookups only, this gives the "shadow bias" amount.
+
+..
+  - `int samples` :
+  For shadow map lookups only, the number of samples to use for the lookup.
+
+- `Wrap rwrap, float rblur, rwidth` :
   Specifies wrap, blur, and width for the third component of 3D volume
   texture lookups.  These are not used for 2D texture or environment
   lookups.
 
-- `Tex::MipMode mipmode` :
-  Determines if/how MIP-maps are used. The enum value are:
+- `MipMode mipmode` :
+  Determines if/how MIP-maps are used:
 
-    - `MipMode::Default`   : The default high-quality lookup (same as Aniso).
+    - `MipModeDefault`   : The default high-quality lookup (same as Aniso).
 
-    - `MipMode::NoMIP`     : Just use highest-res image, no MIP mapping
+    - `MipModeNoMIP`     : Just use highest-res image, no MIP mapping
 
-    - `MipMode::OneLevel`  : Use just one mipmap level
+    - `MipModeOneLevel`  : Use just one mipmap level
 
-    - `MipMode::Trilinear` : Use two MIPmap levels (trilinear)
+    - `MipModeTrilinear` : Use two MIPmap levels (trilinear)
 
-    - `MipMode::Aniso`     : Use two MIPmap levels w/ anisotropic
+    - `MipModeAniso`     : Use two MIPmap levels w/ anisotropic
 
-- `Tex::InterpMode interpmode` :
+- `InterpMode interpmode` :
   Determines how we sample within a mipmap level:
 
-    - `InterpMode::Closest`      : Force closest texel.
+    - `InterpClosest`      : Force closest texel.
 
-    - `InterpMode::Bilinear`     : Force bilinear lookup within a mip level.
+    - `InterpBilinear`     : Force bilinear lookup within a mip level.
 
-    - `InterpMode::Bicubic`      : Force cubic lookup within a mip level.
+    - `InterpBicubic`      : Force cubic lookup within a mip level.
 
-    - `InterpMode::SmartBicubic` : Bicubic when maxifying, else bilinear (default).
+    - `InterpSmartBicubic` : Bicubic when maxifying, else bilinear (default).
 
-- `uint16_t anisotropic` :
+- `int anisotropic` :
   Maximum anisotropic ratio (default: 32).
 
 - `bool conservative_filter` :
   When true (the default), filters conservatively in a way that chooses to
   sometimes over-blur rather than alias.
 
-- `int colortransformid` :
-   If non-zero, specifies a color transformation to apply to the texels, a
-   handle to a transform retrerieved `TextureSystem::get_colortransform_id()`.
 
 
 

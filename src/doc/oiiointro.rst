@@ -220,9 +220,11 @@ Acknowledgments
 
 OpenImageIO incorporates, depends upon, or dynamically links against several
 other open source packages, detailed below. These other packages are all
-distributed under licenses that allow them to be used by OpenImageIO. Any
-omissions or inaccuracies in this list are inadvertent and will be fixed if
-pointed out.
+distributed under licenses that allow them to be used by OpenImageIO. Where not
+specifically noted, they are all using the same BSD license that OpenImageIO
+uses. Any omissions or inaccuracies in this list are inadvertent and will be
+fixed if pointed out. The full original licenses can be found in the
+relevant parts of the source code.
 
 OpenImageIO incorporates, distributes, or contains derived works of:
 

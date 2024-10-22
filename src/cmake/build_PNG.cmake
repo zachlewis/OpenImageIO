@@ -15,7 +15,7 @@ set_cache (PNG_BUILD_SHARED_LIBS ${LOCAL_BUILD_SHARED_LIBS_DEFAULT}
 
 string (MAKE_C_IDENTIFIER ${PNG_BUILD_VERSION} PNG_VERSION_IDENT)
 
-build_dependency_with_cmake(PNG
+build_dependency_with_fetchcontent (PNG
     VERSION         ${PNG_BUILD_VERSION}
     GIT_REPOSITORY  ${PNG_GIT_REPOSITORY}
     GIT_TAG         ${PNG_GIT_TAG}
@@ -29,17 +29,17 @@ build_dependency_with_cmake(PNG
         -D CMAKE_INSTALL_LIBDIR=lib
     )
 
+    
+set (PNG_REFIND TRUE)
+set (PNG_REFIND_VERSION ${PNG_BUILD_VERSION})
 
 if (PNG_BUILD_VERSION VERSION_LESS 1.6.44)
-    set (PNG_DIR ${PNG_LOCAL_INSTALL_DIR}/lib/libpng/libpng16)
+    set (PNG_REFIND_ARGS EXACT REQUIRED)
 else ()
     set (PNG_DIR ${PNG_LOCAL_INSTALL_DIR}/lib/cmake/PNG)
+    #set (PNG_REFIND_ARGS EXACT CONFIG REQUIRED)
 endif ()
 
-find_package(PNG ${PNG_BUILD_VERSION} REQUIRED
-             PATHS "${PNG_LOCAL_INSTALL_DIR}" "${PNG_DIR}"
-             NO_DEFAULT_PATH)
-
 if (PNG_BUILD_SHARED_LIBS)
-    install_local_dependency_libs (PNG png16)
+    install_local_dependency_libs (PNG png)
 endif ()

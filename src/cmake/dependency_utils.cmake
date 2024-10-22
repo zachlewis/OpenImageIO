@@ -584,6 +584,124 @@ macro (build_dependency_with_cmake pkgname)
 endmacro ()
 
 
+# Helper to build a CMake-based dependency with FetchContent_Populate.
+# Given a package name, git repo and tag, and optional cmake args, it will
+# clone the repo into the surrounding project's build area, configures, and 
+# builds it, and installs it into a special dist area (unless the NOINSTALL 
+# option is given).
+#
+# After running, it leaves the following variables set:
+#   ${pkgname}_LOCAL_SOURCE_DIR
+#   ${pkgname}_LOCAL_BUILD_DIR
+#   ${pkgname}_LOCAL_INSTALL_DIR
+#
+# Unless NOINSTALL is specified, the after the installation step, the
+# installation directory will be added to the CMAKE_PREFIX_PATH and also will
+# be stored in the ${pkgname}_ROOT variable.
+macro (build_dependency_with_fetchcontent pkgname)
+    cmake_parse_arguments(_pkg   # prefix
+        # noValueKeywords:
+        "NOINSTALL"
+        # singleValueKeywords:
+        "GIT_REPOSITORY;GIT_TAG;VERSION"
+        # multiValueKeywords:
+        "CMAKE_ARGS"
+        # argsToParse:
+        ${ARGN})
+
+    message (STATUS "Building local ${pkgname} ${_pkg_VERSION} using FetchContent from ${_pkg_GIT_REPOSITORY}")
+
+    include (FetchContent)
+    # Set the build and install directories for the dependency
+    set (${pkgname}_LOCAL_SOURCE_DIR "${${PROJECT_NAME}_LOCAL_DEPS_ROOT}/${pkgname}")
+    set (${pkgname}_LOCAL_BUILD_DIR "${${PROJECT_NAME}_LOCAL_DEPS_ROOT}/${pkgname}-build")
+    set (${pkgname}_LOCAL_INSTALL_DIR "${${PROJECT_NAME}_LOCAL_DEPS_ROOT}/dist")
+
+    set (_fetchcontent_args "")
+    if (CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+        set (_fetchcontent_args OVERRIDE_FIND_PACKAGE)
+    endif ()
+    
+    # Define the dependency using FetchContent_Declare
+    FetchContent_Declare (
+        ${pkgname}
+        GIT_REPOSITORY ${_pkg_GIT_REPOSITORY}
+        GIT_TAG ${_pkg_GIT_TAG}
+        SOURCE_DIR ${${pkgname}_LOCAL_SOURCE_DIR}
+        ${_fetchcontent_args}
+    )
+
+    # Configure CMake arguments for the dependency
+    set (${pkgname}_CMAKE_ARGS
+        -DCMAKE_INSTALL_PREFIX=${${pkgname}_LOCAL_INSTALL_DIR}
+        -DCMAKE_BUILD_TYPE=${${PROJECT_NAME}_DEPENDENCY_BUILD_TYPE}
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DCMAKE_MESSAGE_INDENT="        "
+        -DCMAKE_INSTALL_LIBDIR=lib
+        ${_pkg_CMAKE_ARGS}
+    )
+
+    if (${PROJECT_NAME}_DEPENDENCY_BUILD_VERBOSE)
+        list (APPEND ${pkgname}_CMAKE_ARGS
+            -DCMAKE_VERBOSE_MAKEFILE=ON
+            -DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE
+            -DCMAKE_RULE_MESSAGES=ON
+        )
+    else ()
+        list (APPEND ${pkgname}_CMAKE_ARGS
+            -DCMAKE_VERBOSE_MAKEFILE=OFF
+            -DCMAKE_MESSAGE_LOG_LEVEL=ERROR
+            -DCMAKE_RULE_MESSAGES=OFF
+            -Wno-dev
+        )
+    endif ()
+
+    # Configure and build the dependency
+    FetchContent_GetProperties (${pkgname})
+    if (NOT ${pkgname}_POPULATED)
+        FetchContent_Populate (${pkgname})
+        # Configure the dependency
+        execute_process (
+            COMMAND ${CMAKE_COMMAND} -S ${${pkgname}_LOCAL_SOURCE_DIR} -B ${${pkgname}_LOCAL_BUILD_DIR} ${${pkgname}_CMAKE_ARGS}
+            RESULT_VARIABLE _result
+            OUTPUT_VARIABLE _output
+            ERROR_VARIABLE _error
+        )
+        if (NOT _result EQUAL 0)
+            message (FATAL_ERROR "Configuration of ${pkgname} failed: ${_error}")
+        endif ()
+
+        # Build the dependency
+        execute_process (
+            COMMAND ${CMAKE_COMMAND} --build ${${pkgname}_LOCAL_BUILD_DIR} --config ${${PROJECT_NAME}_DEPENDENCY_BUILD_TYPE}
+            RESULT_VARIABLE _build_result
+            OUTPUT_VARIABLE _build_output
+            ERROR_VARIABLE _build_error
+        )
+        if (NOT _build_result EQUAL 0)
+            message (FATAL_ERROR "Build of ${pkgname} failed: ${_build_error}")
+        endif ()
+
+        # If NOINSTALL is not specified, install the dependency
+        if (NOT _pkg_NOINSTALL)
+            execute_process (
+                COMMAND ${CMAKE_COMMAND} --build ${${pkgname}_LOCAL_BUILD_DIR} --config ${${PROJECT_NAME}_DEPENDENCY_BUILD_TYPE} --target install
+                RESULT_VARIABLE _install_result
+                OUTPUT_VARIABLE _install_output
+                ERROR_VARIABLE _install_error
+            )
+            if (NOT _install_result EQUAL 0)
+                message (FATAL_ERROR "Installation of ${pkgname} failed: ${_install_error}")
+            endif()
+
+            # Add the install directory to CMAKE_PREFIX_PATH
+            list (INSERT CMAKE_PREFIX_PATH 0 ${${pkgname}_LOCAL_INSTALL_DIR})
+            set (${pkgname}_ROOT ${${pkgname}_LOCAL_INSTALL_DIR})
+        endif ()
+    endif ()
+endmacro ()
+
+
 # Copy libraries from a locally-built dependency into our own install area.
 # This is useful for dynamic libraries that we need to be part of our own
 # installation.

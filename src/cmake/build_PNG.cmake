@@ -18,6 +18,7 @@ string (MAKE_C_IDENTIFIER ${PNG_BUILD_VERSION} PNG_VERSION_IDENT)
 unset (PNG_FOUND)
 unset (PNG_LIBRARIES)
 unset (PNG_INCLUDE_DIRS)
+unset (PNG_INCLUDE_DIR)
 
 build_dependency_with_fetchcontent (PNG
     VERSION         ${PNG_BUILD_VERSION}

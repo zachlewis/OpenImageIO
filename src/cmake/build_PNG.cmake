@@ -30,15 +30,19 @@ build_dependency_with_fetchcontent (PNG
     )
 
     
-set (PNG_REFIND TRUE)
+set (PNG_REFIND FALSE)
 set (PNG_REFIND_VERSION ${PNG_BUILD_VERSION})
 
-if (PNG_BUILD_VERSION VERSION_LESS 1.6.44)
-    set (PNG_REFIND_ARGS EXACT REQUIRED)
-else ()
-    set (PNG_DIR ${PNG_LOCAL_INSTALL_DIR}/lib/cmake/PNG)
-    #set (PNG_REFIND_ARGS EXACT CONFIG REQUIRED)
+
+set (PNG_REFIND_ARGS EXACT REQUIRED)
+
+
+if (PNG_BUILD_VERSION VERSION_GREATER 1.6.43)
+    list (APPEND PNG_REFIND_ARGS CONFIG)
 endif ()
+
+
+find_package(PNG ${PNG_REFIND_VERSION} ${PNG_REFIND_ARGS})
 
 if (PNG_BUILD_SHARED_LIBS)
     install_local_dependency_libs (PNG png)

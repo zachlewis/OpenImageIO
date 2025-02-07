@@ -95,6 +95,10 @@ ifneq (${LINKSTATIC},)
 MY_CMAKE_FLAGS += -DLINKSTATIC:BOOL=${LINKSTATIC}
 endif
 
+ifneq (${OIIO_IGNORE_HOMEBREWED_DEPS},)
+MY_CMAKE_FLAGS += -DOIIO_IGNORE_HOMEBREWED_DEPS:BOOL=${OIIO_IGNORE_HOMEBREWED_DEPS}
+endif
+
 ifneq (${OIIO_BUILD_TOOLS},)
 MY_CMAKE_FLAGS += -DOIIO_BUILD_TOOLS:BOOL=${OIIO_BUILD_TOOLS}
 endif
@@ -378,7 +382,7 @@ help:
 	@echo "      USE_NUKE=0               Don't build Nuke plugins"
 	@echo "      Nuke_ROOT=path           Custom Nuke installation"
 	@echo "      NUKE_VERSION=ver         Custom Nuke version"
-	@echo "      IGNORE_HOMEBREWED_DEPS=1 Don't use dependencies installed by Homebrew"
+	@echo "      OIIO_IGNORE_HOMEBREWED_DEPS=1 Don't use dependencies installed by Homebrew"
 	@echo "  OIIO build-time options:"
 	@echo "      INSTALL_PREFIX=path      Set installation prefix (default: ./${INSTALL_PREFIX})"
 	@echo "      NAMESPACE=name           Override namespace base name (default: OpenImageIO)"

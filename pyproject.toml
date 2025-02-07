@@ -106,7 +106,7 @@ skip = [
 test-command = "oiiotool --buildinfo"
 
 [tool.cibuildwheel.macos.environment]
-SKBUILD_CMAKE_ARGS = "-DLINKSTATIC=1; -DIGNORE_HOMEBREWED_DEPS=1"
+SKBUILD_CMAKE_ARGS = "-DLINKSTATIC=1; -DOIIO_IGNORE_HOMEBREWED_DEPS=1"
 # C++17 - std::filesystem is only available in macOS 10.15 and later; ARM compatibility introduced in 11.
 MACOSX_DEPLOYMENT_TARGET = "11"
 # Optimize for size (not speed).

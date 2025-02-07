@@ -181,8 +181,8 @@ include (compiler)
 # Dependency finding utilities and all dependency-related options
 include (dependency_utils)
 
-option (IGNORE_HOMEBREWED_DEPS "If ON, will ignore homebrew-installed dependencies" OFF)
-if (IGNORE_HOMEBREWED_DEPS)
+option (OIIO_IGNORE_HOMEBREWED_DEPS "If ON, will ignore homebrew-installed dependencies" OFF)
+if (OIIO_IGNORE_HOMEBREWED_DEPS)
     # Define the list of prefixes to ignore
     set (HOMEBREW_PREFIXES
          /opt/homebrew

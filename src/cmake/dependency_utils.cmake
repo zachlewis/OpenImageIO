@@ -30,7 +30,7 @@ if (MSVC)
     # I haven't been able to get Windows local dependency builds to work with
     # static libraries, so default to shared libraries on Windows until we can
     # figure it out.
-    set_cache (LOCAL_BUILD_SHARED_LIBS_DEFAULT ON
+    set_cache (LOCAL_BUILD_SHARED_LIBS_DEFAULT OFF #ON
                DOC "Should a local dependency build, if necessary, build shared libraries" ADVANCED)
 else ()
     # On non-Windows, default to static libraries for local builds.

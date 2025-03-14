@@ -27,9 +27,16 @@ set_cache (${PROJECT_NAME}_DEPENDENCY_BUILD_TYPE ${CMAKE_BUILD_TYPE}
 set_option (${PROJECT_NAME}_DEPENDENCY_BUILD_VERBOSE
             "Make dependency builds extra verbose" OFF)
 if (MSVC)
+    # On Windows, we want to link the static CRT unless we're in Debug mode,
+    set_cache (CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:DebugDLL>"
+    DOC "Whether to link the static or dynamic CRT" ADVANCED)
+
     # I haven't been able to get Windows local dependency builds to work with
     # static libraries, so default to shared libraries on Windows until we can
     # figure it out.
+    #
+    # In particular, the OpenEXR / IlmBase / IMath dependencies seem to cause trouble
+    # when built as static libraries.
     set_cache (LOCAL_BUILD_SHARED_LIBS_DEFAULT ON
                DOC "Should a local dependency build, if necessary, build shared libraries" ADVANCED)
 else ()

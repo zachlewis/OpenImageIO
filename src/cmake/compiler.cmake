@@ -189,6 +189,8 @@ if (MSVC)
     # Microsoft specific options
     add_compile_options (/W1)
     add_compile_options (/MP)
+    # https://github.com/AcademySoftwareFoundation/OpenImageIO/issues/4641#issuecomment-2725013661
+    add_compile_definitions (_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
     add_compile_definitions (_CRT_SECURE_NO_DEPRECATE)
     add_compile_definitions (_CRT_SECURE_NO_WARNINGS)
     add_compile_definitions (_CRT_NONSTDC_NO_WARNINGS)

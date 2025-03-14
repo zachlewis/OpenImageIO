@@ -4,6 +4,10 @@
 
 cmake_minimum_required (VERSION 3.18.2)
 
+# Use CMAKE_MSVC_RUNTIME_LIBRARY for all projects targeting MSVC
+# https://cmake.org/cmake/help/latest/variable/CMAKE_MSVC_RUNTIME_LIBRARY.html
+cmake_policy(SET CMP0091 NEW)
+
 set (OpenImageIO_VERSION "3.1.0.0")
 set (OpenImageIO_VERSION_OVERRIDE "" CACHE STRING
      "Version override (use with caution)!")

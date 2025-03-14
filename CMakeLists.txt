@@ -12,14 +12,6 @@ if (OpenImageIO_VERSION_OVERRIDE)
     set (OpenImageIO_VERSION ${OpenImageIO_VERSION_OVERRIDE})
 endif ()
 
-# Use CMAKE_MSVC_RUNTIME_LIBRARY for all projects targeting MSVC
-# https://cmake.org/cmake/help/latest/variable/CMAKE_MSVC_RUNTIME_LIBRARY.html
-cmake_policy(SET CMP0091 NEW)
-if (SKBUILD)
-    # Make sure wheels builds statically link the runtime.
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:DebugDLL>" CACHE STRING "")
-endif ()
-
 project (OpenImageIO VERSION ${OpenImageIO_VERSION}
          HOMEPAGE_URL "https://openimageio.org"
          LANGUAGES CXX C)

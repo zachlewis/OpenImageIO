@@ -628,10 +628,6 @@ macro (build_dependency_with_cmake pkgname)
         string(REPLACE ";" "\\;" CMAKE_IGNORE_PATH_ESCAPED "${CMAKE_IGNORE_PATH}")
         list(APPEND _pkg_CMAKE_ARGS "-DCMAKE_IGNORE_PATH=${CMAKE_IGNORE_PATH_ESCAPED}")
     endif()
-    if (MSVC)
-        list(APPEND _pkg_CMAKE_ARGS "-DCMAKE_MSVC_RUNTIME_LIBRARY=${CMAKE_MSVC_RUNTIME_LIBRARY}")
-    endif ()
-    # Make sure to inherit CMAKE_MSVC_RUNTIME_LIBRARY
 
     execute_process (COMMAND
         ${CMAKE_COMMAND}

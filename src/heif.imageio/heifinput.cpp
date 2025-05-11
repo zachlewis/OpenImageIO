@@ -36,7 +36,7 @@ public:
     const char* format_name(void) const override { return "heif"; }
     int supports(string_view feature) const override
     {
-        return feature == "exif";
+        return (feature == "exif" || feature == "cicp");
     }
     bool valid_file(const std::string& filename) const override;
     bool open(const std::string& name, ImageSpec& newspec) override;
@@ -371,6 +371,15 @@ HeifInput::seek_subimage(int subimage, int miplevel)
     }
 
     m_subimage = subimage;
+
+    if (m_himage.has_nclx_color_profile()) {
+        heif_color_profile_nclx nclx = {};
+        if (m_himage.get_nclx_color_profile(nclx) == heif_error_Ok) {
+            m_spec.set_cicp(nclx.color_primaries, nclx.transfer_characteristics,
+                      nclx.matrix_coefficients, nclx.full_range_flag);
+        }
+    }
+
     return true;
 }
 

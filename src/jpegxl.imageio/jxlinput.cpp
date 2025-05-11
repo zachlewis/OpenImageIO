@@ -36,7 +36,7 @@ public:
     const char* format_name(void) const override { return "jpegxl"; }
     int supports(string_view feature) const override
     {
-        return (feature == "exif" || feature == "ioproxy");
+        return (feature == "exif" || feature == "ioproxy" || feature == "cicp");
     }
     bool valid_file(Filesystem::IOProxy* ioproxy) const override;
 
@@ -345,6 +345,14 @@ JxlInput::open(const std::string& name, ImageSpec& newspec)
     }
 
     m_spec = ImageSpec(info.xsize, info.ysize, m_channels, m_data_type);
+
+    // Store CICP color profile as oiio:CICP attribute if present
+    if (!info.uses_original_profile) {
+        m_spec.set_cicp(info.color_encoding.primaries,
+                  info.color_encoding.transfer_function,
+                  info.color_encoding.matrix_coefficients,
+                  info.color_encoding.range == JXL_RANGE_FULL);
+    }
 
     newspec = m_spec;
     return true;

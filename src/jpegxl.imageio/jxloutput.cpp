@@ -29,7 +29,7 @@ public:
     {
         return (feature == "alpha" || feature == "nchannels"
                 || feature == "exif" || feature == "ioproxy"
-                || feature == "tiles");
+                || feature == "tiles" || feature == "cicp");
     }
     bool open(const std::string& name, const ImageSpec& spec,
               OpenMode mode = Create) override;
@@ -263,6 +263,18 @@ JxlOutput::open(const std::string& name, const ImageSpec& newspec,
                       << m_spec.get_float_attribute("jpegxl:photon_noise_iso",
                                                     0.0f)
                       << "\n";
+    }
+
+    // Set CICP color profile from oiio:CICP if present
+    auto* cicp = m_spec.find_attribute("oiio:CICP", TypeDesc(TypeDesc::UINT8, 4));
+    if (cicp && cicp->type() == TypeDesc(TypeDesc::UINT8, 4) && cicp->nvalues() == 4) {
+        const uint8_t* vals = static_cast<const uint8_t*>(cicp->data());
+        m_basic_info.uses_original_profile = JXL_FALSE;
+        m_basic_info.color_encoding.color_space = JXL_COLOR_SPACE_RGB;
+        m_basic_info.color_encoding.primaries = vals[0];
+        m_basic_info.color_encoding.transfer_function = vals[1];
+        m_basic_info.color_encoding.matrix_coefficients = vals[2];
+        m_basic_info.color_encoding.range = vals[3] ? JXL_RANGE_FULL : JXL_RANGE_LIMITED;
     }
 
     // Codestream level should be chosen automatically given the settings

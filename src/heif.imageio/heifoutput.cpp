@@ -19,7 +19,8 @@ public:
     const char* format_name(void) const override { return "heif"; }
     int supports(string_view feature) const override
     {
-        return feature == "alpha" || feature == "exif" || feature == "tiles";
+        return feature == "alpha" || feature == "exif" || feature == "tiles" ||
+               feature == "cicp";
     }
     bool open(const std::string& name, const ImageSpec& spec,
               OpenMode mode) override;
@@ -177,6 +178,26 @@ HeifOutput::close()
         ok &= write_scanlines(m_spec.y, m_spec.y + m_spec.height, 0,
                               m_spec.format, &m_tilebuffer[0]);
         std::vector<unsigned char>().swap(m_tilebuffer);
+    }
+
+    // Use the oiio:CICP attribute to set the nclx color profile.
+    {
+        auto* p = m_spec.find_attribute("oiio:CICP", TypeDesc(TypeDesc::UINT8, 4));
+        if (p && p->type() == TypeDesc(TypeDesc::UINT8, 4) && p->nvalues() == 4) {
+            const uint8_t* vals = static_cast<const uint8_t*>(p->data());
+            heif_color_profile_nclx nclx = {};
+            nclx.color_primaries = vals[0];
+            nclx.transfer_characteristics = vals[1];
+            nclx.matrix_coefficients = vals[2];
+            nclx.full_range_flag = vals[3] ? 1 : 0;
+            try {
+                m_himage.set_nclx_color_profile(nclx);
+            } catch (const heif::Error& err) {
+                std::string e = err.get_message();
+                errorfmt("Failed to set NCLX color profile: {}", e.empty() ? "unknown exception" : e.c_str());
+                ok = false;
+            }
+        }
     }
 
     std::vector<char> exifblob;

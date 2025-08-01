@@ -107,6 +107,7 @@ skip = [
     "*musllinux*",  
 ]
 test-command = "oiiotool --buildinfo"
+repair-wheel-command = "uv run --no-project -w 'repairwheel~=0.3.1' repairwheel {wheel} -o {dest_dir}"
 
 [tool.cibuildwheel.macos.environment]
 SKBUILD_CMAKE_ARGS = "-DLINKSTATIC=1; -DIGNORE_HOMEBREWED_DEPS=1"

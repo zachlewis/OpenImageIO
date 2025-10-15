@@ -113,6 +113,7 @@ skip = [
     # Skip free-threading builds
     "cp3??t-*",
 ]
+enable = ["pypy"]
 test-command = "oiiotool --buildinfo"
 
 [tool.cibuildwheel.macos.environment]

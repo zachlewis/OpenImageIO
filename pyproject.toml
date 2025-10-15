@@ -79,6 +79,8 @@ LINKSTATIC = "1"
 # Standardize the install directory for libraries, as expected by
 # other parts of the wheels build process.
 CMAKE_INSTALL_LIBDIR = "lib"
+# Always build TIFF -- workaround for #4439
+OpenImageIO_BUILD_LOCAL_DEPS="TIFF"
 
 # Dynamically set the package version metadata by pasrsing CMakeLists.txt.
 [tool.scikit-build.metadata.version]

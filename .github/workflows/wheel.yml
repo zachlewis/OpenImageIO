@@ -94,30 +94,12 @@ jobs:
           # -------------------------------------------------------------------
           # CPython 64 bits manylinux_2_28
           # -------------------------------------------------------------------
-          - build: CPython 3.9 64 bits manylinux_2_28
+          - build: CPython 64 bits manylinux_2_28
             manylinux: manylinux_2_28
-            python: cp39-manylinux_x86_64
             arch: x86_64
-          - build: CPython 3.10 64 bits manylinux_2_28
-            manylinux: manylinux_2_28
-            python: cp310-manylinux_x86_64
-            arch: x86_64
-          - build: CPython 3.11 64 bits manylinux_2_28
-            manylinux: manylinux_2_28
-            python: cp311-manylinux_x86_64
-            arch: x86_64
-          - build: CPython 3.12 64 bits manylinux_2_28
-            manylinux: manylinux_2_28
-            python: cp312-manylinux_x86_64
-            arch: x86_64
-          - build: CPython 3.13 64 bits manylinux_2_28
-            manylinux: manylinux_2_28
-            python: cp313-manylinux_x86_64
-            arch: x86_64
-          - build: CPython 3.14 64 bits manylinux_2_28
-            manylinux: manylinux_2_28
-            python: cp314-manylinux_x86_64
-            arch: x86_64
+            # pythons: cp39-* py*
+            # build_id: manylinux_2_28-x86_64
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -130,8 +112,8 @@ jobs:
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.ccache
-          key: wheel-${{runner.os}}-${{matrix.manylinux}}-${{matrix.python}}
-          restore-keys: wheel-${{runner.os}}-${{matrix.manylinux}}-${{matrix.python}}
+          key: wheel-${{runner.os}}-${{matrix.manylinux}}
+          restore-keys: wheel-${{runner.os}}-${{matrix.manylinux}}
 
       - name: Build wheels
         # Note: the version of cibuildwheel should be kept in sync with src/python/stubs/CMakeLists.txt
@@ -142,7 +124,7 @@ jobs:
           CIBW_ENVIRONMENT_PASS_LINUX: GITHUB_ACTIONS
           CIBW_BEFORE_ALL: "source src/build-scripts/build_ccache.bash && pwd && ext/dist/bin/ccache --max-size=200M && ext/dist/bin/ccache -sv && export CMAKE_C_COMPILER_LAUNCHER=/project/ext/dist/bin/ccache CMAKE_CXX_COMPILER_LAUNCHER=/project/ext/dist/bin/ccache"
           CIBW_BEFORE_TEST: "ext/dist/bin/ccache -s"
-          CIBW_BUILD: ${{ matrix.python }}
+          # CIBW_BUILD: ${{ matrix.pythons }}  # Use the cibuildwheel settings in pyproject.toml to contorl which python versions are included / omitted
           CIBW_ARCHS: ${{ matrix.arch }}
           CIBW_MANYLINUX_X86_64_IMAGE: ${{ matrix.manylinux }}
           CIBW_ENVIRONMENT: >
@@ -164,23 +146,23 @@ jobs:
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.ccache
-          key: wheel-${{runner.os}}-${{matrix.manylinux}}-${{matrix.python}}
+          key: wheel-${{runner.os}}-${{matrix.manylinux}}
 
       - uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
         with:
-          name: cibw-wheels-${{matrix.manylinux}}-${{ matrix.python }}-${{ matrix.manylinux }}
+          name: cibw-wheels-${{matrix.manylinux}}-${{ matrix.arch }}
           path: |
             ./wheelhouse/*.whl
-
+      
       - uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
         with:
-          name: stubs-${{ matrix.python }}-${{ matrix.manylinux }}
+          name: stubs-${{ matrix.manylinux }}-${{ matrix.arch }}
           path: |
             ./wheelhouse/OpenImageIO/__init__.pyi
-        # if stub validation fails we want to upload the stubs for users to review.
-        # keep the python build in sync with the version specified in tool.cibuildwheel.overrides 
-        # section of pyproject.toml
-        if: always() && contains(matrix.python, 'cp311-manylinux')
+        # If stub validation fails we want to upload the stubs for users to review.
+        # This step presumes that the wheels were built for cp311 within this job, and
+        # that, as a result, stubs were generated and dumped to the above path
+        # see the tool.cibuildwheel.overrides section of pyproject.toml for details.
 
   # ---------------------------------------------------------------------------
   # Linux ARM Wheels
@@ -298,25 +280,15 @@ jobs:
           # -------------------------------------------------------------------
           # CPython 64 bits
           # -------------------------------------------------------------------
-          - build: CPython 3.9 64 bits
-            python: cp39-macosx_x86_64
+          - build: CPython 64 bits
+            pythons: cp39-* cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*
+            build_id: cp-macosx_x86_64
             arch: x86_64
-          - build: CPython 3.10 64 bits
-            python: cp310-macosx_x86_64
+          - build: PyPy 64 bits
+            pythons: py*
             arch: x86_64
-          - build: CPython 3.11 64 bits
-            python: cp311-macosx_x86_64
-            arch: x86_64
-          - build: CPython 3.12 64 bits
-            python: cp312-macosx_x86_64
-            arch: x86_64
-          - build: CPython 3.13 64 bits
-            python: cp313-macosx_x86_64
-            arch: x86_64
-          - build: CPython 3.14 64 bits
-            python: cp314-macosx_x86_64
-            arch: x86_64
-
+            build_id: pypy-macosx_x86_64
+          
     steps:
       - name: Checkout repo
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -329,8 +301,8 @@ jobs:
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.ccache
-          key: wheel-${{runner.os}}-${{matrix.python}}
-          restore-keys: wheel-${{runner.os}}-${{matrix.python}}
+          key: wheel-${{matrix.build_id}}
+          restore-keys: wheel-${{matrix.build_id}}
 
       - name: Install build tools
         run: |
@@ -343,10 +315,10 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@9c00cb4f6b517705a3794b22395aedc36257242c # v3.2.1
         env:
-          CIBW_BUILD: ${{ matrix.python }}
+          CIBW_BUILD: ${{ matrix.pythons }}
           CIBW_ARCHS: ${{ matrix.arch }}
           MACOSX_DEPLOYMENT_TARGET: 10.15
-          CMAKE_GENERATOR: "Unix Makefiles"
+          #CMAKE_GENERATOR: "Unix Makefiles"
           # TODO: Re-enable HEIF when we provide a build recipe that does 
           # not include GPL-licensed dynamic libraries.
           USE_Libheif: 'OFF'
@@ -361,11 +333,11 @@ jobs:
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.ccache
-          key: wheel-${{runner.os}}-${{matrix.python}}
+          key: wheel-${{matrix.build_id}}
 
       - uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
         with:
-          name: cibw-wheels-${{ matrix.python }}
+          name: cibw-wheels-${{matrix.build_id}}
           path: ./wheelhouse/*.whl
 
 
@@ -375,7 +347,7 @@ jobs:
 
   macos-arm:
     name: Build wheels on macOS ARM
-    runs-on: macos-15
+    runs-on: macos-14
     if: |
       github.event_name != 'schedule' ||
       github.repository == 'AcademySoftwareFoundation/OpenImageIO'
@@ -385,24 +357,14 @@ jobs:
           # -------------------------------------------------------------------
           # CPython ARM 64 bits
           # -------------------------------------------------------------------
-          - build: CPython 3.9 ARM 64 bits
-            python: cp39-macosx_arm64
+          - build: CPython ARM 64 bits
             arch: arm64
-          - build: CPython 3.10 ARM 64 bits
-            python: cp310-macosx_arm64
-            arch: arm64
-          - build: CPython 3.11 ARM 64 bits
-            python: cp311-macosx_arm64
-            arch: arm64
-          - build: CPython 3.12 ARM 64 bits
-            python: cp312-macosx_arm64
-            arch: arm64
-          - build: CPython 3.13 ARM 64 bits
-            python: cp313-macosx_arm64
-            arch: arm64
-          - build: CPython 3.14 ARM 64 bits
-            python: cp314-macosx_arm64
-            arch: arm64
+            pythons: cp39-* cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*
+            build_id: cp-macosx_arm64
+          - build: PyPy ARM 64 bits
+            pythons: py*
+            arch: x86_64
+            build_id: pypy-macosx_arm64
 
     steps:
       - name: Checkout repo
@@ -416,8 +378,8 @@ jobs:
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.ccache
-          key: wheel-${{runner.os}}-${{matrix.python}}
-          restore-keys: wheel-${{runner.os}}-${{matrix.python}}
+          key: wheel-${{matrix.build_id}}
+          restore-keys: wheel-${{matrix.build_id}}
 
       - name: Install build tools
         run: |
@@ -426,9 +388,9 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@9c00cb4f6b517705a3794b22395aedc36257242c # v3.2.1
         env:
-          CIBW_BUILD: ${{ matrix.python }}
+          CIBW_BUILD: ${{ matrix.pythons }}
           CIBW_ARCHS: ${{ matrix.arch }}
-          CMAKE_GENERATOR: "Unix Makefiles"
+          #CMAKE_GENERATOR: "Unix Makefiles"  # I think we can turn this off and let it use Ninja
           CMAKE_BUILD_PARALLEL_LEVEL: 6
           CTEST_PARALLEL_LEVEL: 6
           SKBUILD_BUILD_DIR: "/Users/runner/work/OpenImageIO/OpenImageIO/build"
@@ -440,11 +402,11 @@ jobs:
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.ccache
-          key: wheel-${{runner.os}}-${{matrix.python}}
+          key: wheel-${{matrix.build_id}}
 
       - uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
         with:
-          name: cibw-wheels-${{ matrix.python }}
+          name: cibw-wheels-${{matrix.build_id}}
           path: ./wheelhouse/*.whl
 
   # ---------------------------------------------------------------------------
@@ -464,7 +426,6 @@ jobs:
           # CPython 64 bits
           # -------------------------------------------------------------------
           - build: CPython 3.9 64 bits
-            python: cp39-win_amd64
             arch: AMD64
           - build: CPython 3.10 64 bits
             python: cp310-win_amd64
@@ -512,7 +473,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
-    if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/v3.0.') && github.repository == 'AcademySoftwareFoundation/OpenImageIO'
+    if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/v3.1.') && github.repository == 'AcademySoftwareFoundation/OpenImageIO'
     steps:
       - uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5.2.0
 

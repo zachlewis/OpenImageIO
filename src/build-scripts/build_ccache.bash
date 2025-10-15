@@ -57,7 +57,7 @@ if [[ `uname` == "Linux" ]] ; then
         git checkout ${CCACHE_TAG} --force
 
         if [[ -z $DEP_DOWNLOAD_ONLY ]]; then
-            time cmake -S . -B ${CCACHE_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release \
+            time cmake -DCMAKE_LINKER=lld -S . -B ${CCACHE_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release \
                        -DCMAKE_INSTALL_PREFIX=${CCACHE_INSTALL_DIR} \
                        -DENABLE_TESTING=OFF -DENABLE_DOCUMENTATION=OFF \
                        ${CCACHE_CONFIG_OPTS}

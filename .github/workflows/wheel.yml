@@ -97,7 +97,7 @@ jobs:
           - build: CPython 64 bits manylinux_2_28
             manylinux: manylinux_2_28
             arch: x86_64
-            # pythons: cp39-* py*
+            # pythons: cp39-* pp*
             # build_id: manylinux_2_28-x86_64
 
     steps:
@@ -106,14 +106,14 @@ jobs:
 
       - name: Install Python
         uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5.2.0
-
+        
       - name: ccache-restore
         id: ccache-restore
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.ccache
-          key: wheel-${{runner.os}}-${{matrix.manylinux}}
-          restore-keys: wheel-${{runner.os}}-${{matrix.manylinux}}
+          key: wheel-${{runner.os}}-${{matrix.manylinux}}-${{matrix.arch}}
+          restore-keys: wheel-${{runner.os}}-${{matrix.manylinux}}-${{matrix.arch}}
 
       - name: Build wheels
         # Note: the version of cibuildwheel should be kept in sync with src/python/stubs/CMakeLists.txt
@@ -122,8 +122,8 @@ jobs:
           # pass GITHUB_ACTIONS through to the build container so that custom
           # processes can tell they are running in CI.
           CIBW_ENVIRONMENT_PASS_LINUX: GITHUB_ACTIONS
-          CIBW_BEFORE_ALL: "source src/build-scripts/build_ccache.bash && pwd && ext/dist/bin/ccache --max-size=200M && ext/dist/bin/ccache -sv && export CMAKE_C_COMPILER_LAUNCHER=/project/ext/dist/bin/ccache CMAKE_CXX_COMPILER_LAUNCHER=/project/ext/dist/bin/ccache"
-          CIBW_BEFORE_TEST: "ext/dist/bin/ccache -s"
+          CIBW_BEFORE_ALL: "source src/build-scripts/build_ccache.bash && pwd && /project/ext/dist/bin/ccache --max-size=200M && /project/ext/dist/bin/ccache -sv && export CMAKE_C_COMPILER_LAUNCHER=/project/ext/dist/bin/ccache CMAKE_CXX_COMPILER_LAUNCHER=/project/ext/dist/bin/ccache"
+          CIBW_BEFORE_TEST: "ext/dist/bin/ccache -s"          
           # CIBW_BUILD: ${{ matrix.pythons }}  # Use the cibuildwheel settings in pyproject.toml to contorl which python versions are included / omitted
           CIBW_ARCHS: ${{ matrix.arch }}
           CIBW_MANYLINUX_X86_64_IMAGE: ${{ matrix.manylinux }}
@@ -146,7 +146,7 @@ jobs:
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.ccache
-          key: wheel-${{runner.os}}-${{matrix.manylinux}}
+          key: wheel-${{runner.os}}-${{matrix.manylinux}}-${{matrix.arch}}
 
       - uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
         with:
@@ -281,7 +281,7 @@ jobs:
           # CPython 64 bits
           # -------------------------------------------------------------------
           - build: CPython 64 bits
-            pythons: cp39-* cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*
+            pythons: cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*
             build_id: cp-macosx_x86_64
             arch: x86_64
           - build: PyPy 64 bits
@@ -359,7 +359,7 @@ jobs:
           # -------------------------------------------------------------------
           - build: CPython ARM 64 bits
             arch: arm64
-            pythons: cp39-* cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*
+            pythons: cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*
             build_id: cp-macosx_arm64
           - build: PyPy ARM 64 bits
             pythons: pp*

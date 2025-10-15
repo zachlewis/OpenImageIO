@@ -310,7 +310,7 @@ jobs:
         
       - name: Brew uninstall problematic dependencies
         run: |
-            brew uninstall --ignore-dependencies openexr imath minizip-ng expat cmake || true
+            brew uninstall --ignore-dependencies openexr imath minizip-ng expat libtiff cmake || true
         
       - name: Build wheels
         uses: pypa/cibuildwheel@9c00cb4f6b517705a3794b22395aedc36257242c # v3.2.1
@@ -384,7 +384,11 @@ jobs:
       - name: Install build tools
         run: |
             brew install ninja ccache || true
-        
+      
+      - name: Brew uninstall problematic dependencies
+        run: |
+            brew uninstall --ignore-dependencies openexr imath minizip-ng expat libtiff cmake || true
+
       - name: Build wheels
         uses: pypa/cibuildwheel@9c00cb4f6b517705a3794b22395aedc36257242c # v3.2.1
         env:

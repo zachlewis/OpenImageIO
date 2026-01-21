@@ -2303,9 +2303,6 @@ ColorConfig::createColorProcessor(ustring inputColorSpace,
     // transformation.
     OCIO::ConstProcessorRcPtr p;
     if (getImpl()->config_ && !disable_ocio) {
-        // Canonicalize the names
-        inputColorSpace  = ustring(resolve(inputColorSpace));
-        outputColorSpace = ustring(resolve(outputColorSpace));
         // DBG("after role substitution, {} -> {}\n", inputColorSpace,
         //                outputColorSpace);
         auto config  = getImpl()->config_;
@@ -2319,27 +2316,90 @@ ColorConfig::createColorProcessor(ustring inputColorSpace,
             context = ctx;
         }
 
-        try {
-            // Get the processor corresponding to this transform.
-            p = getImpl()->config_->getProcessor(context,
-                                                 inputColorSpace.c_str(),
-                                                 outputColorSpace.c_str());
-            getImpl()->clear_error();
-            // DBG("Created OCIO processor '{}' -> '{}'\n",
-            //                inputColorSpace, outputColorSpace);
-        } catch (OCIO::Exception& e) {
-            // Don't quit yet, remember the error and see if any of our
-            // built-in knowledge of some generic spaces will save us.
-            p.reset();
-            pending_error = e.what();
-            // DBG("FAILED to create OCIO processor '{}' -> '{}'\n",
-            //                inputColorSpace, outputColorSpace);
-        } catch (...) {
-            p.reset();
-            getImpl()->error(
-                "An unknown error occurred in OpenColorIO, getProcessor");
-        }
+        // If either the input or output color spaces are in the known
+        // builtin interop identities, and not in the current config,
+        // create a processor that goes through the interop config.
+        auto builtin_ids = getImpl()->get_builtin_interop_ids();
+        bool use_interop = false;
+        bool input_matches_builtin_interop_id  = false;
+        bool output_matches_builtin_interop_id = false;
+        bool input_in_current_config           = true;
+        bool output_in_current_config          = true;
 
+        auto cs_in = config->getColorSpace(c_str(inputColorSpace));
+
+        if (!cs_in) {
+            input_in_current_config = false;
+            if (getImpl()->interopconfig_->getColorSpace(
+                    c_str(inputColorSpace))) {
+                // DBG("Input color space '{}' found in interop config\n",
+                //                inputColorSpace);
+                input_matches_builtin_interop_id = true;
+            }
+        }
+        auto cs_out = config->getColorSpace(c_str(outputColorSpace));
+        if (!cs_out) {
+            output_in_current_config = false;
+            if (getImpl()->interopconfig_->getColorSpace(
+                    c_str(outputColorSpace))) {
+                // DBG("Output color space '{}' found in interop config\n",
+                //                outputColorSpace);
+                output_matches_builtin_interop_id = true;
+            }
+        }
+        use_interop = (input_matches_builtin_interop_id
+                       || output_matches_builtin_interop_id)
+                      && (!input_in_current_config
+                          || !output_in_current_config);
+
+        if (use_interop) {
+            auto interop_config = getImpl()->interopconfig_;
+            auto src_config     = config;
+            auto dst_config     = config;
+            if (input_matches_builtin_interop_id)
+                src_config = interop_config;
+            if (output_matches_builtin_interop_id)
+                dst_config = interop_config;
+            try {
+                p = OCIO::Config::GetProcessorFromConfigs(
+                    context, src_config, c_str(inputColorSpace), context,
+                    dst_config, c_str(outputColorSpace));
+                getImpl()->clear_error();
+            } catch (OCIO::Exception& e) {
+                // Don't quit yet, remember the error and see if any of our
+                // built-in knowledge of some generic spaces will save us.
+                p.reset();
+                pending_error = e.what();
+            } catch (...) {
+                p.reset();
+                getImpl()->error(
+                    "An unknown error occurred in OpenColorIO, getProcessor");
+            }
+        } else {
+            inputColorSpace  = ustring(inputColorSpace);
+            outputColorSpace = ustring(outputColorSpace);
+
+            try {
+                // Get the processor corresponding to this transform.
+                p = getImpl()->config_->getProcessor(context,
+                                                     inputColorSpace.c_str(),
+                                                     outputColorSpace.c_str());
+                getImpl()->clear_error();
+                // DBG("Created OCIO processor '{}' -> '{}'\n",
+                //                inputColorSpace, outputColorSpace);
+            } catch (OCIO::Exception& e) {
+                // Don't quit yet, remember the error and see if any of our
+                // built-in knowledge of some generic spaces will save us.
+                p.reset();
+                pending_error = e.what();
+                // DBG("FAILED to create OCIO processor '{}' -> '{}'\n",
+                //                inputColorSpace, outputColorSpace);
+            } catch (...) {
+                p.reset();
+                getImpl()->error(
+                    "An unknown error occurred in OpenColorIO, getProcessor");
+            }
+        }
         if (p && !p->isNoOp()) {
             // If we got a valid processor that does something useful,
             // return it now. If it boils down to a no-op, give a second
@@ -2395,6 +2455,9 @@ ColorConfig::createLookTransform(ustring looks, ustring inputColorSpace,
 
     // Ask OCIO to make a Processor that can handle the requested
     // transformation.
+
+    // TODO: Handle the case where either inputColorSpace or outputColorSpace
+    // is a builtin interop identity, similar to createColorProcessor.
     if (getImpl()->config_ && !disable_ocio) {
         OCIO::ConstConfigRcPtr config      = getImpl()->config_;
         OCIO::LookTransformRcPtr transform = OCIO::LookTransform::Create();
@@ -2480,45 +2543,71 @@ ColorConfig::createDisplayTransform(ustring display, ustring view,
 
     // Ask OCIO to make a Processor that can handle the requested
     // transformation.
-    if (getImpl()->config_ && !disable_ocio) {
-        OCIO::ConstConfigRcPtr config = getImpl()->config_;
-        auto transform                = OCIO::DisplayViewTransform::Create();
-        auto legacy_viewing_pipeline  = OCIO::LegacyViewingPipeline::Create();
-        OCIO::TransformDirection dir  = inverse ? OCIO::TRANSFORM_DIR_INVERSE
-                                                : OCIO::TRANSFORM_DIR_FORWARD;
-        transform->setSrc(inputColorSpace.c_str());
-        transform->setDisplay(display.c_str());
-        transform->setView(view.c_str());
-        transform->setDirection(dir);
-        legacy_viewing_pipeline->setDisplayViewTransform(transform);
-        if (looks.size()) {
-            legacy_viewing_pipeline->setLooksOverride(looks.c_str());
-            legacy_viewing_pipeline->setLooksOverrideEnabled(true);
-        }
-        auto context = config->getCurrentContext();
-        auto keys    = Strutil::splits(context_key, ",");
-        auto values  = Strutil::splits(context_value, ",");
-        if (keys.size() && values.size() && keys.size() == values.size()) {
-            OCIO::ContextRcPtr ctx = context->createEditableCopy();
-            for (size_t i = 0; i < keys.size(); ++i)
-                ctx->setStringVar(keys[i].c_str(), values[i].c_str());
-            context = ctx;
-        }
 
-        OCIO::ConstProcessorRcPtr p;
-        try {
-            // Get the processor corresponding to this transform.
-            p = legacy_viewing_pipeline->getProcessor(config, context);
-            getImpl()->clear_error();
-            handle = ColorProcessorHandle(new ColorProcessor_OCIO(p));
-        } catch (OCIO::Exception& e) {
-            getImpl()->error(e.what());
-        } catch (...) {
-            getImpl()->error(
-                "An unknown error occurred in OpenColorIO, getProcessor");
+    OCIO::ConstConfigRcPtr config = getImpl()->config_;
+    auto transform                = OCIO::DisplayViewTransform::Create();
+    auto legacy_viewing_pipeline  = OCIO::LegacyViewingPipeline::Create();
+    OCIO::TransformDirection dir  = inverse ? OCIO::TRANSFORM_DIR_INVERSE
+                                            : OCIO::TRANSFORM_DIR_FORWARD;
+    string_view original_input_cs = c_str(inputColorSpace);
+
+
+    auto cs_in = config->getColorSpace(c_str(inputColorSpace));
+    if (!cs_in) {
+        if (getImpl()->interopconfig_->getColorSpace(c_str(inputColorSpace))) {
+            inputColorSpace = ustring(OCIO::ROLE_SCENE_LINEAR);
         }
     }
 
+    transform->setSrc(inputColorSpace.c_str());
+    transform->setDisplay(display.c_str());
+    transform->setView(view.c_str());
+    transform->setDirection(dir);
+    legacy_viewing_pipeline->setDisplayViewTransform(transform);
+    if (looks.size()) {
+        legacy_viewing_pipeline->setLooksOverride(looks.c_str());
+        legacy_viewing_pipeline->setLooksOverrideEnabled(true);
+    }
+    auto context = config->getCurrentContext();
+    auto keys    = Strutil::splits(context_key, ",");
+    auto values  = Strutil::splits(context_value, ",");
+    if (keys.size() && values.size() && keys.size() == values.size()) {
+        OCIO::ContextRcPtr ctx = context->createEditableCopy();
+        for (size_t i = 0; i < keys.size(); ++i)
+            ctx->setStringVar(keys[i].c_str(), values[i].c_str());
+        context = ctx;
+    }
+
+    OCIO::ConstProcessorRcPtr p;
+    try {
+        // Get the processor corresponding to this transform.
+        p = legacy_viewing_pipeline->getProcessor(config, context);
+        getImpl()->clear_error();
+        // If the original input color space doesn't match InputColorSpace,
+        // we need to prepend a conversion to InputColorSpace.
+        if (!Strutil::iequals(original_input_cs, inputColorSpace)) {
+            auto p_xform      = p->createGroupTransform();
+            auto pretransform = OCIO::Config::GetProcessorFromConfigs(
+                                    context, getImpl()->interopconfig_,
+                                    c_str(original_input_cs), context, config,
+                                    c_str(inputColorSpace))
+                                    ->createGroupTransform();
+
+            if (inverse) {
+                pretransform->setDirection(OCIO::TRANSFORM_DIR_INVERSE);
+                p_xform->appendTransform(pretransform);
+            } else {
+                p_xform->prependTransform(pretransform);
+            }
+            p = config->getProcessor(p_xform);
+        }
+        handle = ColorProcessorHandle(new ColorProcessor_OCIO(p));
+    } catch (OCIO::Exception& e) {
+        getImpl()->error(e.what());
+    } catch (...) {
+        getImpl()->error(
+            "An unknown error occurred in OpenColorIO, getProcessor");
+    }
     return getImpl()->addproc(prockey, handle);
 }
 

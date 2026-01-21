@@ -1246,7 +1246,7 @@ ColorConfig::Impl::classify_by_conversions(CSInfo& cs)
             // canonical spaces anyway.
             // DBG("{} has LUT3\n", cs.name);
         } else if (check_same_as_builtin_transform(cs.name.c_str(), "srgb_tx")) {
-            cs.setflag(CSInfo::is_srgb_rec709, srgb_alias);
+            cs.setflag(CSInfo::is_srgb, srgb_alias);
         } else if (check_same_as_builtin_transform(cs.name.c_str(),
                                                    "lin_srgb")) {
             cs.setflag(CSInfo::is_lin_srgb | CSInfo::is_linear_response,

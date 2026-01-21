@@ -2829,20 +2829,22 @@ ColorConfig::parseColorSpaceFromString(string_view str) const
 
 namespace {
 enum class CICPPrimaries : int {
-    Rec709  = 1,
-    Rec2020 = 9,
-    XYZD65  = 10,
-    P3D65   = 12,
+    Rec709      = 1,
+    Unspecified = 2,
+    Rec2020     = 9,
+    XYZD65      = 10,
+    P3D65       = 12,
 };
 
 enum class CICPTransfer : int {
-    BT709   = 1,
-    Gamma22 = 4,
-    Linear  = 8,
-    sRGB    = 13,
-    PQ      = 16,
-    Gamma26 = 17,
-    HLG     = 18,
+    BT709       = 1,
+    Unspecified = 2,
+    Gamma22     = 4,
+    Linear      = 8,
+    sRGB        = 13,
+    PQ          = 16,
+    Gamma26     = 17,
+    HLG         = 18,
 };
 
 enum class CICPMatrix : int {
@@ -2883,9 +2885,34 @@ struct ColorInteropID {
 // Mapping between color interop ID and CICP, based on Color Interop Forum
 // recommendations.
 constexpr ColorInteropID color_interop_ids[] = {
-    // Scene referred interop IDs first so they are the default in automatic
-    // conversion from CICP to interop ID. Some are not display color spaces
-    // at all, but can be represented by CICP anyway.
+    // Display referred interop IDs first so they are the default in automatic
+    // conversion from CICP to interop ID.
+    { "srgb_rec709_display", CICPPrimaries::Rec709, CICPTransfer::sRGB,
+      CICPMatrix::BT709 },
+    { "g24_rec709_display", CICPPrimaries::Rec709, CICPTransfer::BT709,
+      CICPMatrix::BT709 },
+    { "srgb_p3d65_display", CICPPrimaries::P3D65, CICPTransfer::sRGB,
+      CICPMatrix::BT709 },
+    { "srgbe_p3d65_display", CICPPrimaries::P3D65, CICPTransfer::sRGB,
+      CICPMatrix::BT709 },
+    { "pq_p3d65_display", CICPPrimaries::P3D65, CICPTransfer::PQ,
+      CICPMatrix::Rec2020_NCL },
+    { "pq_rec2020_display", CICPPrimaries::Rec2020, CICPTransfer::PQ,
+      CICPMatrix::Rec2020_NCL },
+    { "hlg_rec2020_display", CICPPrimaries::Rec2020, CICPTransfer::HLG,
+      CICPMatrix::Rec2020_NCL },
+    { "g22_rec709_display", CICPPrimaries::Rec709, CICPTransfer::Gamma22,
+      CICPMatrix::BT709 },
+    // No CICP code for Adobe RGB primaries.
+    { "g22_adobergb_display" },
+    { "g26_p3d65_display", CICPPrimaries::P3D65, CICPTransfer::Gamma26,
+      CICPMatrix::BT709 },
+    { "g26_xyzd65_display", CICPPrimaries::XYZD65, CICPTransfer::Gamma26,
+      CICPMatrix::Unspecified },
+    { "pq_xyzd65_display", CICPPrimaries::XYZD65, CICPTransfer::PQ,
+      CICPMatrix::Unspecified },
+
+    // Some scene referred interop IDs can be represented by CICP
     { "lin_ap1_scene" },
     { "lin_ap0_scene" },
     { "lin_rec709_scene", CICPPrimaries::Rec709, CICPTransfer::Linear,
@@ -2907,36 +2934,10 @@ constexpr ColorInteropID color_interop_ids[] = {
     { "srgb_p3d65_scene", CICPPrimaries::P3D65, CICPTransfer::sRGB,
       CICPMatrix::BT709 },
     { "g22_adobergb_scene" },
-    { "data" },
-    { "unknown" },
 
-    // Display referred interop IDs.
-    { "srgb_rec709_display", CICPPrimaries::Rec709, CICPTransfer::sRGB,
-      CICPMatrix::BT709 },
-    { "g24_rec709_display", CICPPrimaries::Rec709, CICPTransfer::BT709,
-      CICPMatrix::BT709 },
-    { "srgb_p3d65_display", CICPPrimaries::P3D65, CICPTransfer::sRGB,
-      CICPMatrix::BT709 },
-    { "srgbe_p3d65_display", CICPPrimaries::P3D65, CICPTransfer::sRGB,
-      CICPMatrix::BT709 },
-    { "pq_p3d65_display", CICPPrimaries::P3D65, CICPTransfer::PQ,
-      CICPMatrix::Rec2020_NCL },
-    { "pq_rec2020_display", CICPPrimaries::Rec2020, CICPTransfer::PQ,
-      CICPMatrix::Rec2020_NCL },
-    { "hlg_rec2020_display", CICPPrimaries::Rec2020, CICPTransfer::HLG,
-      CICPMatrix::Rec2020_NCL },
-    // No CICP mapping to keep previous behavior unchanged, as Gamma 2.2
-    // display is more likely meant to be written as sRGB. On read the
-    // scene referred interop ID will be used.
-    { "g22_rec709_display",
-      /* CICPPrimaries::Rec709, CICPTransfer::Gamma22, CICPMatrix::BT709 */ },
-    // No CICP code for Adobe RGB primaries.
-    { "g22_adobergb_display" },
-    { "g26_p3d65_display", CICPPrimaries::P3D65, CICPTransfer::Gamma26,
-      CICPMatrix::BT709 },
-    { "g26_xyzd65_display", CICPPrimaries::XYZD65, CICPTransfer::Gamma26,
-      CICPMatrix::Unspecified },
-    { "pq_xyzd65_display", CICPPrimaries::XYZD65, CICPTransfer::PQ,
+    // Other standard CIF interop IDs
+    { "data" },
+    { "unknown", CICPPrimaries::Unspecified, CICPTransfer::Unspecified,
       CICPMatrix::Unspecified },
 };
 }  // namespace

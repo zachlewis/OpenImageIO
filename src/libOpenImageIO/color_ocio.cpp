@@ -950,9 +950,12 @@ ColorConfig::Impl::inventory()
     DBG("inventorying config {}\n", configname());
     if (config_ && !disable_ocio) {
         bool nonraw = false;
-        for (int i = 0, e = config_->getNumColorSpaces(); i < e; ++i)
-            nonraw |= !Strutil::iequals(config_->getColorSpaceNameByIndex(i),
-                                        "raw");
+        for (int i = 0, e = config_->getNumColorSpaces(); i < e; ++i) {
+            auto csname = config_->getColorSpaceNameByIndex(i);
+            auto cs     = (csname) ? config_->getColorSpace(c_str(csname))
+                                   : nullptr;
+            nonraw |= !cs->isData();  // prevent unused variable warning
+        }
         if (nonraw) {
             for (int i = 0, e = config_->getNumColorSpaces(); i < e; ++i)
                 add(config_->getColorSpaceNameByIndex(i), i);
@@ -2080,7 +2083,6 @@ ColorConfig::Impl::resolve(string_view name) const
     }
 
     // Maybe it's an informal alias of common names?
-    spin_rw_write_lock lock(m_mutex);
     if ((Strutil::iequals(name, "sRGB")
          || Strutil::iequals(name, "srgb_rec709_scene"))
         && !srgb_alias.empty())

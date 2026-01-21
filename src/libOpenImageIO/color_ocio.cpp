@@ -1071,21 +1071,76 @@ ColorConfig::Impl::test_conversion_yields(const char* from, const char* to,
 
 
 static bool
-transform_has_Lut3D(string_view name, OCIO::ConstTransformRcPtr transform)
+transform_has_Lut3D(string_view name, OCIO::ConstTransformRcPtr transform,
+                    OCIO::ConstConfigRcPtr config = nullptr)
 {
     using namespace OCIO;
     auto ttype = transform ? transform->getTransformType() : -1;
-    if (ttype == TRANSFORM_TYPE_LUT3D || ttype == TRANSFORM_TYPE_COLORSPACE
-        || ttype == TRANSFORM_TYPE_FILE || ttype == TRANSFORM_TYPE_LOOK
+    if (ttype == TRANSFORM_TYPE_LUT3D || ttype == TRANSFORM_TYPE_LOOK
         || ttype == TRANSFORM_TYPE_DISPLAY_VIEW) {
         return true;
+    }
+    if (ttype == TRANSFORM_TYPE_FILE) {
+        // If the filename ends in ".spi1d" or ".spimtx", it's not a 3D LUT.
+        auto filetransform = dynamic_cast<const FileTransform*>(
+            transform.get());
+        std::string src = filetransform->getSrc();
+        Strutil::to_lower(src);
+        if (!Strutil::ends_with(src, ".spi1d")
+            && !Strutil::ends_with(src, ".spimtx"))
+            return true;
     }
     if (ttype == TRANSFORM_TYPE_GROUP) {
         auto group = dynamic_cast<const GroupTransform*>(transform.get());
         for (int i = 0, n = group->getNumTransforms(); i < n; ++i) {
-            if (transform_has_Lut3D("", group->getTransform(i)))
+            if (transform_has_Lut3D(group->getFormatMetadata().getName(),
+                                    group->getTransform(i), config))
                 return true;
         }
+    }
+    if (ttype == TRANSFORM_TYPE_COLORSPACE) {
+        if (!config)
+            return false;
+
+        auto cs_transform = dynamic_cast<const ColorSpaceTransform*>(
+            transform.get());
+        auto src = cs_transform->getSrc();
+        auto dst = cs_transform->getDst();
+        // Collect the transforms for source and destination color spaces
+
+        if (!src && !dst)  // is reference space
+            return false;
+
+        if (!src || !dst) {  // is named transform
+            auto nt = (src) ? config->getNamedTransform(c_str(src))
+                            : config->getNamedTransform(c_str(dst));
+            if (nt) {
+                auto fwd_xform = nt->getTransform(TRANSFORM_DIR_FORWARD);
+                if (fwd_xform
+                    && transform_has_Lut3D(nt->getName(), fwd_xform, config))
+                    return true;
+            }
+        }
+
+        // collect source color space transforms
+        auto src_cs       = config->getColorSpace(c_str(src));
+        auto dst_cs       = config->getColorSpace(c_str(dst));
+        auto src_to_ref   = src_cs->getTransform(COLORSPACE_DIR_TO_REFERENCE);
+        auto src_from_ref = src_cs->getTransform(COLORSPACE_DIR_FROM_REFERENCE);
+        auto dst_to_ref   = dst_cs->getTransform(COLORSPACE_DIR_TO_REFERENCE);
+        auto dst_from_ref = dst_cs->getTransform(COLORSPACE_DIR_FROM_REFERENCE);
+        if (src_to_ref)
+            if (transform_has_Lut3D(name, src_to_ref, config))
+                return true;
+        if (dst_to_ref)
+            if (transform_has_Lut3D(name, dst_to_ref, config))
+                return true;
+        if (src_from_ref)
+            if (transform_has_Lut3D(name, src_from_ref, config))
+                return true;
+        if (dst_from_ref)
+            if (transform_has_Lut3D(name, dst_from_ref, config))
+                return true;
     }
     if (name.size() && ttype >= 0)
         DBG("{} has type {}\n", name, ttype);
@@ -1176,17 +1231,19 @@ ColorConfig::Impl::classify_by_conversions(CSInfo& cs)
         && !m_config_is_built_in) {
         using namespace OCIO;
         cs.ocio_cs = config_->getColorSpace(cs.name.c_str());
-        if (transform_has_Lut3D(cs.name, cs.ocio_cs->getTransform(
-                                             COLORSPACE_DIR_TO_REFERENCE))
+        if (transform_has_Lut3D(
+                cs.name, cs.ocio_cs->getTransform(COLORSPACE_DIR_TO_REFERENCE),
+                config_)
             || transform_has_Lut3D(cs.name,
                                    cs.ocio_cs->getTransform(
-                                       COLORSPACE_DIR_FROM_REFERENCE))) {
+                                       COLORSPACE_DIR_FROM_REFERENCE),
+                                   config_)) {
             // Skip things with LUT3d because they are expensive due to LUT
             // inversion costs, and they're not gonna be our favourite
             // canonical spaces anyway.
             // DBG("{} has LUT3\n", cs.name);
         } else if (check_same_as_builtin_transform(cs.name.c_str(), "srgb_tx")) {
-            cs.setflag(CSInfo::is_srgb, srgb_alias);
+            cs.setflag(CSInfo::is_srgb_rec709, srgb_alias);
         } else if (check_same_as_builtin_transform(cs.name.c_str(),
                                                    "lin_srgb")) {
             cs.setflag(CSInfo::is_lin_srgb | CSInfo::is_linear_response,
@@ -1287,6 +1344,11 @@ ColorConfig::Impl::IdentifyBuiltinColorSpace(const char* name) const
 {
     if (!config_ || disable_builtin_configs)
         return nullptr;
+    try {
+        return OCIO::Config::IdentifyBuiltinColorSpace(config_, interopconfig_,
+                                                       name);
+    } catch (...) {
+    }
     try {
         return OCIO::Config::IdentifyBuiltinColorSpace(config_, builtinconfig_,
                                                        name);
@@ -1996,14 +2058,26 @@ ColorConfig::Impl::get_builtin_interop_ids() const
 string_view
 ColorConfig::Impl::resolve(string_view name) const
 {
-    OCIO::ConstConfigRcPtr config = config_;
-    if (config && !disable_ocio) {
-        const char* namestr           = c_str(name);
-        OCIO::ConstColorSpaceRcPtr cs = config->getColorSpace(namestr);
-        if (cs)
-            return cs->getName();
-    }
+    const char* namestr = c_str(name);
+    auto cs             = config_->getColorSpace(namestr);
+    if (cs)
+        return cs->getName();
+
     // OCIO did not know this name as a color space, role, or alias.
+    spin_rw_write_lock lock(m_mutex);
+
+    // Check the interop identities config as well...
+    auto builtin_cs = interopconfig_->getColorSpace(namestr);
+    if (builtin_cs) {
+        try {
+            const char* equivalent_cs = OCIO::Config::IdentifyBuiltinColorSpace(
+                config_, interopconfig_, builtin_cs->getName());
+            if (equivalent_cs && *equivalent_cs)
+                return equivalent_cs;
+        } catch (OCIO::Exception& e) {
+            // ignore
+        }
+    }
 
     // Maybe it's an informal alias of common names?
     spin_rw_write_lock lock(m_mutex);

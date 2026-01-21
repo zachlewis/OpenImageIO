@@ -409,10 +409,14 @@ public:
     cspan<int> get_cicp(string_view colorspace) const;
 
     /// Find color interop ID for the given colorspace.
-    /// Returns empty string if not found.
+    /// Returns empty string if not found. If `strict` is true, only
+    /// return values that were explicitly specified in the OCIO config.
+    /// Otherwise, attempt to find a definitionally equivalent interop ID
+    /// for the colorspace.
     ///
     /// @version 3.1
-    string_view get_color_interop_id(string_view colorspace) const;
+    string_view get_color_interop_id(string_view colorspace,
+                                     bool strict = false) const;
 
     /// Find color interop ID corresponding to the CICP code.
     /// Returns empty string if not found.

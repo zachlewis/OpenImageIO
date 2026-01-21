@@ -2851,23 +2851,55 @@ constexpr ColorInteropID color_interop_ids[] = {
 }  // namespace
 
 string_view
-ColorConfig::get_color_interop_id(string_view colorspace) const
+ColorConfig::get_color_interop_id(string_view colorspace, bool strict) const
 {
     if (colorspace.empty())
-        return "";
-#if OCIO_VERSION_HEX >= MAKE_OCIO_VERSION_HEX(2, 5, 0)
-    if (getImpl()->config_ && !disable_ocio) {
-        OCIO::ConstColorSpaceRcPtr c = getImpl()->config_->getColorSpace(
-            std::string(resolve(colorspace)).c_str());
-        const char* interop_id = (c) ? c->getInteropID() : nullptr;
-        if (interop_id) {
-            return interop_id;
-        }
+        return colorspace;
+    string_view interop_id;
+    auto config        = getImpl()->config_;
+    auto cs            = config->getColorSpace(c_str(colorspace));
+    auto interopconfig = getImpl()->interopconfig_;
+    if (!cs) {
+        // Does 'colorspace' value match the name of a built-in interop ID?
+        auto interop_cs = interopconfig->getColorSpace(c_str(colorspace));
+        return (interop_cs) ? interop_cs->getName() : "";
     }
+    if (cs->isData())
+        return "data";
+#if OCIO_VERSION_HEX >= MAKE_OCIO_VERSION_HEX(2, 5, 0)
+    interop_id = cs->getInteropID();
+    if (interop_id)
+        return interop_id;
 #endif
     for (const ColorInteropID& interop : color_interop_ids) {
         if (equivalent(colorspace, interop.interop_id)) {
             return interop.interop_id;
+        }
+    }
+
+
+    // In strict mode, only return interop ID if explicitly defined
+    if (strict || interop_id.size())
+        return interop_id;
+
+    // Check to see if this colorspace's name or any of its aliases
+    // match a known interop ID.
+    auto interop_cs = interopconfig->getColorSpace(cs->getName());
+    if (interop_cs)
+        return interop_cs->getName();
+    for (int i = 0; i < cs->getNumAliases(); ++i) {
+        string_view alias = cs->getAlias(i);
+        interop_cs        = interopconfig->getColorSpace(c_str(alias));
+        if (interop_cs)
+            return interop_cs->getName();
+    }
+
+    auto interop_ids = getImpl()->get_builtin_interop_ids();
+    // Finally, see if we can match the cs definition to
+    // a known equivalent interop ID definition
+    for (auto&& this_id : interop_ids) {
+        if (equivalent(cs->getName(), this_id)) {
+            return this_id;
         }
     }
     return "";

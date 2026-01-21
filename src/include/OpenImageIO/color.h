@@ -423,6 +423,18 @@ public:
     /// Return a filename or other identifier for the config we're using.
     std::string configname() const;
 
+    /// Return a filename for the config we're using, if possible.
+    /// Returns empty string if not found.
+    ///
+    /// @version 3.1
+    std::string configfilename() const;
+
+    /// Return the name of the OCIO config we're using, if possible.
+    /// Returns an empty string if not found.
+    ///
+    /// @version 3.1
+    std::string ocioconfigname() const;
+
     /// Set the spec's metadata to presume that color space is `name` (or to
     /// assume nothing about the color space if `name` is empty). The core
     /// operation is to set the "oiio:ColorSpace" attribute, but it also removes

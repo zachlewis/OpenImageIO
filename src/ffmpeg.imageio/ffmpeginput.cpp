@@ -498,7 +498,8 @@ FFmpegInput::open(const std::string& name, ImageSpec& spec)
     m_sws_rgb_context
         = sws_getContext(m_codec_context->width, m_codec_context->height,
                          src_pix_format, m_codec_context->width,
-                         m_codec_context->height, m_dst_pix_format, SWS_AREA,
+                         m_codec_context->height, m_dst_pix_format,
+                         SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP,
                          NULL, NULL, NULL);
 
     AVDictionaryEntry* tag = NULL;

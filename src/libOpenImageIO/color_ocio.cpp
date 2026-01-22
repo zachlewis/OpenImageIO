@@ -1403,9 +1403,12 @@ ColorConfig::Impl::init(string_view filename)
             std::istringstream iss;
             iss.str(std::string(filename));
             config_ = OCIO::Config::CreateFromStream(iss);
-            configname(
-                filename);  // TODO: rename 'configname'function to 'configuri'?
-            configfilename("");  // from stream, no filename
+            auto name = config_->getName();
+            if (name && name[0])
+                configname(name);
+            else
+                configname(config_->getCacheID());
+            configfilename(filename);  // from stream, no filename
         } catch (OCIO::Exception& e) {
             error("Error reading OCIO config from stream: {}", e.what());
         }
@@ -1941,9 +1944,14 @@ ColorConfig::getNamedTransformAliases(string_view named_transform) const
 std::string
 ColorConfig::configname() const
 {
-    if (getImpl()->config_ && !disable_ocio)
-        return getImpl()->configname();
-    return "built-in";
+    // If configfilename() has newlines in it, 
+    // it's actually the config data as a string.
+    // In that case, return the OCIO config name or cache ID.
+    std::string fname = getImpl()->configfilename();
+    if (fname.find('\n') != std::string::npos) {
+        return ocioconfigname();
+    }
+    return fname;
 }
 
 
@@ -1959,7 +1967,12 @@ ColorConfig::configfilename() const
 std::string
 ColorConfig::ocioconfigname() const
 {
-    return getImpl()->config_->getName();
+    // If the OCIO config has a non-empty name, return that.
+    // Otherwise, return its cache ID.
+    auto name = getImpl()->config_->getName();
+    if (name && name[0])
+        return name;
+    return getImpl()->config_->getCacheID();
 }
 
 
@@ -1977,68 +1990,7 @@ ColorConfig::Impl::build_interop_identities_config()
 {
     std::istringstream iss(kInteropIdentitiesConfig);
     auto oiio_interop_identities = OCIO::Config::CreateFromStream(iss);
-
-#if OCIO_VERSION_HEX >= MAKE_OCIO_VERSION_HEX(2, 5, 0)
-    // Start with the latest studio config as the base
-    auto studio_config = OCIO::Config::CreateFromFile(
-        "ocio://studio-config-latest");
-    auto studio_config_identities = studio_config->createEditableCopy();
-    // Make all color spaces visible and give the config a special name
-    studio_config_identities->setInactiveColorSpaces("");
-    studio_config_identities->setName("oiio:interop-identities");
-    // Set each color space name to its interop ID, adding the old name
-    // as an alias. We can do this fearlessly as long as each color
-    // space in the OCIO-2.5+ builtin configs have a unique interop_id.
-    std::vector<std::string> names;
-    for (int i = 0, e = studio_config_identities->getNumColorSpaces(); i < e;
-         ++i)
-        names.emplace_back(
-            studio_config_identities->getColorSpaceNameByIndex(i));
-    for (const auto& n : names) {
-        auto cs = studio_config_identities->getColorSpace(n.c_str());
-        if (!cs)
-            continue;
-        const char* interop_id = cs->getInteropID();
-        if (!interop_id || !*interop_id)
-            continue;
-        std::string old = cs->getName();
-        if (old == interop_id)
-            continue;
-        cs->setName(interop_id);
-        cs->addAlias(old.c_str());
-    }
-    studio_config_identities->validate();
-
-    // Merge any missing color spaces from OIIO's builtin interop config into
-    // the studio config. The OIIO builtin interop config is deliberately
-    // constructed such that its color spaces can be dropped into the studio
-    // config with as little effort as possible.
-    // TODO: Use the config merging tools provided by OCIO-2.5+.
-    std::vector<std::string> oiio_interop_ids;
-    for (int i = 0, e = oiio_interop_identities->getNumColorSpaces(); i < e;
-         ++i)
-        oiio_interop_ids.emplace_back(
-            oiio_interop_identities->getColorSpaceNameByIndex(i));
-    for (const auto& n : oiio_interop_ids) {
-        if (studio_config_identities->getColorSpace(n.c_str()))
-            continue;  // already present
-        OCIO::ConstColorSpaceRcPtr cs = oiio_interop_identities->getColorSpace(
-            n.c_str());
-        try {
-            studio_config_identities->addColorSpace(cs);
-        } catch (OCIO::Exception& e) {
-            // Name collision -- remove aliases and try again
-            try {
-                OCIO::ColorSpaceRcPtr cs_mod = cs->createEditableCopy();
-                cs_mod->clearAliases();  // Remove any aliases to avoid collisions.
-                studio_config_identities->addColorSpace(cs_mod);
-            } catch (OCIO::Exception& e2) {
-                // Still failed, give up
-            }
-        }
-    }
-    return studio_config_identities;
-#endif
+    // TODO: Use config merger API for OCIO-2.5+
     return oiio_interop_identities;
 }
 
@@ -2960,7 +2912,7 @@ ColorConfig::get_color_interop_id(string_view colorspace, bool strict) const
         return "data";
 #if OCIO_VERSION_HEX >= MAKE_OCIO_VERSION_HEX(2, 5, 0)
     interop_id = cs->getInteropID();
-    if (interop_id)
+    if (c_str(interop_id))
         return interop_id;
 #endif
     for (const ColorInteropID& interop : color_interop_ids) {

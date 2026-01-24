@@ -3704,6 +3704,358 @@ const char * findEquivalentColorspace(const ColorSpaceFingerprints & fingerprint
     return "";
 }
 
+namespace {
+
+bool fileTransformIsBlockable(const ConstFileTransformRcPtr & fileTransform)
+{
+    if (!fileTransform)
+    {
+        return true;
+    }
+    const char * src = fileTransform->getSrc();
+    if (!src || !*src)
+    {
+        return true;
+    }
+    if (Strutil::iends_with(src, ".spi1d") || Strutil::iends_with(src, ".spimtx"))
+    {
+        return false;
+    }
+    return true;
+}
+
+bool containsBlockableTransform(const ConstConfigRcPtr & config,
+                                const ConstTransformRcPtr & transform,
+                                std::unordered_set<std::string> & whitelist,
+                                std::unordered_set<std::string> & blacklist,
+                                std::string * reason);
+
+bool colorSpaceHasBlockableTransform(const ConstConfigRcPtr & config,
+                                     const ConstColorSpaceRcPtr & cs,
+                                     std::unordered_set<std::string> & whitelist,
+                                     std::unordered_set<std::string> & blacklist,
+                                     std::string * reason)
+{
+    if (!cs)
+    {
+        if (reason)
+            *reason = "missing colorspace";
+        return true;
+    }
+    const char * csName = cs->getName();
+    if (cs->isData())
+    {
+        if (csName && *csName)
+            blacklist.insert(csName);
+        if (reason)
+            *reason = "data colorspace";
+        return true;
+    }
+    if (csName && whitelist.count(csName))
+    {
+        return false;
+    }
+
+    ConstTransformRcPtr toRef = cs->getTransform(COLORSPACE_DIR_TO_REFERENCE);
+    if (toRef
+        && containsBlockableTransform(config, toRef, whitelist, blacklist, reason))
+    {
+        if (csName && *csName)
+            blacklist.insert(csName);
+        if (reason && !reason->empty())
+            *reason = Strutil::fmt::format("to_reference: {}", *reason);
+        return true;
+    }
+
+    ConstTransformRcPtr fromRef = cs->getTransform(COLORSPACE_DIR_FROM_REFERENCE);
+    if (fromRef
+        && containsBlockableTransform(config, fromRef, whitelist, blacklist,
+                                      reason))
+    {
+        if (csName && *csName)
+            blacklist.insert(csName);
+        if (reason && !reason->empty())
+            *reason = Strutil::fmt::format("from_reference: {}", *reason);
+        return true;
+    }
+
+    if (csName && *csName)
+        whitelist.insert(csName);
+    return false;
+}
+
+bool namedTransformHasBlockableTransform(const ConstConfigRcPtr & config,
+                                         const ConstNamedTransformRcPtr & nt,
+                                         std::unordered_set<std::string> & whitelist,
+                                         std::unordered_set<std::string> & blacklist,
+                                         std::string * reason)
+{
+    if (!nt)
+    {
+        if (reason)
+            *reason = "missing named transform";
+        return true;
+    }
+    ConstTransformRcPtr fwd = nt->getTransform(TRANSFORM_DIR_FORWARD);
+    if (fwd
+        && containsBlockableTransform(config, fwd, whitelist, blacklist, reason))
+    {
+        if (reason && !reason->empty())
+            *reason = Strutil::fmt::format("forward: {}", *reason);
+        return true;
+    }
+    ConstTransformRcPtr rev = nt->getTransform(TRANSFORM_DIR_INVERSE);
+    if (rev
+        && containsBlockableTransform(config, rev, whitelist, blacklist, reason))
+    {
+        if (reason && !reason->empty())
+            *reason = Strutil::fmt::format("inverse: {}", *reason);
+        return true;
+    }
+    return false;
+}
+
+bool containsBlockableTransform(const ConstConfigRcPtr & config,
+                                const char * name,
+                                std::unordered_set<std::string> & whitelist,
+                                std::unordered_set<std::string> & blacklist,
+                                std::string * reason)
+{
+    if (!name || !*name)
+    {
+        if (reason)
+            *reason = "empty name";
+        return true;
+    }
+    if (blacklist.count(name))
+    {
+        if (reason)
+            *reason = "previously blocked by an unsupported or complex transform";
+        return true;
+    }
+    if (whitelist.count(name))
+    {
+        return false;
+    }
+
+    ConstColorSpaceRcPtr cs = config->getColorSpace(name);
+    if (cs)
+    {
+        return colorSpaceHasBlockableTransform(config, cs, whitelist, blacklist,
+                                               reason);
+    }
+
+    ConstNamedTransformRcPtr nt = config->getNamedTransform(name);
+    if (!nt)
+    {
+        if (reason)
+            *reason = "unknown named transform";
+        return true;
+    }
+    return namedTransformHasBlockableTransform(config, nt, whitelist, blacklist,
+                                               reason);
+}
+
+bool containsBlockableTransform(const ConstConfigRcPtr & config,
+                                const ConstTransformRcPtr & transform,
+                                std::unordered_set<std::string> & whitelist,
+                                std::unordered_set<std::string> & blacklist,
+                                std::string * reason)
+{
+    if (!transform)
+    {
+        return false;
+    }
+
+    switch (transform->getTransformType())
+    {
+    case TRANSFORM_TYPE_LUT3D:
+        if (reason)
+            *reason = "transform type LUT3D";
+        return true;
+    case TRANSFORM_TYPE_LOOK:
+        if (reason)
+            *reason = "transform type LOOK";
+        return true;
+    case TRANSFORM_TYPE_DISPLAY_VIEW:
+        if (reason)
+            *reason = "transform type DISPLAY_VIEW";
+        return true;
+    case TRANSFORM_TYPE_FILE: {
+        ConstFileTransformRcPtr ft = DynamicPtrCast<const FileTransform>(transform);
+        if (reason)
+        {
+            const char * src = ft ? ft->getSrc() : nullptr;
+            *reason = src && *src ? Strutil::fmt::format("file transform: {}", src)
+                                  : "file transform";
+        }
+        return fileTransformIsBlockable(ft);
+    }
+    case TRANSFORM_TYPE_GROUP: {
+        ConstGroupTransformRcPtr gt = DynamicPtrCast<const GroupTransform>(transform);
+        if (!gt)
+            return false;
+        for (int i = 0, e = gt->getNumTransforms(); i < e; ++i)
+        {
+            if (containsBlockableTransform(config, gt->getTransform(i), whitelist,
+                                           blacklist, reason))
+            {
+                if (reason && !reason->empty())
+                    *reason = Strutil::fmt::format("group: {}", *reason);
+                return true;
+            }
+        }
+        return false;
+    }
+    case TRANSFORM_TYPE_COLORSPACE: {
+        ConstColorSpaceTransformRcPtr cst = DynamicPtrCast<const ColorSpaceTransform>(transform);
+        if (!cst)
+        {
+            if (reason)
+                *reason = "colorspace transform";
+            return true;
+        }
+        const char * src = cst->getSrc();
+        const char * dst = cst->getDst();
+        if ((!src || !*src) && dst && *dst)
+        {
+            bool blocked = containsBlockableTransform(config, dst, whitelist, blacklist,
+                                                      reason);
+            if (blocked && reason && !reason->empty())
+                *reason = Strutil::fmt::format("colorspace dst: {}", *reason);
+            return blocked;
+        }
+        if ((!dst || !*dst) && src && *src)
+        {
+            bool blocked = containsBlockableTransform(config, src, whitelist, blacklist,
+                                                      reason);
+            if (blocked && reason && !reason->empty())
+                *reason = Strutil::fmt::format("colorspace src: {}", *reason);
+            return blocked;
+        }
+        if (src && *src && dst && *dst)
+        {
+            if (blacklist.count(src) || blacklist.count(dst))
+            {
+                if (reason)
+                    *reason = "colorspace src/dst previously blocked";
+                return true;
+            }
+            if (whitelist.count(src) && whitelist.count(dst))
+                return false;
+            bool blocked = containsBlockableTransform(config, src, whitelist, blacklist,
+                                                      reason);
+            if (blocked)
+            {
+                if (reason && !reason->empty())
+                    *reason = Strutil::fmt::format("colorspace src: {}", *reason);
+                return true;
+            }
+            blocked = containsBlockableTransform(config, dst, whitelist, blacklist,
+                                                 reason);
+            if (blocked && reason && !reason->empty())
+                *reason = Strutil::fmt::format("colorspace dst: {}", *reason);
+            return blocked;
+        }
+        if (reason)
+            *reason = "colorspace transform missing src/dst";
+        return true;
+    }
+    default:
+        break;
+    }
+
+    return false;
+}
+
+} // namespace
+
+std::vector<std::string>
+get_simple_color_spaces(const ConstConfigRcPtr & config)
+{
+    std::vector<std::string> simpleSpaces;
+    if (!config)
+    {
+        return simpleSpaces;
+    }
+
+    std::unordered_set<std::string> whitelist;
+    std::unordered_set<std::string> blacklist;
+
+    const int n = config->getNumColorSpaces(SEARCH_REFERENCE_SPACE_ALL,
+                                            COLORSPACE_ALL);
+    for (int i = 0; i < n; ++i)
+    {
+        const char * name = config->getColorSpaceNameByIndex(
+            SEARCH_REFERENCE_SPACE_ALL, COLORSPACE_ALL, i);
+        if (!name || !*name)
+        {
+            continue;
+        }
+        if (whitelist.count(name) || blacklist.count(name))
+        {
+            continue;
+        }
+        if (containsBlockableTransform(config, name, whitelist, blacklist, nullptr))
+        {
+            blacklist.insert(name);
+        }
+        else
+        {
+            whitelist.insert(name);
+        }
+    }
+
+    simpleSpaces.reserve(whitelist.size());
+    for (const auto & name : whitelist)
+    {
+        simpleSpaces.emplace_back(name);
+    }
+
+    return simpleSpaces;
+}
+
+std::map<std::string, std::string>
+get_simple_color_space_blockers(const ConstConfigRcPtr & config)
+{
+    std::map<std::string, std::string> blockers;
+    if (!config)
+    {
+        return blockers;
+    }
+
+    std::unordered_set<std::string> whitelist;
+    std::unordered_set<std::string> blacklist;
+
+    const int n = config->getNumColorSpaces(SEARCH_REFERENCE_SPACE_ALL,
+                                            COLORSPACE_ALL);
+    for (int i = 0; i < n; ++i)
+    {
+        const char * name = config->getColorSpaceNameByIndex(
+            SEARCH_REFERENCE_SPACE_ALL, COLORSPACE_ALL, i);
+        if (!name || !*name)
+        {
+            continue;
+        }
+
+        std::string reason;
+        if (containsBlockableTransform(config, name, whitelist, blacklist,
+                                       &reason))
+        {
+            if (reason.empty())
+                reason = "blocked by unsupported or complex transform";
+            blockers.emplace(name, reason);
+            blacklist.insert(name);
+        }
+        else
+        {
+            whitelist.insert(name);
+        }
+    }
+
+    return blockers;
+}
+
 } // namespace ConfigUtils
 
 

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <memory>
+#include <map>
 
 #include <OpenImageIO/export.h>
 #include <OpenImageIO/fmath.h>
@@ -131,6 +132,32 @@ public:
     /// Retrieve the full list of known color space names, as a vector
     /// of strings.
     std::vector<std::string> getColorSpaceNames() const;
+    /// Retrieve the list of known color space names with optional filters.
+    /// If `visible` is true, include active color spaces. If `hidden` is true,
+    /// include inactive color spaces. If both are true, include all.
+    /// If `scene` is true, include scene-referred spaces; if `display` is true,
+    /// include display-referred spaces.
+    ///
+    /// @version 3.1
+    std::vector<std::string>
+    getColorSpaceNamesFiltered(bool visible, bool hidden, bool scene,
+                               bool display) const;
+
+    /// Retrieve the list of known color space names with filters, and
+    /// optionally restrict to "simple" spaces (no blockable transforms).
+    ///
+    /// @version 3.1
+    std::vector<std::string>
+    getColorSpaces(bool visible = true, bool hidden = false,
+                   bool scene = true, bool display = true,
+                   bool simple = false) const;
+
+    /// Return diagnostic strings with debug info about the configuration.
+    /// Keys are namespaced identifiers such as
+    /// "simple_color_space_blocker:<colorspace>".
+    std::map<std::string, std::string>
+    getDebugInfo(bool simple_space_blockers = false,
+                 bool cache_stats = false) const;
 
     /// Get the name of the color space family of the named color space,
     /// or NULL if none could be identified.
@@ -424,6 +451,80 @@ public:
     /// @version 3.1
     string_view get_color_interop_id(const int cicp[4]) const;
 
+    /// Return a mapping of colorspace names to definitionally equivalent
+    /// built-in interop IDs, based on the current config and the built-in
+    /// interop identities. This is the internal cache used by
+    /// get_color_interop_id for non-strict matching, and it is NOT the
+    /// explicitly-specified interop_id on the colorspace.
+    ///
+    /// @version 3.1
+    std::map<std::string, std::string>
+    get_equality_ids() const;
+
+    /// Return a mapping of colorspace names to definitionally equivalent
+    /// built-in interop IDs. If `exhaustive` is false, only attempt to
+    /// fingerprint simple color spaces; if true, attempt all color spaces.
+    /// If `context` is non-empty, use those context overrides for matching.
+    ///
+    /// @version 3.1
+    std::map<std::string, std::string>
+    get_equality_ids(
+        bool exhaustive,
+        const std::map<std::string, std::string>& context) const;
+
+    /// Return a mapping of all colorspace names to interop IDs. If `strict`
+    /// is true, only return values explicitly specified in the OCIO config.
+    /// If false, attempt to find definitionally equivalent built-in interop
+    /// IDs for colorspaces. If `exhaustive` is false, only attempt to
+    /// fingerprint simple color spaces; if true, attempt all color spaces.
+    /// If `context` is non-empty, use those context overrides for
+    /// fingerprinting and matching.
+    ///
+    /// @version 3.1
+    std::map<std::string, std::string>
+    get_interop_ids(bool strict = false,
+                                   bool exhaustive = false,
+                                   const std::map<std::string, std::string>&
+                                       context = {}) const;
+
+    /// Return the fingerprint values for the given colorspace using optional
+    /// OCIO context overrides. Returns an empty vector if no fingerprint could
+    /// be computed. Results are cached per config+context.
+    ///
+    /// @version 3.1
+    std::vector<float>
+    get_colorspace_fingerprint(
+        string_view colorspace,
+        const std::map<std::string, std::string>& context = {}) const;
+
+    /// Find a color space in the config that matches the given fingerprint
+    /// values. Set `display_referred` to match display-referred color spaces;
+    /// otherwise (the default), scene-referred spaces are matched. Returns an
+    /// empty string if no match is found.
+    ///
+    /// @version 3.1
+    std::string
+    find_colorspace_from_fingerprint(
+        const std::vector<float>& fingerprint,
+        bool display_referred,
+        const std::map<std::string, std::string>& context = {}) const;
+
+    /// Return pairs of (this_config_colorspace, other_config_colorspace) where
+    /// fingerprints match between configs for the given contexts.
+    ///
+    /// @version 3.1
+    std::vector<std::pair<std::string, std::string>>
+    get_intersection(const ColorConfig& other,
+                     const std::map<std::string, std::string>& base_context = {},
+                     const std::map<std::string, std::string>& other_context = {}) const;
+
+    /// Return the interop id for a colorspace, using optional context overrides.
+    ///
+    /// @version 3.1
+    std::string
+    get_color_interop_id(string_view colorspace, bool strict,
+                         const std::map<std::string, std::string>& context) const;
+
     /// Return a filename or other identifier for the config we're using.
     std::string configname() const;
 
@@ -438,6 +539,28 @@ public:
     ///
     /// @version 3.1
     std::string ocioconfigname() const;
+
+    /// Return the OCIO config name (as-is from OCIO Config::getName()).
+    /// Returns an empty string if not found.
+    ///
+    /// @version 3.1
+    std::string getName() const;
+
+    /// Return the OCIO config cache ID.
+    ///
+    /// @version 3.1
+    std::string getCacheID() const;
+
+    /// Return the OCIO config working directory. Returns an empty string if
+    /// not available.
+    ///
+    /// @version 3.1
+    std::string getWorkingDir() const;
+
+    /// Set the OCIO config working directory.
+    ///
+    /// @version 3.1
+    void setWorkingDir(string_view dir);
 
     /// Set the spec's metadata to presume that color space is `name` (or to
     /// assume nothing about the color space if `name` is empty). The core

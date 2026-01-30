@@ -3925,17 +3925,21 @@ is provided for minimal color support.
     This function was added in OpenImageIO 3.1.
 
 
-.. py:method:: get_color_interop_id (colorspace)
+.. py:method:: get_color_interop_id (colorspace: str, strict: bool = False, context: dict[str, str | None] | None = None) -> str
 
     Find color interop ID for the given colorspace.
-    Returns empty string if not found.
+    Returns empty string if not found. If ``strict`` is True, only return
+    values explicitly specified in the OCIO config; otherwise, attempt to
+    find a definitionally equivalent interop ID. If ``context`` is not
+    None, it should be a dict of OCIO context overrides used for matching.
 
     Example:
 
     .. code-block:: python
 
         colorconfig = oiio.ColorConfig()
-        interop_id = colorconfig.get_color_interop_id("Rec.2100-PQ - Display")
+        interop_id = colorconfig.get_color_interop_id("sRGB - Texture")
+        assert interop_id == "srgb_rec709_scene""
 
     This function was added in OpenImageIO 3.1.
 
@@ -3951,6 +3955,131 @@ is provided for minimal color support.
 
         colorconfig = oiio.ColorConfig()
         interop_id = colorconfig.get_color_interop_id([9, 16, 9, 1])
+
+    This function was added in OpenImageIO 3.1.
+
+.. py:method:: get_equality_ids (exhaustive: bool = False, context: dict[str, str | None] | None = None) -> dict[str, str]
+
+    Return a dict mapping colorspace names to definitionally equivalent
+    built-in interop IDs, based on the current config and the built-in
+    interop identities. This corresponds to the internal cache used for
+    non-strict interop matching, and may omit colorspaces that are not
+    eligible for matching. This is NOT a mapping from colorspace to any
+    explicitly specified interop_id in the OCIO config.
+
+    Example:
+
+    If ``exhaustive`` is False, only attempt to fingerprint simple color
+    spaces; if True, attempt all color spaces. If ``context`` is not None,
+    it should be a dict of OCIO context overrides used for matching.
+
+    .. code-block:: python
+
+        colorconfig = oiio.ColorConfig()
+        cs_to_id = colorconfig.get_equality_ids()
+
+    This function was added in OpenImageIO 3.1.
+
+.. py:method:: get_interop_ids (strict: bool = False, exhaustive: bool = False, context: dict[str, str | None] | None = None) -> dict[str, str]
+
+    Return a dict mapping colorspace names to interop IDs. If ``strict`` is
+    True, only return values explicitly specified in the OCIO config; if
+    False, attempt to find definitionally equivalent built-in interop IDs.
+    If ``exhaustive`` is False, only attempt to fingerprint simple color
+    spaces; if True, attempt all color spaces. If ``context`` is not
+    None, it should be a dict of OCIO context overrides used for matching.
+
+    Example:
+
+    .. code-block:: python
+
+        colorconfig = oiio.ColorConfig()
+        cs_to_id = colorconfig.get_interop_ids()
+        assert cs_to_id["sRGB - Texture"] == "srgb_rec709_scene"
+
+    This function was added in OpenImageIO 3.1.
+
+.. py:method:: get_colorspace_fingerprint (colorspace: str, context: dict[str, str | None] | None = None) -> list[float | int]
+
+    Return the fingerprint values for ``colorspace``. If ``context`` is
+    provided, it should be a dict of OCIO context overrides used for matching.
+    Returns an empty list if a fingerprint cannot be computed. Results are
+    cached per config+context.
+
+    Example:
+
+    .. code-block:: python
+
+        colorconfig = oiio.ColorConfig("ocio://default")
+        fp = colorconfig.get_colorspace_fingerprint("aces_interchange")
+        assert round(fp[0], 6) == 0.408933
+
+    This function was added in OpenImageIO 3.1.
+
+.. py:method:: find_colorspace_from_fingerprint (fingerprint: list[float | int], display_referred: bool = False, context: dict[str, str | None] | None = None) -> str
+
+    Find a colorspace in the config that matches the given ``fingerprint``.
+    If ``display_referred`` is True, only display-referred spaces are
+    considered; otherwise (the default) scene-referred spaces are considered.
+    If
+    ``context`` is provided, it should be a dict of OCIO context
+    overrides used for matching.
+
+    Example:
+
+    .. code-block:: python
+
+        colorconfig = oiio.ColorConfig("ocio://default")
+        fp = colorconfig.get_colorspace_fingerprint("lin_ap1_scene")
+        match = colorconfig.find_colorspace_from_fingerprint(fp, False)
+        assert match == "ACEScg"
+
+    This function was added in OpenImageIO 3.1.
+
+.. py:method:: get_intersection (other: ColorConfig, base_context: dict[str, str | None] | None = None, other_context: dict[str, str | None] | None = None) -> list[tuple[str, str]]
+
+    Return a list of ``(base_colorspace, other_colorspace)`` pairs where the
+    two configs produce matching fingerprints. The ``base_context`` is applied
+    to the base config, and ``other_context`` is applied to the other config.
+
+    Example:
+
+    .. code-block:: python
+
+        base = oiio.ColorConfig("base.ocio")
+        other = oiio.ColorConfig("other.ocio")
+        pairs = base.get_intersection(
+            other,
+            base_context={"SHOT": "sh010"},
+            other_context={"SHOT": "sh010"},
+        )
+
+    This function was added in OpenImageIO 3.1.
+
+.. py:method:: getWorkingDir () -> str
+
+    Return the OCIO config working directory. Returns an empty string if not
+    available.
+
+    Example:
+
+    .. code-block:: python
+
+        colorconfig = oiio.ColorConfig()
+        working_dir = colorconfig.getWorkingDir()
+
+    This function was added in OpenImageIO 3.1.
+
+.. py:method:: setWorkingDir (dir: str) -> None
+
+    Set the OCIO config working directory.
+
+    Example:
+
+    .. code-block:: python
+
+        colorconfig = oiio.ColorConfig()
+        colorconfig.setWorkingDir("/path/to/dir")
 
     This function was added in OpenImageIO 3.1.
 
@@ -4368,5 +4497,3 @@ Alternatively, if you prefer using `uv <https://github.com/astral-sh/uv>`_, you 
 .. code-block:: bash
 
     uv run --with jupyter jupyter lab
-
-

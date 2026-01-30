@@ -754,8 +754,10 @@ transform_has_Lut3D(string_view name, OCIO::ConstTransformRcPtr transform,
         }
 
         // collect source color space transforms
-        auto src_cs       = config->getColorSpace(c_str(src));
-        auto dst_cs       = config->getColorSpace(c_str(dst));
+        auto ctx = config->getCurrentContext();
+        
+        auto src_cs = config->getColorSpace(ctx->resolveStringVar(c_str(src)));
+        auto dst_cs = config->getColorSpace(ctx->resolveStringVar(c_str(dst)));
         auto src_to_ref   = src_cs->getTransform(COLORSPACE_DIR_TO_REFERENCE);
         auto src_from_ref = src_cs->getTransform(COLORSPACE_DIR_FROM_REFERENCE);
         auto dst_to_ref   = dst_cs->getTransform(COLORSPACE_DIR_TO_REFERENCE);

@@ -35,6 +35,18 @@ if (CMAKE_COMPILER_IS_GNUCC)
                                  PROPERTIES COMPILE_FLAGS -Wno-stringop-truncation)
 endif ()
 
+# Generate a compiled-in interop identities config (similar to OCIO builtin configs).
+set(INTEROP_IDENTITIES_CONFIG_PATH
+    "${CMAKE_CURRENT_SOURCE_DIR}/interop-identities-config.ocio")
+file(READ "${INTEROP_IDENTITIES_CONFIG_PATH}" INTEROP_HEX_CONTENTS HEX)
+string(REGEX MATCHALL "([A-Za-z0-9][A-Za-z0-9])" INTEROP_SEPARATED_HEX "${INTEROP_HEX_CONTENTS}")
+list(JOIN INTEROP_SEPARATED_HEX ",0x" INTEROP_FORMATTED_HEX)
+string(PREPEND INTEROP_FORMATTED_HEX "0x")
+string(APPEND INTEROP_FORMATTED_HEX ",0x00")
+set(INTEROP_IDENTITIES_CONFIG_HEX ${INTEROP_FORMATTED_HEX})
+set(INTEROP_CONFIG_HEADER "${CMAKE_CURRENT_BINARY_DIR}/interop_identities_config.h")
+configure_file(interop_identities_config.h.in "${INTEROP_CONFIG_HEADER}" @ONLY)
+
 set (libOpenImageIO_srcs
                           imagebufalgo.cpp
                           imagebufalgo_pixelmath.cpp
@@ -138,6 +150,7 @@ target_include_directories (OpenImageIO
                                 ${OPENEXR_INCLUDES}
                             PRIVATE
                                 ${ROBINMAP_INCLUDES}
+                                ${CMAKE_CURRENT_BINARY_DIR}
                             )
 
 if (NOT BUILD_SHARED_LIBS)

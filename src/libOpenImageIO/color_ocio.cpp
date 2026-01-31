@@ -78,8 +78,6 @@ static int disable_builtin_configs = Strutil::stoi(
     Sysutil::getenv("OIIO_DISABLE_BUILTIN_OCIO_CONFIGS"));
 static int disable_equality_reverse_cache = Strutil::stoi(
     Sysutil::getenv("OIIO_DISABLE_EQUALITY_REVERSE_CACHE"));
-static int enable_debug_cache_bookkeeping = Strutil::stoi(
-    Sysutil::getenv("OIIO_DEBUG_COLOR_CACHE"));
 static OCIO::ConstConfigRcPtr ocio_current_config;
 
 
@@ -255,27 +253,13 @@ private:
     std::string m_configfilename;
     ColorConfig* m_self                 = nullptr;
     bool m_config_is_built_in           = false;
-    double m_config_load_seconds        = 0.0;
-    double m_initial_heuristics_seconds = 0.0;
     mutable std::vector<std::string> m_simple_color_spaces_cache;
     mutable bool m_simple_color_spaces_cached = false;
     mutable std::mutex m_fingerprint_cache_mutex;
     mutable ConfigUtils::FingerprintCacheMap m_fingerprint_cache;
     mutable std::unique_ptr<ConfigUtils::FastColorSpaceMatcher> m_interop_matcher;
-    mutable std::atomic<size_t> m_debug_equality_cache_hits { 0 };
-    mutable std::atomic<size_t> m_debug_equality_cache_misses { 0 };
+    mutable std::mutex m_interop_matcher_mutex;
     mutable std::atomic<bool> m_equality_reverse_cache_enabled { true };
-    mutable std::atomic<size_t> m_debug_equality_miss_no_ctx_entry { 0 };
-    mutable std::atomic<size_t> m_debug_equality_miss_no_key { 0 };
-    mutable std::atomic<size_t> m_debug_equality_miss_reverse_disabled { 0 };
-    mutable std::atomic<size_t> m_debug_equality_miss_not_simple { 0 };
-    mutable std::string m_debug_equality_last_cache_key;
-    // Debug bookkeeping is only enabled inside getDebugInfo().
-    mutable bool m_debug_cache_bookkeeping_enabled = false;
-    // Top-N miss tracking for debugging (see getDebugInfo). Not thread-safe;
-    // occasional inaccuracies are acceptable.
-    mutable std::array<std::pair<std::string, size_t>, 5>
-        m_debug_equality_top_misses {};
 
 public:
     Impl(ColorConfig* self)
@@ -330,33 +314,6 @@ public:
         const std::string config_id = config ? config->getCacheID()
                                              : std::string();
         return Strutil::fmt::format("{}@{}", ctx_id, config_id);
-    }
-    void debug_record_equality_miss(const std::string& key) const
-    {
-        size_t empty_index = 5;
-        size_t min_index   = 0;
-        size_t min_value   = std::numeric_limits<size_t>::max();
-        for (size_t i = 0; i < m_debug_equality_top_misses.size(); ++i) {
-            auto& entry = m_debug_equality_top_misses[i];
-            if (entry.first.empty()) {
-                empty_index = i;
-                break;
-            }
-            if (entry.second < min_value) {
-                min_value = entry.second;
-                min_index = i;
-            }
-            if (entry.first == key) {
-                entry.second++;
-                return;
-            }
-        }
-        if (empty_index < m_debug_equality_top_misses.size()) {
-            m_debug_equality_top_misses[empty_index] = { key, 1 };
-            return;
-        }
-        if (min_index < m_debug_equality_top_misses.size())
-            m_debug_equality_top_misses[min_index] = { key, min_value + 1 };
     }
 
     void add(const std::string& name, int index, int flags = 0)
@@ -1002,10 +959,8 @@ ColorConfig::Impl::init(string_view filename)
     //   simple color spaces, matchers).
     // - Inventory the config for roles/aliases and run heuristics.
     OIIO_MAYBE_UNUSED Timer timer;
-    Timer load_timer;
     bool ok = true;
 
-    m_debug_cache_bookkeeping_enabled = false;
     m_equality_reverse_cache_enabled.store(!disable_equality_reverse_cache);
 
     auto oldlog = OCIO::GetLoggingLevel();
@@ -1091,8 +1046,6 @@ ColorConfig::Impl::init(string_view filename)
         }
     }
 
-    m_config_load_seconds = load_timer.lap();
-
     OCIO::SetLoggingLevel(oldlog);
 
     ok = config_.get() != nullptr;
@@ -1109,6 +1062,7 @@ ColorConfig::Impl::init(string_view filename)
         m_simple_color_spaces_cache.clear();
         m_simple_color_spaces_cached = false;
         // Matcher uses cached fingerprints and is rebuilt per config.
+        std::lock_guard<std::mutex> matcher_lock(m_interop_matcher_mutex);
         m_interop_matcher.reset();
     }
     {
@@ -1117,7 +1071,6 @@ ColorConfig::Impl::init(string_view filename)
         m_fingerprint_cache.clear();
     }
 
-    Timer heuristics_timer;
     inventory();
     // NOTE: inventory already does classify_by_name
 
@@ -1148,8 +1101,6 @@ ColorConfig::Impl::init(string_view filename)
     debug_print_aliases();
     DBG("OCIO config {} classified in {:0.2f} seconds\n", filename,
         timer.lap());
-    m_initial_heuristics_seconds = heuristics_timer.lap();
-
     return ok;
 }
 
@@ -1790,10 +1741,8 @@ ColorConfig::Impl::resolve(string_view name) const
         const std::string key       = equality_cache_key(config_, ctx);
         spin_rw_read_lock lock(m_mutex);
         auto it_ctx = m_equality_id_to_cs_by_ctx.find(key);
-        if (!m_equality_reverse_cache_enabled.load()) {
-            if (m_debug_cache_bookkeeping_enabled)
-                m_debug_equality_miss_reverse_disabled++;
-        } else if (it_ctx != m_equality_id_to_cs_by_ctx.end()) {
+        if (m_equality_reverse_cache_enabled.load()
+            && it_ctx != m_equality_id_to_cs_by_ctx.end()) {
             auto it = it_ctx->second.find(std::string(name));
             if (it != it_ctx->second.end())
                 return it->second;
@@ -2900,19 +2849,6 @@ struct FingerprintCacheEntry {
     std::unordered_map<std::string, Fingerprint> by_name;
     double seconds             = 0.0;
     bool test_vals_initialized = false;
-    size_t hits                = 0;
-    size_t misses              = 0;
-};
-
-// Summary stats for a cache entry (used for debug info).
-struct FingerprintCacheStats {
-    size_t fingerprinted = 0;
-    size_t total         = 0;
-    size_t missing       = 0;
-    double seconds       = 0.0;
-    size_t hits          = 0;
-    size_t misses        = 0;
-    bool found           = false;
 };
 
 // Compute a fingerprint for a colorspace, optionally skipping complex transforms.
@@ -2933,13 +2869,6 @@ initializeColorSpaceFingerprints(
 // Get (or create) a cache entry for the config+context key.
 FingerprintCacheEntry
 get_fingerprint_cache_entry(const ConstConfigRcPtr& config,
-                            const ConstContextRcPtr& context,
-                            FingerprintCacheMap& cache,
-                            std::mutex& cache_mutex);
-
-// Snapshot cache statistics for debug reporting.
-FingerprintCacheStats
-get_fingerprint_cache_stats(const ConstConfigRcPtr& config,
                             const ConstContextRcPtr& context,
                             FingerprintCacheMap& cache,
                             std::mutex& cache_mutex);
@@ -3719,36 +3648,6 @@ get_fingerprint_cache_entry(const ConstConfigRcPtr& config,
     return entry;
 }
 
-FingerprintCacheStats
-get_fingerprint_cache_stats(const ConstConfigRcPtr& config,
-                            const ConstContextRcPtr& context,
-                            FingerprintCacheMap& cache, std::mutex& cache_mutex)
-{
-    FingerprintCacheStats stats;
-    if (!config)
-        return stats;
-
-    stats.total = (size_t)config->getNumColorSpaces(SEARCH_REFERENCE_SPACE_ALL,
-                                                    COLORSPACE_ALL);
-    const std::string cacheID = fingerprint_cache_key(config, context);
-    std::lock_guard<std::mutex> lock(cache_mutex);
-    auto it = cache.find(cacheID);
-    if (it == cache.end()) {
-        stats.missing = stats.total;
-        return stats;
-    }
-
-    stats.found         = true;
-    stats.fingerprinted = it->second.by_name.size();
-    stats.seconds       = it->second.seconds;
-    stats.hits          = it->second.hits;
-    stats.misses        = it->second.misses;
-    stats.missing       = stats.total >= stats.fingerprinted
-                              ? stats.total - stats.fingerprinted
-                              : 0;
-    return stats;
-}
-
 bool
 get_cached_fingerprint_for_colorspace(const ConstConfigRcPtr& config,
                                       const ConstColorSpaceRcPtr& cs,
@@ -3770,10 +3669,8 @@ get_cached_fingerprint_for_colorspace(const ConstConfigRcPtr& config,
             if (found != it->second.by_name.end()
                 && found->second.type == cs->getReferenceSpaceType()) {
                 fingerprintVals = found->second.vals;
-                it->second.hits++;
                 return true;
             }
-            it->second.misses++;
             fingerprints = it->second.fingerprints;
         }
     }
@@ -3786,17 +3683,7 @@ get_cached_fingerprint_for_colorspace(const ConstConfigRcPtr& config,
     if (found != entry.by_name.end()
         && found->second.type == cs->getReferenceSpaceType()) {
         fingerprintVals = found->second.vals;
-        std::lock_guard<std::mutex> lock(cache_mutex);
-        auto it = cache.find(cacheID);
-        if (it != cache.end())
-            it->second.hits++;
         return true;
-    }
-    {
-        std::lock_guard<std::mutex> lock(cache_mutex);
-        auto it = cache.find(cacheID);
-        if (it != cache.end())
-            it->second.misses++;
     }
 
     return false;
@@ -4485,10 +4372,6 @@ ColorConfig::Impl::initialize_equality_id_map() const
 
     OCIO::ConstContextRcPtr ctx = config_->getCurrentContext();
     const std::string key       = equality_cache_key(config_, ctx);
-    if (m_debug_cache_bookkeeping_enabled) {
-        spin_rw_write_lock lock(m_mutex);
-        m_debug_equality_last_cache_key = key;
-    }
     // Cache maps a colorspace name -> equality id for this context+config.
     // Example (conceptual): key="ctx:abc@cfg:deadbeef", "ACEScg" -> "lin_ap1_scene".
     {
@@ -4538,30 +4421,14 @@ ColorConfig::Impl::get_cached_equality_id(string_view colorspace) const
                                           : nullptr;
     const std::string key       = equality_cache_key(config_, ctx);
     spin_rw_read_lock lock(m_mutex);
-    if (m_debug_cache_bookkeeping_enabled) {
-        spin_rw_write_lock lock(m_mutex);
-        m_debug_equality_last_cache_key = key;
-    }
     auto it_ctx = m_cs_to_equality_id_by_ctx.find(key);
     if (it_ctx == m_cs_to_equality_id_by_ctx.end()) {
-        if (m_debug_cache_bookkeeping_enabled) {
-            m_debug_equality_cache_misses++;
-            m_debug_equality_miss_no_ctx_entry++;
-            debug_record_equality_miss(key);
-        }
         return "";
     }
     auto it = it_ctx->second.find(std::string(colorspace));
     if (it == it_ctx->second.end()) {
-        if (m_debug_cache_bookkeeping_enabled) {
-            m_debug_equality_cache_misses++;
-            m_debug_equality_miss_no_key++;
-            debug_record_equality_miss(key);
-        }
         return "";
     }
-    if (m_debug_cache_bookkeeping_enabled)
-        m_debug_equality_cache_hits++;
     return it->second;
 }
 
@@ -4596,18 +4463,9 @@ ColorConfig::Impl::get_equality_ids(
         {
             spin_rw_read_lock lock(m_mutex);
             auto it_ctx = m_cs_to_equality_id_by_ctx.find(key);
-            if (it_ctx != m_cs_to_equality_id_by_ctx.end()) {
-                if (m_debug_cache_bookkeeping_enabled)
-                    m_debug_equality_cache_hits++;
-                // Example (conceptual): "ACEScg" -> "lin_ap1_scene"
+            if (it_ctx != m_cs_to_equality_id_by_ctx.end())
                 return std::map<std::string, std::string>(it_ctx->second.begin(),
                                                           it_ctx->second.end());
-            }
-            if (m_debug_cache_bookkeeping_enabled) {
-                m_debug_equality_cache_misses++;
-                m_debug_equality_miss_no_ctx_entry++;
-                debug_record_equality_miss(key);
-            }
         }
     }
 
@@ -4620,17 +4478,6 @@ ColorConfig::Impl::get_equality_ids(
     } else {
         color_spaces = m_self->getColorSpaceNamesFiltered(true, true, true,
                                                           true, false);
-    }
-
-    if (exhaustive) {
-        // Any spaces that are not in the simple-space set will miss the cache
-        // by definition, since we only cache simple spaces.
-        const size_t simple_count = getSimpleColorSpaces().size();
-        if (m_debug_cache_bookkeeping_enabled
-            && color_spaces.size() > simple_count) {
-            m_debug_equality_miss_not_simple += (color_spaces.size()
-                                                 - simple_count);
-        }
     }
 
     for (const auto& name : color_spaces) {
@@ -4686,90 +4533,9 @@ std::map<std::string, std::string>
 ColorConfig::Impl::getDebugInfo(bool simple_space_blockers,
                                 bool cache_stats) const
 {
-    std::map<std::string, std::string> info;
-    if (!config_)
-        return info;
-
-    if (enable_debug_cache_bookkeeping != 0)
-        m_debug_cache_bookkeeping_enabled = cache_stats;
-    else
-        m_debug_cache_bookkeeping_enabled = false;
-
-    if (simple_space_blockers) {
-        const auto blockers = ConfigUtils::get_simple_color_space_blockers(
-            config_);
-        for (const auto& entry : blockers) {
-            info[Strutil::fmt::format("simple_color_space_blocker:{}",
-                                      entry.first)]
-                = entry.second;
-        }
-        info["simple_color_space_blocker.count"]
-            = Strutil::fmt::format("{}", blockers.size());
-    }
-    info["interop_reference_space_adapted"] = "1";
-    info["config_load.seconds"]             = Strutil::fmt::format("{}",
-                                                                   m_config_load_seconds);
-    info["initial_heuristics.seconds"]
-        = Strutil::fmt::format("{}", m_initial_heuristics_seconds);
-
-    const auto stats = ConfigUtils::get_fingerprint_cache_stats(
-        config_, config_ ? config_->getCurrentContext() : nullptr,
-        m_fingerprint_cache, m_fingerprint_cache_mutex);
-    info["fingerprint_cache.total"] = Strutil::fmt::format("{}", stats.total);
-    info["fingerprint_cache.fingerprinted"]
-        = Strutil::fmt::format("{}", stats.fingerprinted);
-    info["fingerprint_cache.unfingerprinted"]
-        = Strutil::fmt::format("{}", stats.missing);
-    info["fingerprint_cache.seconds"] = Strutil::fmt::format("{}",
-                                                             stats.seconds);
-    if (m_debug_cache_bookkeeping_enabled) {
-        info["fingerprint_cache.hits"] = Strutil::fmt::format("{}", stats.hits);
-        info["fingerprint_cache.misses"] = Strutil::fmt::format("{}",
-                                                                stats.misses);
-        info["equality_cache.hits"]
-            = Strutil::fmt::format("{}", m_debug_equality_cache_hits.load());
-        info["equality_cache.misses"]
-            = Strutil::fmt::format("{}", m_debug_equality_cache_misses.load());
-        info["equality_cache.reverse_enabled"] = Strutil::fmt::format(
-            "{}", m_equality_reverse_cache_enabled.load() ? 1 : 0);
-        {
-            OCIO::ConstContextRcPtr ctx = config_ ? config_->getCurrentContext()
-                                                  : nullptr;
-            const std::string key       = equality_cache_key(config_, ctx);
-            spin_rw_read_lock lock(m_mutex);
-            auto it_ctx                 = m_cs_to_equality_id_by_ctx.find(key);
-            info["equality_cache.size"] = Strutil::fmt::format(
-                "{}", it_ctx != m_cs_to_equality_id_by_ctx.end()
-                          ? it_ctx->second.size()
-                          : 0);
-            auto it_rev = m_equality_id_to_cs_by_ctx.find(key);
-            info["equality_cache.reverse_size"] = Strutil::fmt::format(
-                "{}", it_rev != m_equality_id_to_cs_by_ctx.end()
-                          ? it_rev->second.size()
-                          : 0);
-            info["equality_cache.last_key"] = m_debug_equality_last_cache_key;
-        }
-        info["equality_cache.miss_no_ctx_entry"]
-            = Strutil::fmt::format("{}",
-                                   m_debug_equality_miss_no_ctx_entry.load());
-        info["equality_cache.miss_no_key"]
-            = Strutil::fmt::format("{}", m_debug_equality_miss_no_key.load());
-        info["equality_cache.miss_reverse_disabled"] = Strutil::fmt::format(
-            "{}", m_debug_equality_miss_reverse_disabled.load());
-        info["equality_cache.miss_not_simple"]
-            = Strutil::fmt::format("{}",
-                                   m_debug_equality_miss_not_simple.load());
-        for (size_t i = 0; i < m_debug_equality_top_misses.size(); ++i) {
-            const auto& entry = m_debug_equality_top_misses[i];
-            if (entry.first.empty())
-                continue;
-            info[Strutil::fmt::format("equality_cache.top_miss[{}].key", i)]
-                = entry.first;
-            info[Strutil::fmt::format("equality_cache.top_miss[{}].count", i)]
-                = Strutil::fmt::format("{}", entry.second);
-        }
-    }
-    return info;
+    (void)simple_space_blockers;
+    (void)cache_stats;
+    return {};
 }
 
 std::map<std::string, std::string>
@@ -4953,8 +4719,12 @@ ConfigUtils::FastColorSpaceMatcher&
 ColorConfig::Impl::get_interop_matcher() const
 {
     if (!m_interop_matcher) {
-        m_interop_matcher.reset(new ConfigUtils::FastColorSpaceMatcher(
-            interopconfig_, m_fingerprint_cache, m_fingerprint_cache_mutex));
+        std::lock_guard<std::mutex> lock(m_interop_matcher_mutex);
+        if (!m_interop_matcher) {
+            m_interop_matcher.reset(new ConfigUtils::FastColorSpaceMatcher(
+                interopconfig_, m_fingerprint_cache,
+                m_fingerprint_cache_mutex));
+        }
     }
     return *m_interop_matcher;
 }

@@ -145,8 +145,7 @@ public:
                                bool display, bool simple = false) const;
 
     /// Return diagnostic strings with debug info about the configuration.
-    /// Keys are namespaced identifiers such as
-    /// "simple_color_space_blocker:<colorspace>".
+    /// Currently returns an empty map.
     std::map<std::string, std::string>
     getDebugInfo(bool simple_space_blockers = false,
                  bool cache_stats = false) const;

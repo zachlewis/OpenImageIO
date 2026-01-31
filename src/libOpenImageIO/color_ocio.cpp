@@ -3091,6 +3091,7 @@ ConstTransformRcPtr getTransformForDir(const ConstColorSpaceRcPtr & cs, ColorSpa
 }
 
 
+// clang-format off
 // Get a transform to convert from the source config reference space to the
 // destination config reference space.  The ref_space_type specifies whether
 // to work with the scene-referred or display-referred reference space.
@@ -3181,6 +3182,7 @@ ConstTransformRcPtr getRefSpaceConverter(const ConstConfigRcPtr & srcConfig,
 
     return simplifyTransform(gt);
 }
+// clang-format on
 
 bool transformIsEmpty(const ConstTransformRcPtr & tr)
 {
@@ -3195,6 +3197,8 @@ bool transformIsEmpty(const ConstTransformRcPtr & tr)
     return false;
 }
 
+
+// clang-format off
 // Update the reference space used by a color space's transforms.
 // The argument is a group transform that converts from the current to the new ref. space.
 //
@@ -3246,7 +3250,10 @@ void updateReferenceColorspace(ColorSpaceRcPtr & cs,
         cs->setTransform(gt, COLORSPACE_DIR_TO_REFERENCE);
     }
 }
+// clang-format on
 
+
+// clang-format off
 // Update the transforms in a view transform to adapt the reference spaces.
 // Note that the from_ref transform converts from the scene-referred reference space to
 // the display-referred reference space.
@@ -3341,6 +3348,7 @@ bool hasColorSpaceRefType(const ConstConfigRcPtr & config, ReferenceSpaceType re
     return n > 0;
 }
 
+// clang-format off
 // Initialize the transforms that will be added to color spaces and view transforms to
 // convert the reference space from one config to another.
 //
@@ -3384,7 +3392,9 @@ void initializeRefSpaceConverters(ConstTransformRcPtr & inputToBaseGtScene,
         inputToBaseGtDisplay = GroupTransform::Create();
     }
 }
+// clang-format on
 
+// clang-format off
 // Send the test vals through the color space and store the result in fingerprintVals.
 // Returns true if the color space should not be considered.
 //
@@ -3431,6 +3441,7 @@ bool calcColorSpaceFingerprint(std::vector<float> & fingerprintVals,
     return skipColorSpace;
 }
 
+// clang-format off
 // Define a set of test values to use for a config and store them in the fingerprints struct.
 // An attempt is made to convert them to the reference spaces of the config being used.
 // There are separate values for scene-referred and display-referred color spaces.
@@ -3556,7 +3567,10 @@ void initializeTestVals(ColorSpaceFingerprints & fingerprints, const ConstConfig
         fingerprints.displayRefTestVals = XYZvals;
     }
 }
+// clang-format on
 
+
+// clang-format off
 // Calculate a fingerprint for every color space in a base config. These will be used
 // to compare against color spaces in an input config for merging. Store the results in
 // the fingerprint struct.
@@ -3620,6 +3634,8 @@ void initializeColorSpaceFingerprints(
         }
     }
 }
+// clang-format on
+
 
 static OCIO::ConstContextRcPtr
 make_context_with_overrides(const OCIO::ConstConfigRcPtr& config,

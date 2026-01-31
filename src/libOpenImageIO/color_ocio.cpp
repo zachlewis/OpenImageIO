@@ -1258,7 +1258,7 @@ ColorConfig::getColorSpaceNames() const
 
 std::vector<std::string>
 ColorConfig::getColorSpaceNamesFiltered(bool visible, bool hidden, bool scene,
-                                        bool display) const
+                                        bool display, bool simple) const
 {
     std::vector<std::string> result;
     if (disable_ocio || !getImpl()->config_)
@@ -1281,25 +1281,24 @@ ColorConfig::getColorSpaceNamesFiltered(bool visible, bool hidden, bool scene,
     else if (!scene && display)
         refspace = OCIO::SEARCH_REFERENCE_SPACE_DISPLAY;
 
+    std::vector<std::string> simple_spaces;
+    if (simple)
+        simple_spaces = getImpl()->getSimpleColorSpaces();
+
     const int n = getImpl()->config_->getNumColorSpaces(refspace, visibility);
     result.reserve(n);
     for (int i = 0; i < n; ++i) {
         const char* name
             = getImpl()->config_->getColorSpaceNameByIndex(refspace, visibility,
                                                           i);
-        if (name && *name)
+        if (name && *name) {
+            if (simple && !std::binary_search(simple_spaces.begin(),
+                                              simple_spaces.end(), name))
+                continue;
             result.emplace_back(name);
+        }
     }
     return result;
-}
-
-std::vector<std::string>
-ColorConfig::getColorSpaces(bool visible, bool hidden, bool scene, bool display,
-                            bool simple) const
-{
-    if (simple)
-        return getImpl()->getSimpleColorSpaces();
-    return getColorSpaceNamesFiltered(visible, hidden, scene, display);
 }
 
 std::map<std::string, std::string>
@@ -4640,7 +4639,8 @@ ColorConfig::Impl::get_equality_ids(
     if (!exhaustive) {
         color_spaces = getSimpleColorSpaces();
     } else {
-        color_spaces = m_self->getColorSpaceNamesFiltered(true, true, true, true);
+        color_spaces = m_self->getColorSpaceNamesFiltered(true, true, true, true,
+                                                          false);
     }
 
     if (exhaustive) {
@@ -4812,7 +4812,8 @@ ColorConfig::Impl::get_interop_ids(
     if (!exhaustive) {
         color_spaces = getSimpleColorSpaces();
     } else {
-        color_spaces = m_self->getColorSpaceNamesFiltered(true, true, true, true);
+        color_spaces = m_self->getColorSpaceNamesFiltered(true, true, true, true,
+                                                          false);
     }
 
     for (const auto& name : color_spaces) {
@@ -4878,7 +4879,7 @@ ColorConfig::Impl::get_intersection(
         return result;
 
     const auto color_spaces
-        = m_self->getColorSpaces(true, true, true, true, false);
+        = m_self->getColorSpaceNamesFiltered(true, true, true, true, false);
     result.reserve(color_spaces.size());
 
     for (const auto& name : color_spaces) {

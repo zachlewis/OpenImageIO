@@ -57,17 +57,9 @@ declare_colorconfig(py::module& m)
         .def("getColorSpaceNames", &ColorConfig::getColorSpaceNames)
         .def("getColorSpaceNames",
              [](const ColorConfig& self, bool visible, bool hidden, bool scene,
-                bool display) {
-                 return self.getColorSpaceNamesFiltered(visible, hidden, scene,
-                                                        display);
-             },
-             "visible"_a = true, "hidden"_a = false, "scene"_a = true,
-             "display"_a = true)
-        .def("getColorSpaces",
-             [](const ColorConfig& self, bool visible, bool hidden, bool scene,
                 bool display, bool simple) {
-                 return self.getColorSpaces(visible, hidden, scene, display,
-                                            simple);
+                 return self.getColorSpaceNamesFiltered(visible, hidden, scene,
+                                                        display, simple);
              },
              "visible"_a = true, "hidden"_a = false, "scene"_a = true,
              "display"_a = true, "simple"_a = false)
@@ -306,15 +298,6 @@ declare_colorconfig(py::module& m)
              },
              "other"_a, "base_context"_a = py::dict(),
              "other_context"_a = py::dict())
-        .def("match_fingerprint_to_colorspace",
-             [](const ColorConfig& self, const std::vector<float>& fingerprint,
-                bool display_cs, const py::dict& context) {
-                 auto parsed = parse_context_vars(context);
-                 return self.find_colorspace_from_fingerprint(
-                     fingerprint, display_cs, parsed);
-             },
-             "fingerprint"_a, "display_cs"_a = false,
-             "context"_a = py::dict())
         .def("get_cicp",
              [](const ColorConfig& self, const std::string& colorspace)
                  -> std::optional<std::array<int, 4>> {

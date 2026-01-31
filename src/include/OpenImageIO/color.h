@@ -137,20 +137,12 @@ public:
     /// include inactive color spaces. If both are true, include all.
     /// If `scene` is true, include scene-referred spaces; if `display` is true,
     /// include display-referred spaces.
+    /// If `simple` is true, restrict to "simple" spaces (no blockable transforms).
     ///
     /// @version 3.1
     std::vector<std::string>
     getColorSpaceNamesFiltered(bool visible, bool hidden, bool scene,
-                               bool display) const;
-
-    /// Retrieve the list of known color space names with filters, and
-    /// optionally restrict to "simple" spaces (no blockable transforms).
-    ///
-    /// @version 3.1
-    std::vector<std::string>
-    getColorSpaces(bool visible = true, bool hidden = false,
-                   bool scene = true, bool display = true,
-                   bool simple = false) const;
+                               bool display, bool simple = false) const;
 
     /// Return diagnostic strings with debug info about the configuration.
     /// Keys are namespaced identifiers such as

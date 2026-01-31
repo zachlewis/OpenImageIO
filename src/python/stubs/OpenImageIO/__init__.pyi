@@ -188,13 +188,6 @@ class ColorConfig:
         hidden: bool = ...,
         scene: bool = ...,
         display: bool = ...,
-    ) -> list[str]: ...
-    def getColorSpaces(
-        self,
-        visible: bool = ...,
-        hidden: bool = ...,
-        scene: bool = ...,
-        display: bool = ...,
         simple: bool = ...,
     ) -> list[str]: ...
     def getDebugInfo(
@@ -257,12 +250,6 @@ class ColorConfig:
         base_context: dict[str, str | None] = ...,
         other_context: dict[str, str | None] = ...,
     ) -> list[tuple[str, str]]: ...
-    def match_fingerprint_to_colorspace(
-        self,
-        fingerprint: list[float],
-        display_cs: bool = ...,
-        context: dict[str, str | None] = ...,
-    ) -> str: ...
     @overload
     def get_color_interop_id(
         self,

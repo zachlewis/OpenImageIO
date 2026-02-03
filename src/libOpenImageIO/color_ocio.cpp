@@ -2632,7 +2632,7 @@ ColorConfig::get_color_interop_id(string_view colorspace, bool strict) const
     //   transform graph for a colorspace in a given context (i.e., what it
     //   really does).
     // - interop_id: an author-declared value intended for downstream metadata
-    //   (EXR colorInteropID, PNG cICP/gAMA/cHRM, etc.) and may not match the
+    //   (EXR colorInteropID, PNG cICP/gAMA/cHRM, etc.); may not match the
     //   actual transforms.
     //
     // Examples:
@@ -4546,14 +4546,6 @@ ColorConfig::Impl::get_interop_ids(
     std::map<std::string, std::string> result;
     if (!config_)
         return result;
-
-    // // Fast path: if strict and no context overrides, just return cached map.
-    // if (strict && context.empty()) {
-    //     initialize_equality_id_map();
-    //     spin_rw_read_lock lock(m_mutex);
-    //     return std::map<std::string, std::string>(
-    //         m_cs_to_interop_id.begin(), m_cs_to_interop_id.end());
-    // }
 
     std::vector<std::string> color_spaces;
     if (!exhaustive) {

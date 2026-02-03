@@ -3978,31 +3978,34 @@ namespace {
                                     const ConstContextRcPtr& context,
                                     const ConstTransformRcPtr& transform,
                                     std::unordered_set<std::string>& whitelist,
-                                    std::unordered_set<std::string>& blacklist,
-                                    std::string* reason);
+                                    std::unordered_set<std::string>& blacklist);
     bool containsBlockableTransform(const ConstConfigRcPtr& config,
                                     const ConstContextRcPtr& context,
                                     const char* name,
                                     std::unordered_set<std::string>& whitelist,
-                                    std::unordered_set<std::string>& blacklist,
-                                    std::string* reason);
+                                    std::unordered_set<std::string>& blacklist);
+    bool containsBlockableTransform(const ConstConfigRcPtr& config,
+                                    const ConstTransformRcPtr& transform,
+                                    std::unordered_set<std::string>& whitelist,
+                                    std::unordered_set<std::string>& blacklist);
+    bool containsBlockableTransform(const ConstConfigRcPtr& config,
+                                    const char* name,
+                                    std::unordered_set<std::string>& whitelist,
+                                    std::unordered_set<std::string>& blacklist);
 
-    bool colorSpaceHasBlockableTransform(
-        const ConstConfigRcPtr& config, const ConstColorSpaceRcPtr& cs,
-        std::unordered_set<std::string>& whitelist,
-        std::unordered_set<std::string>& blacklist, std::string* reason)
+    bool
+    colorSpaceHasBlockableTransform(const ConstConfigRcPtr& config,
+                                    const ConstColorSpaceRcPtr& cs,
+                                    std::unordered_set<std::string>& whitelist,
+                                    std::unordered_set<std::string>& blacklist)
     {
         if (!cs) {
-            if (reason)
-                *reason = "missing colorspace";
             return true;
         }
         const char* csName = cs->getName();
         if (cs->isData()) {
             if (csName && *csName)
                 blacklist.insert(csName);
-            if (reason)
-                *reason = "data colorspace";
             return true;
         }
         if (csName && whitelist.count(csName)) {
@@ -4012,24 +4015,19 @@ namespace {
         ConstTransformRcPtr toRef = cs->getTransform(
             COLORSPACE_DIR_TO_REFERENCE);
         if (toRef
-            && containsBlockableTransform(config, toRef, whitelist, blacklist,
-                                          reason)) {
+            && containsBlockableTransform(config, toRef, whitelist, blacklist)) {
             if (csName && *csName)
                 blacklist.insert(csName);
-            if (reason && !reason->empty())
-                *reason = Strutil::fmt::format("to_reference: {}", *reason);
             return true;
         }
 
         ConstTransformRcPtr fromRef = cs->getTransform(
             COLORSPACE_DIR_FROM_REFERENCE);
         if (fromRef
-            && containsBlockableTransform(config, fromRef, whitelist, blacklist,
-                                          reason)) {
+            && containsBlockableTransform(config, fromRef, whitelist,
+                                          blacklist)) {
             if (csName && *csName)
                 blacklist.insert(csName);
-            if (reason && !reason->empty())
-                *reason = Strutil::fmt::format("from_reference: {}", *reason);
             return true;
         }
 
@@ -4041,27 +4039,19 @@ namespace {
     bool namedTransformHasBlockableTransform(
         const ConstConfigRcPtr& config, const ConstNamedTransformRcPtr& nt,
         std::unordered_set<std::string>& whitelist,
-        std::unordered_set<std::string>& blacklist, std::string* reason)
+        std::unordered_set<std::string>& blacklist)
     {
         if (!nt) {
-            if (reason)
-                *reason = "missing named transform";
             return true;
         }
         ConstTransformRcPtr fwd = nt->getTransform(TRANSFORM_DIR_FORWARD);
         if (fwd
-            && containsBlockableTransform(config, fwd, whitelist, blacklist,
-                                          reason)) {
-            if (reason && !reason->empty())
-                *reason = Strutil::fmt::format("forward: {}", *reason);
+            && containsBlockableTransform(config, fwd, whitelist, blacklist)) {
             return true;
         }
         ConstTransformRcPtr rev = nt->getTransform(TRANSFORM_DIR_INVERSE);
         if (rev
-            && containsBlockableTransform(config, rev, whitelist, blacklist,
-                                          reason)) {
-            if (reason && !reason->empty())
-                *reason = Strutil::fmt::format("inverse: {}", *reason);
+            && containsBlockableTransform(config, rev, whitelist, blacklist)) {
             return true;
         }
         return false;
@@ -4071,12 +4061,9 @@ namespace {
                                     const ConstContextRcPtr& context,
                                     const char* name,
                                     std::unordered_set<std::string>& whitelist,
-                                    std::unordered_set<std::string>& blacklist,
-                                    std::string* reason)
+                                    std::unordered_set<std::string>& blacklist)
     {
         if (!name || !*name) {
-            if (reason)
-                *reason = "empty name";
             return true;
         }
         ConstContextRcPtr ctx = context ? context : config->getCurrentContext();
@@ -4086,57 +4073,46 @@ namespace {
         ConstColorSpaceRcPtr cs = config->getColorSpace(c_str(name_cs));
         if (cs) {
             if (blacklist.count(c_str(cs->getName()))) {
-                if (reason)
-                    *reason
-                        = "previously blocked by an unsupported or complex transform";
                 return true;
             }
             if (whitelist.count(c_str(cs->getName()))) {
                 return false;
             }
             return colorSpaceHasBlockableTransform(config, cs, whitelist,
-                                                   blacklist, reason);
+                                                   blacklist);
         }
 
         ConstNamedTransformRcPtr nt = config->getNamedTransform(c_str(name_cs));
         if (!nt) {
-            if (reason)
-                *reason = Strutil::fmt::format(
-                    "unknown named transform or colorspace: {}",
-                    c_str(name_cs));
             return true;
         }
         return namedTransformHasBlockableTransform(config, nt, whitelist,
-                                                   blacklist, reason);
+                                                   blacklist);
     }
 
     bool containsBlockableTransform(const ConstConfigRcPtr& config,
                                     const char* name,
                                     std::unordered_set<std::string>& whitelist,
-                                    std::unordered_set<std::string>& blacklist,
-                                    std::string* reason)
+                                    std::unordered_set<std::string>& blacklist)
     {
         return containsBlockableTransform(config, config->getCurrentContext(),
-                                          name, whitelist, blacklist, reason);
+                                          name, whitelist, blacklist);
     }
 
     bool containsBlockableTransform(const ConstConfigRcPtr& config,
                                     const ConstTransformRcPtr& transform,
                                     std::unordered_set<std::string>& whitelist,
-                                    std::unordered_set<std::string>& blacklist,
-                                    std::string* reason)
+                                    std::unordered_set<std::string>& blacklist)
     {
         return containsBlockableTransform(config, config->getCurrentContext(),
-                                          transform, whitelist, blacklist,
-                                          reason);
+                                          transform, whitelist, blacklist);
     }
 
     bool containsBlockableTransform(const ConstConfigRcPtr& config,
                                     const ConstContextRcPtr& context,
                                     const ConstTransformRcPtr& transform,
                                     std::unordered_set<std::string>& whitelist,
-                                    std::unordered_set<std::string>& blacklist,
-                                    std::string* reason)
+                                    std::unordered_set<std::string>& blacklist)
     {
         if (!transform) {
             return false;
@@ -4145,27 +4121,12 @@ namespace {
         ConstContextRcPtr ctx = context ? context : config->getCurrentContext();
 
         switch (transform->getTransformType()) {
-        case TRANSFORM_TYPE_LUT3D:
-            if (reason)
-                *reason = "transform type LUT3D";
-            return true;
-        case TRANSFORM_TYPE_LOOK:
-            if (reason)
-                *reason = "transform type LOOK";
-            return true;
-        case TRANSFORM_TYPE_DISPLAY_VIEW:
-            if (reason)
-                *reason = "transform type DISPLAY_VIEW";
-            return true;
+        case TRANSFORM_TYPE_LUT3D: return true;
+        case TRANSFORM_TYPE_LOOK: return true;
+        case TRANSFORM_TYPE_DISPLAY_VIEW: return true;
         case TRANSFORM_TYPE_FILE: {
             ConstFileTransformRcPtr ft = DynamicPtrCast<const FileTransform>(
                 transform);
-            if (reason) {
-                const char* src = ft ? ft->getSrc() : nullptr;
-                *reason         = src && *src
-                                      ? Strutil::fmt::format("file transform: {}", src)
-                                      : "file transform";
-            }
             return fileTransformIsBlockable(ft);
         }
         case TRANSFORM_TYPE_GROUP: {
@@ -4175,9 +4136,7 @@ namespace {
                 return false;
             for (int i = 0, e = gt->getNumTransforms(); i < e; ++i) {
                 if (containsBlockableTransform(config, ctx, gt->getTransform(i),
-                                               whitelist, blacklist, reason)) {
-                    if (reason && !reason->empty())
-                        *reason = Strutil::fmt::format("group: {}", *reason);
+                                               whitelist, blacklist)) {
                     return true;
                 }
             }
@@ -4187,8 +4146,6 @@ namespace {
             ConstColorSpaceTransformRcPtr cst
                 = DynamicPtrCast<const ColorSpaceTransform>(transform);
             if (!cst) {
-                if (reason)
-                    *reason = "colorspace transform";
                 return true;
             }
 
@@ -4206,42 +4163,20 @@ namespace {
                 bool blocked
                     = containsBlockableTransform(config, ctx,
                                                  c_str(dst_cs->getName()),
-                                                 whitelist, blacklist, reason);
-                if (blocked && reason && !reason->empty())
-                    *reason = Strutil::fmt::format("colorspace dst: {}",
-                                                   *reason);
+                                                 whitelist, blacklist);
                 return blocked;
             }
             if (!dst_cs && src_cs) {
                 bool blocked
                     = containsBlockableTransform(config, ctx,
                                                  c_str(src_cs->getName()),
-                                                 whitelist, blacklist, reason);
-                if (blocked && reason && !reason->empty())
-                    *reason = Strutil::fmt::format("colorspace src: {}",
-                                                   *reason);
+                                                 whitelist, blacklist);
                 return blocked;
             }
 
             if (src_cs && dst_cs) {
                 if (blacklist.count(src_cs->getName())
                     || blacklist.count(dst_cs->getName())) {
-                    if (src && blacklist.count(c_str(src_cs->getName()))
-                        && reason)
-                        *reason = Strutil::fmt::format(
-                            "colorspace {} previously blocked: {}",
-                            c_str(src_cs->getName()),
-                            reason && !reason->empty() ? *reason : "");
-                    else if (dst && blacklist.count(c_str(dst_cs->getName()))
-                             && reason)
-                        *reason = Strutil::fmt::format(
-                            "colorspace {} previously blocked: {}",
-                            c_str(dst_cs->getName()),
-                            reason && !reason->empty() ? *reason : "");
-                    else
-
-                        if (reason)
-                        *reason = "colorspace src/dst previously blocked";
                     return true;
                 }
                 if (whitelist.count(c_str(src_cs->getName()))
@@ -4250,24 +4185,14 @@ namespace {
                 bool blocked
                     = containsBlockableTransform(config, ctx,
                                                  c_str(src_cs->getName()),
-                                                 whitelist, blacklist, reason);
-                if (blocked) {
-                    if (reason && !reason->empty())
-                        *reason = Strutil::fmt::format("colorspace src: {}",
-                                                       *reason);
+                                                 whitelist, blacklist);
+                if (blocked)
                     return true;
-                }
                 blocked = containsBlockableTransform(config, ctx,
                                                      c_str(dst_cs->getName()),
-                                                     whitelist, blacklist,
-                                                     reason);
-                if (blocked && reason && !reason->empty())
-                    *reason = Strutil::fmt::format("colorspace dst: {}",
-                                                   *reason);
+                                                     whitelist, blacklist);
                 return blocked;
             }
-            if (reason)
-                *reason = "colorspace transform missing src/dst";
             return true;
         }
         default: break;
@@ -4302,8 +4227,8 @@ get_simple_color_spaces(const ConstConfigRcPtr& config)
         if (whitelist.count(name) || blacklist.count(name)) {
             continue;
         }
-        if (containsBlockableTransform(config, ctx, name, whitelist, blacklist,
-                                       nullptr)) {
+        if (containsBlockableTransform(config, ctx, name, whitelist,
+                                       blacklist)) {
             blacklist.insert(name);
         } else {
             whitelist.insert(name);
@@ -4340,12 +4265,10 @@ get_simple_color_space_blockers(const ConstConfigRcPtr& config)
             continue;
         }
 
-        std::string reason;
-        if (containsBlockableTransform(config, ctx, name, whitelist, blacklist,
-                                       &reason)) {
-            if (reason.empty())
-                reason = "blocked by unsupported or complex transform";
-            blockers.emplace(name, reason);
+        if (containsBlockableTransform(config, ctx, name, whitelist,
+                                       blacklist)) {
+            blockers.emplace(name,
+                             "blocked by unsupported or complex transform");
             blacklist.insert(name);
         } else {
             whitelist.insert(name);
@@ -4430,7 +4353,8 @@ ColorConfig::Impl::initialize_equality_id_map() const
 
     tsl::robin_map<std::string, std::string> equalityIdToCs;
     tsl::robin_map<std::string, std::string> csToEqualityId;
-    // equalityIdToCs is used for resolving interop ids back to config spaces.
+    // equalityIdToCs is used for resolving equality ids (and interop_ids)
+    // back to config spaces.
     // Example: key="lin_rec709_scene", value="Rec709".
 
     if (interopconfig_ && config_) {

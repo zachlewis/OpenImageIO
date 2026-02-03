@@ -251,8 +251,8 @@ private:
     atomic_int colorprocs_created;
     std::string m_configname;
     std::string m_configfilename;
-    ColorConfig* m_self                 = nullptr;
-    bool m_config_is_built_in           = false;
+    ColorConfig* m_self       = nullptr;
+    bool m_config_is_built_in = false;
     mutable std::vector<std::string> m_simple_color_spaces_cache;
     mutable bool m_simple_color_spaces_cached = false;
     mutable std::mutex m_fingerprint_cache_mutex;
@@ -419,7 +419,7 @@ public:
     std::vector<string_view> get_builtin_interop_ids() const;
     static OCIO::ConstConfigRcPtr build_interop_identities_config();
     string_view get_cached_equality_id(string_view colorspace) const;
-    std::vector<std::string> getSimpleColorSpaces() const;
+    const std::vector<std::string>& getSimpleColorSpaces() const;
     std::map<std::string, std::string> getDebugInfo(bool simple_space_blockers,
                                                     bool cache_stats) const;
 
@@ -1223,9 +1223,9 @@ ColorConfig::getColorSpaceNamesFiltered(bool visible, bool hidden, bool scene,
     else if (!scene && display)
         refspace = OCIO::SEARCH_REFERENCE_SPACE_DISPLAY;
 
-    std::vector<std::string> simple_spaces;
+    const std::vector<std::string>* simple_spaces = nullptr;
     if (simple)
-        simple_spaces = getImpl()->getSimpleColorSpaces();
+        simple_spaces = &getImpl()->getSimpleColorSpaces();
 
     const int n = getImpl()->config_->getNumColorSpaces(refspace, visibility);
     result.reserve(n);
@@ -1235,8 +1235,8 @@ ColorConfig::getColorSpaceNamesFiltered(bool visible, bool hidden, bool scene,
                                                            i);
         if (name && *name) {
             if (simple
-                && !std::binary_search(simple_spaces.begin(),
-                                       simple_spaces.end(), name))
+                && !std::binary_search(simple_spaces->begin(),
+                                       simple_spaces->end(), name))
                 continue;
             result.emplace_back(name);
         }
@@ -2930,6 +2930,7 @@ get_simple_color_spaces(const ConstConfigRcPtr& config);
 std::map<std::string, std::string>
 get_simple_color_space_blockers(const ConstConfigRcPtr& config);
 
+// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
 // Temporarily deactivate the Processor cache on a Config object.
 //
 class SuspendCacheGuard {
@@ -2952,6 +2953,7 @@ private:
     ProcessorCacheFlags m_origCacheFlags;
 };
 
+// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
 // Simplify a transform by removing nested group transforms and identities.
 //
 ConstTransformRcPtr
@@ -2967,6 +2969,7 @@ simplifyTransform(const ConstGroupTransformRcPtr& gt)
     return finalGt;
 }
 
+// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
 ConstTransformRcPtr
 invertTransform(const ConstTransformRcPtr& t)
 {
@@ -2975,6 +2978,7 @@ invertTransform(const ConstTransformRcPtr& t)
     return eT;
 }
 
+// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
 // Return a transform in either the to_ref or from_ref direction for this color space.
 // Return an identity matrix, if the color space has no transforms.
 //
@@ -3009,10 +3013,10 @@ getTransformForDir(const ConstColorSpaceRcPtr& cs, ColorSpaceDirection dir)
 
 
 // clang-format off
+// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
 // Get a transform to convert from the source config reference space to the
 // destination config reference space.  The ref_space_type specifies whether
 // to work with the scene-referred or display-referred reference space.
-//
 ConstTransformRcPtr getRefSpaceConverter(const ConstConfigRcPtr & srcConfig, 
                                          const ConstConfigRcPtr & dstConfig, 
                                          ReferenceSpaceType refSpaceType)
@@ -3115,6 +3119,7 @@ transformIsEmpty(const ConstTransformRcPtr& tr)
 
 
 // clang-format off
+// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
 // Update the reference space used by a color space's transforms.
 // The argument is a group transform that converts from the current to the new ref. space.
 //
@@ -3170,6 +3175,7 @@ void updateReferenceColorspace(ColorSpaceRcPtr & cs,
 
 
 // clang-format off
+// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
 // Update the transforms in a view transform to adapt the reference spaces.
 // Note that the from_ref transform converts from the scene-referred reference space to
 // the display-referred reference space.
@@ -3256,15 +3262,21 @@ void updateReferenceView(ViewTransformRcPtr & vt,
     // Note that Config::addViewTransform prevents creating a view transform that 
     // has no transforms, so at least one direction will be present.
 }
+// clang-format on
 
+// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
+// clang-format off
 bool hasColorSpaceRefType(const ConstConfigRcPtr & config, ReferenceSpaceType refType)
 {
     SearchReferenceSpaceType searchRefType = static_cast<SearchReferenceSpaceType>(refType);
     int n = config->getNumColorSpaces(searchRefType, COLORSPACE_ALL);
     return n > 0;
 }
+// clang-format on
+
 
 // clang-format off
+// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
 // Initialize the transforms that will be added to color spaces and view transforms to
 // convert the reference space from one config to another.
 //
@@ -3311,6 +3323,7 @@ void initializeRefSpaceConverters(ConstTransformRcPtr & inputToBaseGtScene,
 // clang-format on
 
 // clang-format off
+// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
 // Send the test vals through the color space and store the result in fingerprintVals.
 // Returns true if the color space should not be considered.
 //
@@ -3358,6 +3371,7 @@ bool calcColorSpaceFingerprint(std::vector<float> & fingerprintVals,
 }
 
 // clang-format off
+// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
 // Define a set of test values to use for a config and store them in the fingerprints struct.
 // An attempt is made to convert them to the reference spaces of the config being used.
 // There are separate values for scene-referred and display-referred color spaces.
@@ -3487,6 +3501,8 @@ void initializeTestVals(ColorSpaceFingerprints & fingerprints, const ConstConfig
 
 
 // clang-format off
+// Slightly modified from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026:
+//   - Take OCIO Context into account when computing fingerprints.
 // Calculate a fingerprint for every color space in a base config. These will be used
 // to compare against color spaces in an input config for merging. Store the results in
 // the fingerprint struct.
@@ -3876,6 +3892,7 @@ FastColorSpaceMatcher::findEquivalentColorspaceFromFingerprint(
     return "";
 }
 
+// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
 // If the base config contains a color space equivalent to inputCS, return its name.
 // Return an empty string if no equivalent color space is found (within the tolerance).
 // The ref_space_type specifies the type of inputCS and determines which part of the
@@ -3958,7 +3975,14 @@ namespace {
     }
 
     bool containsBlockableTransform(const ConstConfigRcPtr& config,
+                                    const ConstContextRcPtr& context,
                                     const ConstTransformRcPtr& transform,
+                                    std::unordered_set<std::string>& whitelist,
+                                    std::unordered_set<std::string>& blacklist,
+                                    std::string* reason);
+    bool containsBlockableTransform(const ConstConfigRcPtr& config,
+                                    const ConstContextRcPtr& context,
+                                    const char* name,
                                     std::unordered_set<std::string>& whitelist,
                                     std::unordered_set<std::string>& blacklist,
                                     std::string* reason);
@@ -4044,6 +4068,7 @@ namespace {
     }
 
     bool containsBlockableTransform(const ConstConfigRcPtr& config,
+                                    const ConstContextRcPtr& context,
                                     const char* name,
                                     std::unordered_set<std::string>& whitelist,
                                     std::unordered_set<std::string>& blacklist,
@@ -4054,8 +4079,8 @@ namespace {
                 *reason = "empty name";
             return true;
         }
-        auto name_cs = config->getCurrentContext()->resolveStringVar(
-            c_str(name));
+        ConstContextRcPtr ctx = context ? context : config->getCurrentContext();
+        auto name_cs          = ctx->resolveStringVar(c_str(name));
 
 
         ConstColorSpaceRcPtr cs = config->getColorSpace(c_str(name_cs));
@@ -4086,6 +4111,28 @@ namespace {
     }
 
     bool containsBlockableTransform(const ConstConfigRcPtr& config,
+                                    const char* name,
+                                    std::unordered_set<std::string>& whitelist,
+                                    std::unordered_set<std::string>& blacklist,
+                                    std::string* reason)
+    {
+        return containsBlockableTransform(config, config->getCurrentContext(),
+                                          name, whitelist, blacklist, reason);
+    }
+
+    bool containsBlockableTransform(const ConstConfigRcPtr& config,
+                                    const ConstTransformRcPtr& transform,
+                                    std::unordered_set<std::string>& whitelist,
+                                    std::unordered_set<std::string>& blacklist,
+                                    std::string* reason)
+    {
+        return containsBlockableTransform(config, config->getCurrentContext(),
+                                          transform, whitelist, blacklist,
+                                          reason);
+    }
+
+    bool containsBlockableTransform(const ConstConfigRcPtr& config,
+                                    const ConstContextRcPtr& context,
                                     const ConstTransformRcPtr& transform,
                                     std::unordered_set<std::string>& whitelist,
                                     std::unordered_set<std::string>& blacklist,
@@ -4095,7 +4142,7 @@ namespace {
             return false;
         }
 
-        ConstContextRcPtr ctx = config->getCurrentContext();
+        ConstContextRcPtr ctx = context ? context : config->getCurrentContext();
 
         switch (transform->getTransformType()) {
         case TRANSFORM_TYPE_LUT3D:
@@ -4127,7 +4174,7 @@ namespace {
             if (!gt)
                 return false;
             for (int i = 0, e = gt->getNumTransforms(); i < e; ++i) {
-                if (containsBlockableTransform(config, gt->getTransform(i),
+                if (containsBlockableTransform(config, ctx, gt->getTransform(i),
                                                whitelist, blacklist, reason)) {
                     if (reason && !reason->empty())
                         *reason = Strutil::fmt::format("group: {}", *reason);
@@ -4157,7 +4204,7 @@ namespace {
 
             if (!src_cs && dst_cs) {
                 bool blocked
-                    = containsBlockableTransform(config,
+                    = containsBlockableTransform(config, ctx,
                                                  c_str(dst_cs->getName()),
                                                  whitelist, blacklist, reason);
                 if (blocked && reason && !reason->empty())
@@ -4167,7 +4214,7 @@ namespace {
             }
             if (!dst_cs && src_cs) {
                 bool blocked
-                    = containsBlockableTransform(config,
+                    = containsBlockableTransform(config, ctx,
                                                  c_str(src_cs->getName()),
                                                  whitelist, blacklist, reason);
                 if (blocked && reason && !reason->empty())
@@ -4201,7 +4248,7 @@ namespace {
                     && whitelist.count(c_str(dst_cs->getName())))
                     return false;
                 bool blocked
-                    = containsBlockableTransform(config,
+                    = containsBlockableTransform(config, ctx,
                                                  c_str(src_cs->getName()),
                                                  whitelist, blacklist, reason);
                 if (blocked) {
@@ -4210,7 +4257,7 @@ namespace {
                                                        *reason);
                     return true;
                 }
-                blocked = containsBlockableTransform(config,
+                blocked = containsBlockableTransform(config, ctx,
                                                      c_str(dst_cs->getName()),
                                                      whitelist, blacklist,
                                                      reason);
@@ -4241,6 +4288,7 @@ get_simple_color_spaces(const ConstConfigRcPtr& config)
 
     std::unordered_set<std::string> whitelist;
     std::unordered_set<std::string> blacklist;
+    ConstContextRcPtr ctx = config->getCurrentContext();
 
     const int n = config->getNumColorSpaces(SEARCH_REFERENCE_SPACE_ALL,
                                             COLORSPACE_ALL);
@@ -4254,7 +4302,7 @@ get_simple_color_spaces(const ConstConfigRcPtr& config)
         if (whitelist.count(name) || blacklist.count(name)) {
             continue;
         }
-        if (containsBlockableTransform(config, name, whitelist, blacklist,
+        if (containsBlockableTransform(config, ctx, name, whitelist, blacklist,
                                        nullptr)) {
             blacklist.insert(name);
         } else {
@@ -4280,6 +4328,7 @@ get_simple_color_space_blockers(const ConstConfigRcPtr& config)
 
     std::unordered_set<std::string> whitelist;
     std::unordered_set<std::string> blacklist;
+    ConstContextRcPtr ctx = config->getCurrentContext();
 
     const int n = config->getNumColorSpaces(SEARCH_REFERENCE_SPACE_ALL,
                                             COLORSPACE_ALL);
@@ -4292,7 +4341,7 @@ get_simple_color_space_blockers(const ConstConfigRcPtr& config)
         }
 
         std::string reason;
-        if (containsBlockableTransform(config, name, whitelist, blacklist,
+        if (containsBlockableTransform(config, ctx, name, whitelist, blacklist,
                                        &reason)) {
             if (reason.empty())
                 reason = "blocked by unsupported or complex transform";
@@ -4307,13 +4356,12 @@ get_simple_color_space_blockers(const ConstConfigRcPtr& config)
 }
 
 
-
+// Return a copy of `config` adapted to match the reference spaces of `otherConfig`.
 OCIO::ConfigRcPtr
 adaptConfigReferenceSpaces(const OCIO::ConstConfigRcPtr& config,
                            const OCIO::ConstConfigRcPtr& otherConfig)
 {
     using namespace OCIO;
-    // Return a copy of `config` adapted to match the reference spaces of `otherConfig`.
     ConstTransformRcPtr inputToBaseScene;
     ConstTransformRcPtr inputToBaseDisplay;
     ConfigUtils::initializeRefSpaceConverters(inputToBaseScene,
@@ -4386,11 +4434,10 @@ ColorConfig::Impl::initialize_equality_id_map() const
     // Example: key="lin_rec709_scene", value="Rec709".
 
     if (interopconfig_ && config_) {
-        auto& matcher                               = get_interop_matcher();
-        const std::vector<std::string> simpleSpaces = getSimpleColorSpaces();
+        auto& matcher            = get_interop_matcher();
+        const auto& simpleSpaces = getSimpleColorSpaces();
         for (const auto& name : simpleSpaces) {
-            auto name_cs = config_->getCurrentContext()->resolveStringVar(
-                name.c_str());
+            auto name_cs                  = ctx->resolveStringVar(name.c_str());
             OCIO::ConstColorSpaceRcPtr cs = config_->getColorSpace(name_cs);
             if (!cs || cs->isData())
                 continue;
@@ -4425,7 +4472,8 @@ ColorConfig::Impl::get_cached_equality_id(string_view colorspace) const
     if (it_ctx == m_cs_to_equality_id_by_ctx.end()) {
         return "";
     }
-    auto it = it_ctx->second.find(std::string(colorspace));
+    std::string colorspace_str(colorspace);
+    auto it = it_ctx->second.find(colorspace_str);
     if (it == it_ctx->second.end()) {
         return "";
     }
@@ -4472,15 +4520,17 @@ ColorConfig::Impl::get_equality_ids(
     auto& matcher = get_interop_matcher();
     tsl::robin_map<std::string, std::string> interop_to_cs;
 
-    std::vector<std::string> color_spaces;
+    std::vector<std::string> color_spaces_all;
+    const std::vector<std::string>* color_spaces = nullptr;
     if (!exhaustive) {
-        color_spaces = getSimpleColorSpaces();
+        color_spaces = &getSimpleColorSpaces();
     } else {
-        color_spaces = m_self->getColorSpaceNamesFiltered(true, true, true,
-                                                          true, false);
+        color_spaces_all = m_self->getColorSpaceNamesFiltered(true, true, true,
+                                                              true, false);
+        color_spaces     = &color_spaces_all;
     }
 
-    for (const auto& name : color_spaces) {
+    for (const auto& name : *color_spaces) {
         OCIO::ConstColorSpaceRcPtr cs = config_->getColorSpace(name.c_str());
         if (!cs || cs->isData())
             continue;
@@ -4507,7 +4557,7 @@ ColorConfig::Impl::get_equality_ids(
     return result;
 }
 
-std::vector<std::string>
+const std::vector<std::string>&
 ColorConfig::Impl::getSimpleColorSpaces() const
 {
     {
@@ -4522,7 +4572,7 @@ ColorConfig::Impl::getSimpleColorSpaces() const
     {
         spin_rw_write_lock lock(m_mutex);
         if (!m_simple_color_spaces_cached) {
-            m_simple_color_spaces_cache  = simple_spaces;
+            m_simple_color_spaces_cache  = std::move(simple_spaces);
             m_simple_color_spaces_cached = true;
         }
         return m_simple_color_spaces_cache;
@@ -4547,15 +4597,17 @@ ColorConfig::Impl::get_interop_ids(
     if (!config_)
         return result;
 
-    std::vector<std::string> color_spaces;
+    std::vector<std::string> color_spaces_all;
+    const std::vector<std::string>* color_spaces = nullptr;
     if (!exhaustive) {
-        color_spaces = getSimpleColorSpaces();
+        color_spaces = &getSimpleColorSpaces();
     } else {
-        color_spaces = m_self->getColorSpaceNamesFiltered(true, true, true,
-                                                          true, false);
+        color_spaces_all = m_self->getColorSpaceNamesFiltered(true, true, true,
+                                                              true, false);
+        color_spaces     = &color_spaces_all;
     }
 
-    for (const auto& name : color_spaces) {
+    for (const auto& name : *color_spaces) {
         std::string interop = m_self->get_color_interop_id(name, strict,
                                                            context);
         if (interop.empty())
@@ -4659,6 +4711,8 @@ ColorConfig::Impl::get_color_interop_id(
     if (colorspace.empty())
         return std::string(colorspace);
 
+    std::string colorspace_str(colorspace);
+
     OCIO::ConstColorSpaceRcPtr cs = config_->getColorSpace(c_str(colorspace));
     if (!cs) {
         string_view resolved = m_self->resolve(colorspace);
@@ -4689,18 +4743,19 @@ ColorConfig::Impl::get_color_interop_id(
                 return interop_cs->getName();
         }
     }
-    auto interop_cs = interopconfig_->getColorSpace(c_str(colorspace));
+    auto interop_cs = interopconfig_->getColorSpace(colorspace_str.c_str());
     if (interop_cs)
         return interop_cs->getName();
 
     const auto interop_ids = get_equality_ids(false, context);
     string_view resolved   = m_self->resolve(colorspace);
     if (!resolved.empty()) {
-        auto it = interop_ids.find(std::string(resolved));
+        std::string resolved_str(resolved);
+        auto it = interop_ids.find(resolved_str);
         if (it != interop_ids.end())
             return it->second;
     }
-    auto it = interop_ids.find(std::string(colorspace));
+    auto it = interop_ids.find(colorspace_str);
     if (it != interop_ids.end())
         return it->second;
 
@@ -4714,8 +4769,7 @@ ColorConfig::Impl::get_interop_matcher() const
         std::lock_guard<std::mutex> lock(m_interop_matcher_mutex);
         if (!m_interop_matcher) {
             m_interop_matcher.reset(new ConfigUtils::FastColorSpaceMatcher(
-                interopconfig_, m_fingerprint_cache,
-                m_fingerprint_cache_mutex));
+                interopconfig_, m_fingerprint_cache, m_fingerprint_cache_mutex));
         }
     }
     return *m_interop_matcher;

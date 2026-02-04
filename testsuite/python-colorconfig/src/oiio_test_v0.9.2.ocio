@@ -127,7 +127,7 @@ colorspaces:
 
   - !<ColorSpace>
     name: sRGB Encoded Rec.709 (sRGB)
-    aliases: [srgb_encoded_rec709_srgb, Utility - sRGB - Texture, srgb_texture, srgb_rec709_scene, Input - Generic - sRGB - Texture, sRGB - Texture, srgb_tx, sRGB]
+    aliases: [srgb_encoded_rec709_srgb, Utility - sRGB - Texture, srgb_texture, Input - Generic - sRGB - Texture, sRGB - Texture, srgb_tx, sRGB]
     categories: [file-io, texture]
     encoding: sdr-video
     from_scene_reference: !<GroupTransform>

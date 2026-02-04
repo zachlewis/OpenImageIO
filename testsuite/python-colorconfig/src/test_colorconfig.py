@@ -82,6 +82,15 @@ try:
     print (f"ociodisplay #5 (inverse look + forwards look):      {buf.get_pixels(oiio.HALF)}     ({buf.spec()['oiio:ColorSpace']})")
     print ("")
 
+    # Demonstrate that "srgb_rec709_scene" is _not_ an alias for "sRGB Encoded Rec.709 (sRGB)" in the test OCIO config
+    assert "srgb_rec709_scene" not in config.getAliases("sRGB Encoded Rec.709 (sRGB)")
+    # Demonstrate that we can still resolve known colorInteropID "srgb_rec709_scene" back to a matching color space
+    assert config.resolve("srgb_rec709_scene") == 'sRGB Encoded Rec.709 (sRGB)'
+    # Demonstrate that we can still divine a colorInteropID for the color space (in non-strict mode)
+    assert config.get_color_interop_id('sRGB Encoded Rec.709 (sRGB)') == "srgb_rec709_scene"
+    # Demonstrate that "sRGB Encoded Rec.709 (sRGB)" does not have a defined interop_id value.
+    assert config.get_color_interop_id('sRGB Encoded Rec.709 (sRGB)', strict=True) == ""
+    
     print ("Done.")
 
 except Exception as detail:

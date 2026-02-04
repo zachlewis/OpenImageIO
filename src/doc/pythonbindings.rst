@@ -3999,42 +3999,6 @@ is provided for minimal color support.
 
     This function was added in OpenImageIO 3.1.
 
-.. py:method:: get_colorspace_fingerprint (colorspace: str, context: dict[str, str | None] | None = None) -> list[float | int]
-
-    Return the fingerprint values for ``colorspace``. If ``context`` is
-    provided, it should be a dict of OCIO context overrides used for matching.
-    Returns an empty list if a fingerprint cannot be computed. Results are
-    cached per config+context.
-
-    Example:
-
-    .. code-block:: python
-
-        colorconfig = oiio.ColorConfig("ocio://default")
-        fp = colorconfig.get_colorspace_fingerprint("aces_interchange")
-        assert round(fp[0], 6) == 0.408933
-
-    This function was added in OpenImageIO 3.1.
-
-.. py:method:: find_colorspace_from_fingerprint (fingerprint: list[float | int], display_referred: bool = False, context: dict[str, str | None] | None = None) -> str
-
-    Find a colorspace in the config that matches the given ``fingerprint``.
-    If ``display_referred`` is True, only display-referred spaces are
-    considered; otherwise (the default) scene-referred spaces are considered.
-    If
-    ``context`` is provided, it should be a dict of OCIO context
-    overrides used for matching.
-
-    Example:
-
-    .. code-block:: python
-
-        colorconfig = oiio.ColorConfig("ocio://default")
-        fp = colorconfig.get_colorspace_fingerprint("lin_ap1_scene")
-        match = colorconfig.find_colorspace_from_fingerprint(fp, False)
-        assert match == "ACEScg"
-
-    This function was added in OpenImageIO 3.1.
 
 .. py:method:: get_intersection (other: ColorConfig, base_context: dict[str, str | None] | None = None, other_context: dict[str, str | None] | None = None) -> list[tuple[str, str]]
 

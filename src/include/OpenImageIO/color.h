@@ -4,8 +4,8 @@
 
 #pragma once
 
-#include <memory>
 #include <map>
+#include <memory>
 
 #include <OpenImageIO/export.h>
 #include <OpenImageIO/fmath.h>
@@ -133,7 +133,7 @@ public:
     /// of strings.
     std::vector<std::string> getColorSpaceNames() const;
     /// Retrieve the list of known color space names with optional filters.
-    /// If `visible` is true, include active color spaces. If `hidden` is true,
+    /// If `active` is true, include active color spaces. If `inactive` is true,
     /// include inactive color spaces. If both are true, include all.
     /// If `scene` is true, include scene-referred spaces; if `display` is true,
     /// include display-referred spaces.
@@ -141,14 +141,8 @@ public:
     ///
     /// @version 3.1
     std::vector<std::string>
-    getColorSpaceNamesFiltered(bool visible, bool hidden, bool scene,
+    getColorSpaceNamesFiltered(bool active, bool inactive, bool scene,
                                bool display, bool simple = false) const;
-
-    /// Return diagnostic strings with debug info about the configuration.
-    /// Currently returns an empty map.
-    std::map<std::string, std::string>
-    getDebugInfo(bool simple_space_blockers = false,
-                 bool cache_stats = false) const;
 
     /// Get the name of the color space family of the named color space,
     /// or NULL if none could be identified.
@@ -449,8 +443,7 @@ public:
     /// explicitly-specified interop_id on the colorspace.
     ///
     /// @version 3.1
-    std::map<std::string, std::string>
-    get_equality_ids() const;
+    std::map<std::string, std::string> get_equality_ids() const;
 
     /// Return a mapping of colorspace names to definitionally equivalent
     /// built-in interop IDs. If `exhaustive` is false, only attempt to
@@ -459,9 +452,8 @@ public:
     ///
     /// @version 3.1
     std::map<std::string, std::string>
-    get_equality_ids(
-        bool exhaustive,
-        const std::map<std::string, std::string>& context) const;
+    get_equality_ids(bool exhaustive,
+                     const std::map<std::string, std::string>& context) const;
 
     /// Return a mapping of all colorspace names to interop IDs. If `strict`
     /// is true, only return values explicitly specified in the OCIO config.
@@ -472,19 +464,16 @@ public:
     /// fingerprinting and matching.
     ///
     /// @version 3.1
-    std::map<std::string, std::string>
-    get_interop_ids(bool strict = false,
-                                   bool exhaustive = false,
-                                   const std::map<std::string, std::string>&
-                                       context = {}) const;
+    std::map<std::string, std::string> get_interop_ids(
+        bool strict = false, bool exhaustive = false,
+        const std::map<std::string, std::string>& context = {}) const;
 
     /// Return the fingerprint values for the given colorspace using optional
     /// OCIO context overrides. Returns an empty vector if no fingerprint could
     /// be computed. Results are cached per config+context.
     ///
     /// @version 3.1
-    std::vector<float>
-    get_colorspace_fingerprint(
+    std::vector<float> get_colorspace_fingerprint(
         string_view colorspace,
         const std::map<std::string, std::string>& context = {}) const;
 
@@ -494,27 +483,25 @@ public:
     /// empty string if no match is found.
     ///
     /// @version 3.1
-    std::string
-    find_colorspace_from_fingerprint(
-        const std::vector<float>& fingerprint,
-        bool display_referred,
+    std::string find_colorspace_from_fingerprint(
+        const std::vector<float>& fingerprint, bool display_referred,
         const std::map<std::string, std::string>& context = {}) const;
 
     /// Return pairs of (this_config_colorspace, other_config_colorspace) where
     /// fingerprints match between configs for the given contexts.
     ///
     /// @version 3.1
-    std::vector<std::pair<std::string, std::string>>
-    get_intersection(const ColorConfig& other,
-                     const std::map<std::string, std::string>& base_context = {},
-                     const std::map<std::string, std::string>& other_context = {}) const;
+    std::vector<std::pair<std::string, std::string>> get_intersection(
+        const ColorConfig& other,
+        const std::map<std::string, std::string>& base_context  = {},
+        const std::map<std::string, std::string>& other_context = {}) const;
 
     /// Return the interop id for a colorspace, using optional context overrides.
     ///
     /// @version 3.1
-    std::string
-    get_color_interop_id(string_view colorspace, bool strict,
-                         const std::map<std::string, std::string>& context) const;
+    std::string get_color_interop_id(
+        string_view colorspace, bool strict,
+        const std::map<std::string, std::string>& context) const;
 
     /// Return a filename or other identifier for the config we're using.
     std::string configname() const;

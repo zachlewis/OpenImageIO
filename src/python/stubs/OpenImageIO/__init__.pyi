@@ -184,17 +184,12 @@ class ColorConfig:
     def getColorSpaceNameByRole(self, role: str) -> str: ...
     def getColorSpaceNames(
         self,
-        visible: bool = ...,
-        hidden: bool = ...,
+        active: bool = ...,
+        inactive: bool = ...,
         scene: bool = ...,
         display: bool = ...,
         simple: bool = ...,
     ) -> list[str]: ...
-    def getDebugInfo(
-        self,
-        simple_space_blockers: bool = ...,
-        cache_stats: bool = ...,
-    ) -> dict[str, str]: ...
     def getDefaultDisplayName(self) -> str: ...
     @overload
     def getDefaultViewName(self, display: str = ...) -> str: ...

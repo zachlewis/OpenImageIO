@@ -56,20 +56,13 @@ declare_colorconfig(py::module& m)
         .def("getNumColorSpaces", &ColorConfig::getNumColorSpaces)
         .def("getColorSpaceNames", &ColorConfig::getColorSpaceNames)
         .def("getColorSpaceNames",
-             [](const ColorConfig& self, bool visible, bool hidden, bool scene,
+             [](const ColorConfig& self, bool active, bool inactive, bool scene,
                 bool display, bool simple) {
-                 return self.getColorSpaceNamesFiltered(visible, hidden, scene,
+                 return self.getColorSpaceNamesFiltered(active, inactive, scene,
                                                         display, simple);
              },
-             "visible"_a = true, "hidden"_a = false, "scene"_a = true,
+             "active"_a = true, "inactive"_a = false, "scene"_a = true,
              "display"_a = true, "simple"_a = false)
-        .def("getDebugInfo",
-             [](const ColorConfig& self, bool simple_space_blockers,
-                bool cache_stats) {
-                 return self.getDebugInfo(simple_space_blockers, cache_stats);
-             },
-             "simple_space_blockers"_a = false,
-             "cache_stats"_a = false)
         .def("getColorSpaceNameByIndex", &ColorConfig::getColorSpaceNameByIndex)
         .def(
             "getColorSpaceIndex",

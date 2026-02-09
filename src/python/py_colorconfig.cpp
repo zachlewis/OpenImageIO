@@ -10,33 +10,33 @@
 namespace PyOpenImageIO {
 
 namespace {
-py::object decode_utf8_or_bytes(const std::string& s)
-{
-    PyObject* obj = PyUnicode_DecodeUTF8(s.data(), s.size(),
-                                         "surrogateescape");
-    if (!obj) {
-        PyErr_Clear();
-        return py::bytes(s);
-    }
-    return py::reinterpret_steal<py::str>(obj);
-}
-
-std::map<std::string, std::string>
-parse_context_vars(const py::dict& context_vars)
-{
-    std::map<std::string, std::string> out;
-    for (auto item : context_vars) {
-        std::string key = py::cast<std::string>(item.first);
-        if (item.second.is_none()) {
-            continue;
-        } else if (py::isinstance<py::bytes>(item.second)) {
-            out[key] = py::cast<std::string>(item.second);
-        } else {
-            out[key] = py::cast<std::string>(py::str(item.second));
+    py::object decode_utf8_or_bytes(const std::string& s)
+    {
+        PyObject* obj = PyUnicode_DecodeUTF8(s.data(), s.size(),
+                                             "surrogateescape");
+        if (!obj) {
+            PyErr_Clear();
+            return py::bytes(s);
         }
+        return py::reinterpret_steal<py::str>(obj);
     }
-    return out;
-}
+
+    std::map<std::string, std::string>
+    parse_context_vars(const py::dict& context_vars)
+    {
+        std::map<std::string, std::string> out;
+        for (auto item : context_vars) {
+            std::string key = py::cast<std::string>(item.first);
+            if (item.second.is_none()) {
+                continue;
+            } else if (py::isinstance<py::bytes>(item.second)) {
+                out[key] = py::cast<std::string>(item.second);
+            } else {
+                out[key] = py::cast<std::string>(py::str(item.second));
+            }
+        }
+        return out;
+    }
 }  // namespace
 
 
@@ -55,14 +55,15 @@ declare_colorconfig(py::module& m)
 
         .def("getNumColorSpaces", &ColorConfig::getNumColorSpaces)
         .def("getColorSpaceNames", &ColorConfig::getColorSpaceNames)
-        .def("getColorSpaceNames",
-             [](const ColorConfig& self, bool active, bool inactive, bool scene,
-                bool display, bool simple) {
-                 return self.getColorSpaceNamesFiltered(active, inactive, scene,
-                                                        display, simple);
-             },
-             "active"_a = true, "inactive"_a = false, "scene"_a = true,
-             "display"_a = true, "simple"_a = false)
+        .def(
+            "getColorSpaceNames",
+            [](const ColorConfig& self, bool active, bool inactive, bool scene,
+               bool display, bool simple) {
+                return self.getColorSpaceNamesFiltered(active, inactive, scene,
+                                                       display, simple);
+            },
+            "active"_a = true, "inactive"_a = false, "scene"_a = true,
+            "display"_a = true, "simple"_a = false)
         .def("getColorSpaceNameByIndex", &ColorConfig::getColorSpaceNameByIndex)
         .def(
             "getColorSpaceIndex",
@@ -207,90 +208,92 @@ declare_colorconfig(py::module& m)
                 return self.equivalent(color_space, other_color_space);
             },
             "color_space"_a, "other_color_space"_a)
-        .def("get_color_interop_id",
-             [](const ColorConfig& self, const std::string& colorspace,
-                bool strict) {
-                 return std::string(
-                     self.get_color_interop_id(colorspace, strict));
-             },
-             "colorspace"_a, "strict"_a = false)
-        .def("get_color_interop_id",
-             [](const ColorConfig& self, const std::string& colorspace,
-                bool strict, const py::dict& context) {
-                 auto parsed = parse_context_vars(context);
-                 return self.get_color_interop_id(colorspace, strict, parsed);
-             },
-             "colorspace"_a, "strict"_a = false, "context"_a = py::dict())
+        .def(
+            "get_color_interop_id",
+            [](const ColorConfig& self, const std::string& colorspace,
+               bool strict) {
+                return std::string(
+                    self.get_color_interop_id(colorspace, strict));
+            },
+            "colorspace"_a, "strict"_a = false)
+        .def(
+            "get_color_interop_id",
+            [](const ColorConfig& self, const std::string& colorspace,
+               bool strict, const py::dict& context) {
+                auto parsed = parse_context_vars(context);
+                return self.get_color_interop_id(colorspace, strict, parsed);
+            },
+            "colorspace"_a, "strict"_a = false, "context"_a = py::dict())
         .def("get_color_interop_id",
              [](const ColorConfig& self, const std::array<int, 4> cicp) {
                  return std::string(self.get_color_interop_id(cicp.data()));
              })
-        .def("get_equality_ids",
-             [](const ColorConfig& self, bool exhaustive,
-                const py::dict& context) {
-                 auto parsed = parse_context_vars(context);
-                 auto result
-                     = self.get_equality_ids(exhaustive,
-                                                                   parsed);
-                 py::dict out;
-                 for (const auto& kv : result) {
-                     out[decode_utf8_or_bytes(kv.first)]
-                         = decode_utf8_or_bytes(kv.second);
-                 }
-                 return out;
-             },
-             "exhaustive"_a = false, "context"_a = py::dict())
-        .def("get_interop_ids",
-             [](const ColorConfig& self, bool strict, bool exhaustive,
-                const py::dict& context) {
-                 auto parsed = parse_context_vars(context);
-                 auto result = self.get_interop_ids(
-                     strict, exhaustive, parsed);
-                 py::dict out;
-                 for (const auto& kv : result) {
-                     out[decode_utf8_or_bytes(kv.first)]
-                         = decode_utf8_or_bytes(kv.second);
-                 }
-                 return out;
-             },
-             "strict"_a = false, "exhaustive"_a = false,
-             "context"_a = py::dict())
-        .def("get_colorspace_fingerprint",
-             [](const ColorConfig& self, const std::string& colorspace,
-                const py::dict& context) {
-                 auto parsed = parse_context_vars(context);
-                 return self.get_colorspace_fingerprint(colorspace,
-                                                        parsed);
-             },
-             "colorspace"_a,
-             "context"_a = py::dict())
-        .def("find_colorspace_from_fingerprint",
-             [](const ColorConfig& self, const std::vector<float>& fingerprint,
-                bool display_referred,
-                const py::dict& context) {
-                 auto parsed = parse_context_vars(context);
-                 return self.find_colorspace_from_fingerprint(
-                     fingerprint, display_referred, parsed);
-             },
-             "fingerprint"_a, "display_referred"_a = false,
-             "context"_a = py::dict())
-        .def("get_intersection",
-             [](const ColorConfig& self, const ColorConfig& other,
-                const py::dict& base_context,
-                const py::dict& other_context) {
-                 auto base_parsed = parse_context_vars(base_context);
-                 auto other_parsed = parse_context_vars(other_context);
-                 auto result = self.get_intersection(
-                     other, base_parsed, other_parsed);
-                 py::list out;
-                 for (const auto& pair : result) {
-                     out.append(py::make_tuple(decode_utf8_or_bytes(pair.first),
-                                               decode_utf8_or_bytes(pair.second)));
-                 }
-                 return out;
-             },
-             "other"_a, "base_context"_a = py::dict(),
-             "other_context"_a = py::dict())
+        .def(
+            "get_equality_ids",
+            [](const ColorConfig& self, bool exhaustive,
+               const py::dict& context) {
+                auto parsed = parse_context_vars(context);
+                auto result = self.get_equality_ids(exhaustive, parsed);
+                py::dict out;
+                for (const auto& kv : result) {
+                    out[decode_utf8_or_bytes(kv.first)] = decode_utf8_or_bytes(
+                        kv.second);
+                }
+                return out;
+            },
+            "exhaustive"_a = false, "context"_a = py::dict())
+        .def(
+            "get_interop_ids",
+            [](const ColorConfig& self, bool strict, bool exhaustive,
+               const py::dict& context) {
+                auto parsed = parse_context_vars(context);
+                auto result = self.get_interop_ids(strict, exhaustive, parsed);
+                py::dict out;
+                for (const auto& kv : result) {
+                    out[decode_utf8_or_bytes(kv.first)] = decode_utf8_or_bytes(
+                        kv.second);
+                }
+                return out;
+            },
+            "strict"_a = false, "exhaustive"_a = false,
+            "context"_a = py::dict())
+        .def(
+            "get_colorspace_fingerprint",
+            [](const ColorConfig& self, const std::string& colorspace,
+               const py::dict& context) {
+                auto parsed = parse_context_vars(context);
+                return self.get_colorspace_fingerprint(colorspace, parsed);
+            },
+            "colorspace"_a, "context"_a = py::dict())
+        .def(
+            "find_colorspace_from_fingerprint",
+            [](const ColorConfig& self, const std::vector<float>& fingerprint,
+               bool display_referred, const py::dict& context) {
+                auto parsed = parse_context_vars(context);
+                return self.find_colorspace_from_fingerprint(fingerprint,
+                                                             display_referred,
+                                                             parsed);
+            },
+            "fingerprint"_a, "display_referred"_a = false,
+            "context"_a = py::dict())
+        .def(
+            "get_intersection",
+            [](const ColorConfig& self, const ColorConfig& other,
+               const py::dict& base_context, const py::dict& other_context) {
+                auto base_parsed  = parse_context_vars(base_context);
+                auto other_parsed = parse_context_vars(other_context);
+                auto result       = self.get_intersection(other, base_parsed,
+                                                          other_parsed);
+                py::list out;
+                for (const auto& pair : result) {
+                    out.append(
+                        py::make_tuple(decode_utf8_or_bytes(pair.first),
+                                       decode_utf8_or_bytes(pair.second)));
+                }
+                return out;
+            },
+            "other"_a, "base_context"_a = py::dict(),
+            "other_context"_a = py::dict())
         .def("get_cicp",
              [](const ColorConfig& self, const std::string& colorspace)
                  -> std::optional<std::array<int, 4>> {

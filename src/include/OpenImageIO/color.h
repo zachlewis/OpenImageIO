@@ -23,7 +23,7 @@
 //     textures:
 //     https://github.com/AcademySoftwareFoundation/ColorInterop/blob/main/Recommendations/01_TextureAssetColorSpaces/TextureAssetColorSpaces.md
 //   - CIF recommendations for display referred color spaces:
-//     https://docs.google.com/document/d/1MmBG4a3Dr6S6EO781WjK-xZW7QdHpuo-zd7wtMvG1Rs
+//     https://github.com/AcademySoftwareFoundation/ColorInterop/blob/main/Recommendations/02_DisplayColorSpaces/DisplayColorSpaces.md
 //
 
 

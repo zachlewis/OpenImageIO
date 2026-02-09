@@ -1,7 +1,7 @@
 Created texture system
 Testing BATCHED 2d texture grey.exr, output = nocc.exr
 Created texture system
-Treating texture as if it is in colorspace sRGB
+Treating texture as if it is in colorspace srgb_rec709_scene
 Testing BATCHED 2d texture grey.exr, output = cc.exr
 Comparing "nocc.exr" and "ref/nocc.exr"
 PASS

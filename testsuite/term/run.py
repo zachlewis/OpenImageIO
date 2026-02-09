@@ -12,10 +12,10 @@ command += oiiotool ("-pattern fill:topleft=1,0,0:topright=0,1,0:bottomleft=0,0,
 
 # Simplify by treating everything as sRGB already, so the tests don't include
 # any uncertainty about color space conversion.
-command += oiiotool ("-echo 24bit rampsmall.exr -iscolorspace srgb -attrib term:method 24bit -attrib term:fit 0 -attrib term:filename 24bit.out -o 24bit.term")
-command += oiiotool ("-echo 24bit-space rampsmall.exr -iscolorspace srgb -attrib term:method 24bit-space -attrib term:fit 0 -attrib term:filename 24bit-space.out -o 24bit-space.term")
-command += oiiotool ("-echo dither rampsmall.exr -iscolorspace srgb -attrib term:method dither -attrib term:fit 0 -attrib term:filename dither.out -o dither.term")
-command += oiiotool ("-echo iterm2 ramp.exr -iscolorspace srgb -attrib term:method iterm2 -attrib term:fit 0 -attrib term:filename iterm2.out -o iterm2.term")
+command += oiiotool ("-echo 24bit rampsmall.exr -iscolorspace srgb_rec709_scene -attrib term:method 24bit -attrib term:fit 0 -attrib term:filename 24bit.out -o 24bit.term")
+command += oiiotool ("-echo 24bit-space rampsmall.exr -iscolorspace srgb_rec709_scene -attrib term:method 24bit-space -attrib term:fit 0 -attrib term:filename 24bit-space.out -o 24bit-space.term")
+command += oiiotool ("-echo dither rampsmall.exr -iscolorspace srgb_rec709_scene -attrib term:method dither -attrib term:fit 0 -attrib term:filename dither.out -o dither.term")
+command += oiiotool ("-echo iterm2 ramp.exr -iscolorspace srgb_rec709_scene -attrib term:method iterm2 -attrib term:fit 0 -attrib term:filename iterm2.out -o iterm2.term")
 
 command += oiiotool ("-echo done")
 

@@ -2849,16 +2849,16 @@ Color space conversion
        .. code-tab:: c++
 
           ImageBuf Src ("tahoe.jpg");
-          ImageBuf Dst = ImageBufAlgo::colorconvert (Src, "sRGB", "acescg", true);
+          ImageBuf Dst = ImageBufAlgo::colorconvert (Src, "srgb_rec709_scene", "acescg", true);
 
        .. code-tab:: py
 
           Src = ImageBuf("tahoe.jpg")
-          Dst = ImageBufAlgo.colorconvert (Src, "sRGB", "acescg", True)
+          Dst = ImageBufAlgo.colorconvert (Src, "srgb_rec709_scene", "acescg", True)
 
        .. code-tab:: bash oiiotool
 
-          oiiotool tahoe.jpg --colorconvert sRGB acescg -o tahoe_acescg.exr
+          oiiotool tahoe.jpg --colorconvert srgb_rec709_scene acescg -o tahoe_acescg.exr
 
 |
 
@@ -2922,18 +2922,18 @@ Color space conversion
        .. code-tab:: c++
 
           ImageBuf Src ("tahoe.jpg");
-          ImageBuf Dst = ImageBufAlgo::ociolook (Src, "look", "vd8", "lnf",
+          ImageBuf Dst = ImageBufAlgo::ociolook (Src, "look", "vd8", "scene_linear",
                                                  true, false, "SHOT", "pe0012");
 
        .. code-tab:: py
 
           Src = ImageBuf("tahoe.jpg")
-          Dst = ImageBufAlgo.ociolook (Src, "look", "vd8", "lnf",
+          Dst = ImageBufAlgo.ociolook (Src, "look", "vd8", "scene_linear",
                                        True, False, "SHOT", "pe0012")
 
        .. code-tab:: bash oiiotool
 
-          oiiotool tahoe.jpg --ociolook:from=vd8:to=lnf:unpremult=1:key=SHOT:value=pe0012 look -o out.exr
+          oiiotool tahoe.jpg --ociolook:from=vd8:to=scene_linear:unpremult=1:key=SHOT:value=pe0012 look -o out.exr
 
 |
 
@@ -2950,18 +2950,18 @@ Color space conversion
        .. code-tab:: c++
 
           ImageBuf Src ("tahoe.exr");
-          ImageBuf Dst = ImageBufAlgo::ociodisplay (Src, "sRGB", "Film", "lnf",
+          ImageBuf Dst = ImageBufAlgo::ociodisplay (Src, "srgb_rec709_scene", "Film", "scene_linear",
                                                     "", true, "SHOT", "pe0012");
 
        .. code-tab:: py
 
           Src = ImageBuf("tahoe.jpg")
-          Dst = ImageBufAlgo.ociodisplay (Src, "sRGB", "Film", "lnf",
+          Dst = ImageBufAlgo.ociodisplay (Src, "srgb_rec709_scene", "Film", "scene_linear",
                                           "", True, "SHOT", "pe0012")
 
        .. code-tab:: bash oiiotool
 
-          oiiotool tahoe.jpg --ociodisplay:from=lnf:unpremult=1:key=SHOT:value=pe0012 sRGB Film -o out.exr
+          oiiotool tahoe.jpg --ociodisplay:from=scene_linear:unpremult=1:key=SHOT:value=pe0012 srgb_rec709_scene Film -o out.exr
 
 |
 

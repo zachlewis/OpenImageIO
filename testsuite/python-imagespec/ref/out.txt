@@ -203,7 +203,7 @@ Testing construction from ROI:
 
 
 Testing set_colorspace:
-  after set_colorspace('sRGB'): sRGB
+  after set_colorspace('srgb_rec709_scene'): srgb_rec709_scene
   after set_colorspace(''): 
 
 

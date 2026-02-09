@@ -170,7 +170,7 @@ command += maketx_command ("checker.tif", "checker-attribs.tx",
 command += oiiotool (" --pattern constant:color=.25,.25,.25,.5 64x64 4 "
                     + " -d uint8 -o " + make_relpath("gray64srgb.tif"))
 command += maketx_command ("gray64srgb.tif", "gray64linsrgb.tx",
-                           "--colorconvert srgb lin_srgb --unpremult")
+                           "--colorconvert srgb_rec709_scene lin_rec709_scene --unpremult")
 
 outputs += [ "out.txt" ]
 

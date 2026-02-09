@@ -166,8 +166,8 @@ try:
 
     print ("\nTesting set_colorspace:")
     s = oiio.ImageSpec()
-    s.set_colorspace("sRGB")
-    print ("  after set_colorspace('sRGB'):", s.get_string_attribute("oiio:ColorSpace"))
+    s.set_colorspace("srgb_rec709_scene")
+    print ("  after set_colorspace('srgb_rec709_scene'):", s.get_string_attribute("oiio:ColorSpace"))
     s.set_colorspace("")
     print ("  after set_colorspace(''):", s.get_string_attribute("oiio:ColorSpace"))
 

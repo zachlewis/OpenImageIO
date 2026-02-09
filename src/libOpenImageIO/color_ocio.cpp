@@ -38,7 +38,29 @@ namespace OCIO = OCIO_NAMESPACE;
 OIIO_NAMESPACE_3_1_BEGIN
 
 namespace ConfigUtils {
-struct FingerprintCacheEntry;
+// A single colorspace fingerprint (computed values + reference space type).
+struct Fingerprint {
+    std::string csName;
+    OCIO::ReferenceSpaceType type;
+    std::vector<float> vals;
+};
+
+// Precomputed fingerprints + reference test values for a config.
+struct ColorSpaceFingerprints {
+    std::vector<Fingerprint> vec;
+    std::vector<float> sceneRefTestVals;
+    std::vector<float> displayRefTestVals;
+};
+
+// Cache entry keyed by config+context cache ID.
+struct FingerprintCacheEntry {
+    std::string cache_id;
+    ColorSpaceFingerprints fingerprints;
+    std::unordered_map<std::string, Fingerprint> by_name;
+    double seconds             = 0.0;
+    bool test_vals_initialized = false;
+};
+
 using FingerprintCacheMap
     = std::unordered_map<std::string, FingerprintCacheEntry>;
 class FastColorSpaceMatcher;
@@ -2663,8 +2685,8 @@ ColorConfig::get_color_interop_id(string_view colorspace, bool strict) const
             auto interop_cs = interopconfig->getColorSpace(cs->getName());
             if (interop_cs)
                 return interop_cs->getName();
-            for (int i = 0; i < cs->getNumAliases(); ++i) {
-                string_view alias = cs->getAlias(i);
+            for (size_t i = 0, e = cs->getNumAliases(); i < e; ++i) {
+                string_view alias = cs->getAlias(static_cast<int>(i));
                 interop_cs        = interopconfig->getColorSpace(c_str(alias));
                 if (interop_cs)
                     return interop_cs->getName();
@@ -2819,29 +2841,6 @@ updateReferenceView(ViewTransformRcPtr& vt,
 ConfigRcPtr
 adaptConfigReferenceSpaces(const ConstConfigRcPtr& config,
                            const ConstConfigRcPtr& otherConfig);
-
-// A single colorspace fingerprint (computed values + reference space type).
-struct Fingerprint {
-    std::string csName;
-    ReferenceSpaceType type;
-    std::vector<float> vals;
-};
-
-// Precomputed fingerprints + reference test values for a config.
-struct ColorSpaceFingerprints {
-    std::vector<Fingerprint> vec;
-    std::vector<float> sceneRefTestVals;
-    std::vector<float> displayRefTestVals;
-};
-
-// Cache entry keyed by config+context cache ID.
-struct FingerprintCacheEntry {
-    std::string cache_id;
-    ColorSpaceFingerprints fingerprints;
-    std::unordered_map<std::string, Fingerprint> by_name;
-    double seconds             = 0.0;
-    bool test_vals_initialized = false;
-};
 
 // Compute a fingerprint for a colorspace, optionally skipping complex transforms.
 bool
@@ -3579,33 +3578,6 @@ make_context_with_overrides(
     return context;
 }
 
-static OCIO::ConstContextRcPtr
-make_context_with_overrides(const OCIO::ConstConfigRcPtr& config,
-                            string_view context_key, string_view context_value)
-{
-    if (!config)
-        return nullptr;
-    if (context_key.empty())
-        return config->getCurrentContext();
-
-    std::string keys   = context_key;
-    std::string values = context_value;
-    // Accept both ';' and ',' separators to mirror other OIIO context parsing.
-    std::replace(keys.begin(), keys.end(), ';', ',');
-    std::replace(values.begin(), values.end(), ';', ',');
-    auto keylist = Strutil::splits(keys, ",");
-    auto vallist = Strutil::splits(values, ",");
-
-    OCIO::ConstContextRcPtr context = config->getCurrentContext();
-    OCIO::ContextRcPtr ctx          = context->createEditableCopy();
-    for (size_t i = 0, n = std::min(keylist.size(), vallist.size()); i < n;
-         ++i) {
-        if (!keylist[i].empty())
-            ctx->setStringVar(keylist[i].c_str(), vallist[i].c_str());
-    }
-    return ctx;
-}
-
 static std::string
 fingerprint_cache_key(const ConstConfigRcPtr& config,
                       const ConstContextRcPtr& context)
@@ -3980,10 +3952,6 @@ namespace {
                                     const ConstTransformRcPtr& transform,
                                     std::unordered_set<std::string>& keep,
                                     std::unordered_set<std::string>& omit);
-    bool containsBlockableTransform(const ConstConfigRcPtr& config,
-                                    const char* name,
-                                    std::unordered_set<std::string>& keep,
-                                    std::unordered_set<std::string>& omit);
 
     bool colorSpaceHasBlockableTransform(const ConstConfigRcPtr& config,
                                          const ConstColorSpaceRcPtr& cs,
@@ -4074,15 +4042,6 @@ namespace {
             return true;
         }
         return namedTransformHasBlockableTransform(config, nt, keep, omit);
-    }
-
-    bool containsBlockableTransform(const ConstConfigRcPtr& config,
-                                    const char* name,
-                                    std::unordered_set<std::string>& keep,
-                                    std::unordered_set<std::string>& omit)
-    {
-        return containsBlockableTransform(config, config->getCurrentContext(),
-                                          name, keep, omit);
     }
 
     bool containsBlockableTransform(const ConstConfigRcPtr& config,
@@ -4629,8 +4588,8 @@ ColorConfig::Impl::get_color_interop_id(
         auto interop_cs = interopconfig_->getColorSpace(cs->getName());
         if (interop_cs)
             return interop_cs->getName();
-        for (int i = 0; i < cs->getNumAliases(); ++i) {
-            string_view alias = cs->getAlias(i);
+        for (size_t i = 0, e = cs->getNumAliases(); i < e; ++i) {
+            string_view alias = cs->getAlias(static_cast<int>(i));
             interop_cs        = interopconfig_->getColorSpace(c_str(alias));
             if (interop_cs)
                 return interop_cs->getName();

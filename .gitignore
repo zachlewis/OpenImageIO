@@ -6,6 +6,7 @@ dist/
 ext/
 wheelhouse/
 _coverage/
+.cache/
 .python-version
 .idea
 .vs
@@ -27,5 +28,6 @@ gastest.o
 /*.jxl
 /*.tx
 /*.log
+
 
 

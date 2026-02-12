@@ -64,6 +64,11 @@ looks:
     process_space: ACES2065-1
     transform: !<BuiltinTransform> {style: ACES-LMT - ACES 1.3 Reference Gamut Compression}
 
+  - !<Look>
+    name: look1
+    process_space: acescg
+    transform: !<CDLTransform> {slope: [0.6, 1.2, 0.8], power: [1.5, 0.9, 0.8], sat: 1.5}
+
 
 default_view_transform: Un-tone-mapped
 

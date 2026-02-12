@@ -235,7 +235,7 @@ jobs:
             nametag: linux-vfx2023
             runner: ubuntu-latest
             container: aswf/ci-osl:2023-clang15
-            opencolorio_ver: v2.3.1
+            opencolorio_ver: v2.3.0
             python_ver: "3.10"
             simd: "avx2,f16c"
             fmt_ver: 10.1.1

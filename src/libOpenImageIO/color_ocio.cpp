@@ -5214,10 +5214,9 @@ ImageBufAlgo::ociodisplay(ImageBuf& dst, const ImageBuf& src,
                 // TODO: log warning about using default view.
             }
         }
-        processor
-            = colorconfig->createDisplayTransform(display, view,
-                                                  from,
-                                                  looks, inverse, key, value);
+        processor = colorconfig->createDisplayTransform(display, view, from,
+                                                        looks, inverse, key,
+                                                        value);
         if (!processor) {
             if (colorconfig->has_error())
                 dst.errorfmt("{}", colorconfig->geterror());

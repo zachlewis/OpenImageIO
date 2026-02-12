@@ -5171,6 +5171,7 @@ ImageBufAlgo::ociodisplay(ImageBuf& dst, const ImageBuf& src,
                 // and return false.
             }
         }
+        from = colorconfig->resolve(from);
         if (display.empty()) {
             display = colorconfig->getDefaultDisplayName();
         } else {
@@ -5194,12 +5195,8 @@ ImageBufAlgo::ociodisplay(ImageBuf& dst, const ImageBuf& src,
         // provide the argument at all.
 
         if (view.empty()) {
-            // TODO: create a public function to check to see if the color space
-            // actually exists in the config.
-            if (!colorconfig->resolve(from).empty()) {
-                view = colorconfig->getDefaultViewName(display,
-                                                       colorconfig->resolve(
-                                                           from));
+            if (colorconfig->color_space_exists(from)) {
+                view = colorconfig->getDefaultViewName(display, from);
             } else {
                 view = colorconfig->getDefaultViewName(display);
                 // TODO: log warning about using default view.
@@ -5210,17 +5207,16 @@ ImageBufAlgo::ociodisplay(ImageBuf& dst, const ImageBuf& src,
             // If the specified view isn't found, use the default view
             if (std::find(view_names.begin(), view_names.end(), view)
                 == view_names.end()) {
-                // TODO: create a public function to check to see if the color space
-                // actually exists in the config.
-                view = colorconfig->getDefaultViewName(display,
-                                                       colorconfig->resolve(
-                                                           from));
+                if (colorconfig->color_space_exists(from))
+                    view = colorconfig->getDefaultViewName(display, from);
+                else
+                    view = colorconfig->getDefaultViewName(display);
                 // TODO: log warning about using default view.
             }
         }
         processor
             = colorconfig->createDisplayTransform(display, view,
-                                                  colorconfig->resolve(from),
+                                                  from,
                                                   looks, inverse, key, value);
         if (!processor) {
             if (colorconfig->has_error())

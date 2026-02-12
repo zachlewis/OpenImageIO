@@ -442,7 +442,7 @@ public:
         m_error.clear();
     }
 
-    std::vector<string_view> get_builtin_interop_ids() const;
+    std::vector<std::string> get_builtin_interop_ids() const;
     static OCIO::ConstConfigRcPtr build_interop_identities_config();
     string_view get_cached_equality_id(string_view colorspace) const;
     const std::vector<std::string>& getSimpleColorSpaces() const;
@@ -1712,6 +1712,45 @@ ColorConfig::resolve(string_view name) const
     return getImpl()->resolve(name);
 }
 
+string_view
+ColorConfig::resolve(string_view name, string_view default_value) const
+{
+    string_view resolved = resolve(name);
+    if (resolved == name) {
+        if (!color_space_exists(name))
+            return default_value;
+        return name;
+    }
+    return resolved;
+}
+
+std::string
+ColorConfig::getCanonicalName(string_view name) const
+{
+    auto config = getImpl()->config_;
+    if (!config)
+        return {};
+    const char* canonical = config->getCanonicalName(c_str(name));
+    return (canonical && *canonical) ? std::string(canonical) : std::string();
+}
+
+bool
+ColorConfig::color_space_exists(string_view cs_name) const
+{
+    auto config = getImpl()->config_;
+    if (!config)
+        return false;
+    string_view resolved = resolve(cs_name);
+    return !resolved.empty()
+           && config->getColorSpace(c_str(resolved)) != nullptr;
+}
+
+std::vector<std::string>
+ColorConfig::get_builtin_interop_ids() const
+{
+    return getImpl()->get_builtin_interop_ids();
+}
+
 
 
 OCIO::ConstConfigRcPtr
@@ -1728,18 +1767,49 @@ ColorConfig::Impl::build_interop_identities_config()
 }
 
 
-std::vector<string_view>
+std::vector<std::string>
 ColorConfig::Impl::get_builtin_interop_ids() const
 {
-    std::vector<string_view> ids;
+    std::vector<std::string> ids;
     if (interopconfig_) {
-        for (int i = 0, e = interopconfig_->getNumColorSpaces(); i < e; ++i)
-            ids.emplace_back(interopconfig_->getColorSpaceNameByIndex(i));
+        const auto refspace   = OCIO::SEARCH_REFERENCE_SPACE_ALL;
+        const auto visibility = OCIO::COLORSPACE_ACTIVE;
+        for (int i = 0,
+                 e = interopconfig_->getNumColorSpaces(refspace, visibility);
+             i < e; ++i) {
+            const char* name
+                = interopconfig_->getColorSpaceNameByIndex(refspace, visibility,
+                                                           i);
+            if (!(name && *name))
+                continue;
+#if OCIO_VERSION_HEX >= MAKE_OCIO_VERSION_HEX(2, 5, 0)
+            auto cs = interopconfig_->getColorSpace(name);
+            if (!cs)
+                continue;
+            const char* interop = cs->getInteropID();
+            if (interop && *interop)
+                ids.emplace_back(interop);
+#else
+            ids.emplace_back(name);
+#endif
+        }
     }
-    if (std::find(ids.begin(), ids.end(), "data") == ids.end())
-        ids.emplace_back("data");
-    if (std::find(ids.begin(), ids.end(), "unknown") == ids.end())
-        ids.emplace_back("unknown");
+    // Keep unnamespaced IDs (no ':') before namespaced IDs, while sorting
+    // alphabetically within each group for stable/readable output.
+    auto by_name = [](const std::string& a, const std::string& b) {
+        const bool a_has_colon = a.find(':') != std::string::npos;
+        const bool b_has_colon = b.find(':') != std::string::npos;
+        if (a_has_colon != b_has_colon)
+            return !a_has_colon;
+        return a < b;
+    };
+    std::sort(ids.begin(), ids.end(), by_name);
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    // Force fallback IDs to the tail in a stable order.
+    ids.erase(std::remove(ids.begin(), ids.end(), "data"), ids.end());
+    ids.erase(std::remove(ids.begin(), ids.end(), "unknown"), ids.end());
+    ids.emplace_back("data");
+    ids.emplace_back("unknown");
     return ids;
 }
 

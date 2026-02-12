@@ -409,6 +409,19 @@ public:
     /// an OIIO-understood universal name (like "sRGB") into a canonical
     /// color space name. If the name is not recognized, return "".
     string_view resolve(string_view name) const;
+    string_view resolve(string_view name, string_view default_value) const;
+
+    /// Wrapper around OCIO::Config::getCanonicalName().
+    /// Returns an empty string if no canonical name is found.
+    std::string getCanonicalName(string_view name) const;
+
+    /// Return true if `cs_name` resolves to a color space in the current
+    /// config.
+    bool color_space_exists(string_view cs_name) const;
+
+    /// Return built-in interop IDs from the active color spaces in the
+    /// interop config, sorted so names without ':' come first.
+    std::vector<std::string> get_builtin_interop_ids() const;
 
     /// Are the two color space names/aliases/roles equivalent?
     bool equivalent(string_view color_space,

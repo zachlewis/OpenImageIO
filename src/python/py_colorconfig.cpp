@@ -202,6 +202,26 @@ declare_colorconfig(py::module& m)
             },
             "name"_a)
         .def(
+            "resolve",
+            [](const ColorConfig& self, const std::string& value,
+               const std::string& default_value) {
+                return std::string(self.resolve(value, default_value));
+            },
+            "value"_a, "default_value"_a)
+        .def(
+            "getCanonicalName",
+            [](const ColorConfig& self, const std::string& name) {
+                return self.getCanonicalName(name);
+            },
+            "name"_a)
+        .def(
+            "color_space_exists",
+            [](const ColorConfig& self, const std::string& cs_name) {
+                return self.color_space_exists(cs_name);
+            },
+            "cs_name"_a)
+        .def("get_builtin_interop_ids", &ColorConfig::get_builtin_interop_ids)
+        .def(
             "equivalent",
             [](const ColorConfig& self, const std::string& color_space,
                const std::string& other_color_space) {

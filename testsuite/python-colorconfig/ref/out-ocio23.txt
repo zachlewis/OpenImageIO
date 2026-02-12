@@ -18,8 +18,18 @@ resolve('foo'): foo
 resolve('linear'): Linear Rec.709 (sRGB)
 resolve('scene_linear'): ACEScg
 resolve('lin_rec709_scene'): Linear Rec.709 (sRGB)
+resolve('lin_rec709_scene', 'Raw'): Linear Rec.709 (sRGB)
+resolve('foo', 'Raw'): Raw
 resolve('srgb_rec709_scene'): sRGB - Texture
 resolve('ACEScg'): ACEScg
+getCanonicalName('lin_rec709_scene'): 
+getCanonicalName('foo'): 
+color_space_exists('lin_rec709_scene'): True
+color_space_exists('foo'): False
+get_builtin_interop_ids count = 64
+get_builtin_interop_ids first 8 = ['g18_rec709_scene', 'g22_adobergb_display', 'g22_adobergb_scene', 'g22_ap1_scene', 'g22_rec709_display', 'g22_rec709_scene', 'g24_rec709_display', 'g26_p3d65_display']
+get_builtin_interop_ids first ':' index = 30
+get_builtin_interop_ids sorted = True
 equivalent('lin_rec709_scene', 'srgb_rec709_scene'): False
 equivalent('scene_linear', 'srgb_rec709_scene'): False
 equivalent('linear', 'lin_rec709_scene'): False

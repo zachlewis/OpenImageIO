@@ -40,8 +40,25 @@ try:
     print ("resolve('linear'):", config.resolve("linear"))
     print ("resolve('scene_linear'):", config.resolve("scene_linear"))
     print ("resolve('lin_rec709_scene'):", config.resolve("lin_rec709_scene"))
+    print ("resolve('lin_rec709_scene', 'Raw'):", config.resolve("lin_rec709_scene", "Raw"))
+    print ("resolve('foo', 'Raw'):", config.resolve("foo", "Raw"))
     print ("resolve('srgb_rec709_scene'):", config.resolve("srgb_rec709_scene"))
     print ("resolve('ACEScg'):", config.resolve("ACEScg"))
+    print ("getCanonicalName('lin_rec709_scene'):", config.getCanonicalName("lin_rec709_scene"))
+    print ("getCanonicalName('foo'):", config.getCanonicalName("foo"))
+    print ("color_space_exists('lin_rec709_scene'):", config.color_space_exists("lin_rec709_scene"))
+    print ("color_space_exists('foo'):", config.color_space_exists("foo"))
+    builtin_interop_ids = config.get_builtin_interop_ids()
+    first_colon_index = next((i for i, v in enumerate(builtin_interop_ids) if ":" in v), -1)
+    print ("get_builtin_interop_ids count =", len(builtin_interop_ids))
+    print ("get_builtin_interop_ids first 8 =", builtin_interop_ids[:8])
+    print ("get_builtin_interop_ids first ':' index =", first_colon_index)
+    print ("get_builtin_interop_ids sorted =",
+           builtin_interop_ids[:-2] == sorted(builtin_interop_ids[:-2],
+                                         key=lambda s: (":" in s, s)))
+    if oiio.OpenColorIO_version_hex >= 0x02050000:
+        print ("get_builtin_interop_ids unique =",
+               len(builtin_interop_ids) == len(set(builtin_interop_ids)))
     print ("equivalent('lin_rec709_scene', 'srgb_rec709_scene'):", config.equivalent("lin_rec709_scene", "srgb_rec709_scene"))
     print ("equivalent('scene_linear', 'srgb_rec709_scene'):", config.equivalent("scene_linear", "srgb_rec709_scene"))
     print ("equivalent('linear', 'lin_rec709_scene'):", config.equivalent("scene_linear", "lin_rec709_scene"))
@@ -95,4 +112,3 @@ try:
 
 except Exception as detail:
     print ("Unknown exception:", detail)
-

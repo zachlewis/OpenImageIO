@@ -3908,6 +3908,34 @@ is provided for minimal color support.
 ..
   TODO: The documentation for this class is incomplete.
 
+.. py:method:: resolve (name: str) -> str
+
+    Resolve a color space name, alias, role, or known universal name to a
+    canonical color space name.
+
+.. py:method:: resolve (value: str, default_value: str) -> str
+
+    Resolve ``value`` as a known color space value and return
+    ``default_value`` if it is not recognized.
+
+.. py:method:: getCanonicalName (name: str) -> str
+
+    Wrapper for OCIO ``Config.getCanonicalName``. Returns an empty string if
+    no canonical name is found.
+
+.. py:method:: color_space_exists (cs_name: str) -> bool
+
+    Return True if ``cs_name`` resolves to a color space that exists in the
+    current config.
+
+.. py:method:: get_builtin_interop_ids () -> list[str]
+
+    Return a sorted list of active built-in interop entries from the interop
+    config, sorted so values without ``:`` come before values with ``:``.
+
+    If OpenColorIO is 2.5 or newer, this returns de-duplicated interop ID
+    values instead of color space names.
+
 .. py:method:: get_cicp (colorspace)
 
     Find CICP code corresponding to the colorspace.

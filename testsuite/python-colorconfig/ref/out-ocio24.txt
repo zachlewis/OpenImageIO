@@ -22,7 +22,7 @@ resolve('lin_rec709_scene', 'Raw'): Linear Rec.709 (sRGB)
 resolve('foo', 'Raw'): Raw
 resolve('srgb_rec709_scene'): sRGB Encoded Rec.709 (sRGB)
 resolve('ACEScg'): ACEScg
-getCanonicalName('lin_rec709_scene'): 
+getCanonicalName('lin_rec709_scene'): Linear Rec.709 (sRGB)
 getCanonicalName('foo'): 
 color_space_exists('lin_rec709_scene'): True
 color_space_exists('foo'): False

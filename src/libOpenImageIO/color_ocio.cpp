@@ -4361,6 +4361,12 @@ adaptConfigReferenceSpaces(const OCIO::ConstConfigRcPtr& config,
                                               config);
 
     ConfigRcPtr updatedConfig = config->createEditableCopy();
+    // https://github.com/AcademySoftwareFoundation/OpenColorIO/issues/1885
+    // If the OCIO version is older than 2.3.1, we need to explicitly set the default view transform name.
+    #if OCIO_VERSION_HEX < 0x02030100
+        updatedConfig->setDefaultViewTransformName(config->getDefaultViewTransformName());
+    #endif
+    
     const int numColorSpaces
         = updatedConfig->getNumColorSpaces(SEARCH_REFERENCE_SPACE_ALL,
                                            COLORSPACE_ALL);

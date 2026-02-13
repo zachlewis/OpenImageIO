@@ -129,8 +129,7 @@ try:
     assert config.get_color_interop_id('sRGB Encoded Rec.709 (sRGB)') == "srgb_rec709_scene"
     # Demonstrate that "sRGB Encoded Rec.709 (sRGB)" does not have a defined interop_id value.
     assert config.get_color_interop_id('sRGB Encoded Rec.709 (sRGB)', strict=True) == ""
-    
-    print ("Done.")
+
 
 except Exception as detail:
     print ("Unknown exception:", detail)

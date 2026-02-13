@@ -65,5 +65,3 @@ ociodisplay #2 (apply default display/view again):  [[[-2.123   0.671   0.8037]]
 ociodisplay #3 (inverse look):                      [[[0.798  0.519  0.7627]]]     (sRGB (~2.22) - Display)
 ociodisplay #4 (forwards look):                     [[[-2.123   0.671   0.8037]]]     (sRGB (~2.22) - Display)
 ociodisplay #5 (inverse look + forwards look):      [[[-2.123   0.671   0.8037]]]     (sRGB (~2.22) - Display)
-
-Done.

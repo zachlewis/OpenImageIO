@@ -51,7 +51,7 @@ Default view for sRGB (~2.22) - Display (from lin_rec709): ACES 1.0 - SDR Video
 Default view for sRGB (~2.22) - Display (from 'srgb_tx'): Colorimetry
 Color space name from DisplayView transform referencing Shared View: sRGB (~2.22) - Display
 Testing look 'ACES 1.3 Reference Gamut Compression' with ociodisplay:
-Test buffer -- initial values:                      [[[0.1  0.5  0.9]]]                 (ACEScg)
+Test buffer -- initial values:                      [[[0.1 0.5 0.9]]]                 (ACEScg)
 ociodisplay #1 (apply default display/view):        [[[-2.123   0.671   0.8037]]]     (sRGB (~2.22) - Display)
 ociodisplay #2 (apply default display/view again):  [[[-2.123   0.671   0.8037]]]     (sRGB (~2.22) - Display)
 ociodisplay #3 (inverse look):                      [[[-2.252   0.6714  0.8037]]]     (sRGB (~2.22) - Display)
@@ -59,10 +59,10 @@ ociodisplay #4 (forwards look):                     [[[-2.123   0.671   0.8037]]
 ociodisplay #5 (inverse look + forwards look):      [[[-2.123   0.671   0.8037]]]     (sRGB (~2.22) - Display)
 
 Testing look 'look1' with ociodisplay:
-Test buffer -- initial values:                      [[[0.1  0.5  0.9]]]                 (ACEScg)
+Test buffer -- initial values:                      [[[0.1 0.5 0.9]]]                 (ACEScg)
 ociodisplay #1 (apply default display/view):        [[[-2.123   0.671   0.8037]]]     (sRGB (~2.22) - Display)
 ociodisplay #2 (apply default display/view again):  [[[-2.123   0.671   0.8037]]]     (sRGB (~2.22) - Display)
-ociodisplay #3 (inverse look):                      [[[0.798   0.519   0.7627]]]     (sRGB (~2.22) - Display)
+ociodisplay #3 (inverse look):                      [[[0.798  0.519  0.7627]]]     (sRGB (~2.22) - Display)
 ociodisplay #4 (forwards look):                     [[[-2.123   0.671   0.8037]]]     (sRGB (~2.22) - Display)
 ociodisplay #5 (inverse look + forwards look):      [[[-2.123   0.671   0.8037]]]     (sRGB (~2.22) - Display)
 

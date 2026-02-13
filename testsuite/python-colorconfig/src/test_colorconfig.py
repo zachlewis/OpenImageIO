@@ -83,11 +83,7 @@ try:
     print (f"Default view for {display} (from {default_cs}): {config.getDefaultViewName(display, input_color_space=default_cs)}")
     print (f"Default view for {display} (from 'srgb_tx'): {config.getDefaultViewName(display, input_color_space='srgb_tx')}")
     print (f"Color space name from DisplayView transform referencing Shared View: {config.getDisplayViewColorSpaceName('sRGB (~2.22) - Display', 'Colorimetry')}")
-    
-    test_values = np.array([[[0.1, 0.5, 0.9]]])
-    test_look = "ACES 1.3 Reference Gamut Compression"
-    print (f"Testing look '{test_look}' with ociodisplay:")
-    buf = oiio.ImageBuf(test_values)
+    buf = oiio.ImageBuf(np.array([[[0.1, 0.5, 0.9]]]))
     spec  = buf.specmod()
     spec.set_colorspace(config.getColorSpaceFromFilepath("foo_lin_ap1.exr"))
     print (f"Test buffer -- initial values:                      {buf.get_pixels(oiio.HALF)}                 ({spec['oiio:ColorSpace']})")
@@ -95,41 +91,28 @@ try:
     print (f"ociodisplay #1 (apply default display/view):        {buf.get_pixels(oiio.HALF)}     ({buf.spec()['oiio:ColorSpace']})")
     buf = oiio.ImageBufAlgo.ociodisplay(buf, "", "", colorconfig=str(TEST_CONFIG_PATH))
     print (f"ociodisplay #2 (apply default display/view again):  {buf.get_pixels(oiio.HALF)}     ({buf.spec()['oiio:ColorSpace']})")
-    buf = oiio.ImageBufAlgo.ociodisplay(buf, "", "", colorconfig=str(TEST_CONFIG_PATH), looks=f"-{test_look}")
+    buf = oiio.ImageBufAlgo.ociodisplay(buf, "", "", colorconfig=str(TEST_CONFIG_PATH), looks="-ACES 1.3 Reference Gamut Compression")
     print (f"ociodisplay #3 (inverse look):                      {buf.get_pixels(oiio.HALF)}     ({buf.spec()['oiio:ColorSpace']})")
-    buf = oiio.ImageBufAlgo.ociodisplay(buf, "", "", colorconfig=str(TEST_CONFIG_PATH), looks=f"{test_look}")
+    buf = oiio.ImageBufAlgo.ociodisplay(buf, "", "", colorconfig=str(TEST_CONFIG_PATH), looks="ACES 1.3 Reference Gamut Compression")
     print (f"ociodisplay #4 (forwards look):                     {buf.get_pixels(oiio.HALF)}     ({buf.spec()['oiio:ColorSpace']})")
-    buf = oiio.ImageBufAlgo.ociodisplay(buf, "", "", colorconfig=str(TEST_CONFIG_PATH), looks=f"-{test_look}, +{test_look}")
-    print (f"ociodisplay #5 (inverse look + forwards look):      {buf.get_pixels(oiio.HALF)}     ({buf.spec()['oiio:ColorSpace']})")
-    print ("")
-    
-    test_look = "look1"
-    print (f"Testing look '{test_look}' with ociodisplay:")
-    buf = oiio.ImageBuf(test_values)
-    spec  = buf.specmod()
-    spec.set_colorspace(config.getColorSpaceFromFilepath("foo_lin_ap1.exr"))
-    print (f"Test buffer -- initial values:                      {buf.get_pixels(oiio.HALF)}                 ({spec['oiio:ColorSpace']})")
-    buf = oiio.ImageBufAlgo.ociodisplay(buf, "", "", colorconfig=str(TEST_CONFIG_PATH))
-    print (f"ociodisplay #1 (apply default display/view):        {buf.get_pixels(oiio.HALF)}     ({buf.spec()['oiio:ColorSpace']})")
-    buf = oiio.ImageBufAlgo.ociodisplay(buf, "", "", colorconfig=str(TEST_CONFIG_PATH))
-    print (f"ociodisplay #2 (apply default display/view again):  {buf.get_pixels(oiio.HALF)}     ({buf.spec()['oiio:ColorSpace']})")
-    buf = oiio.ImageBufAlgo.ociodisplay(buf, "", "", colorconfig=str(TEST_CONFIG_PATH), looks=f"-{test_look}")
-    print (f"ociodisplay #3 (inverse look):                      {buf.get_pixels(oiio.HALF)}     ({buf.spec()['oiio:ColorSpace']})")
-    buf = oiio.ImageBufAlgo.ociodisplay(buf, "", "", colorconfig=str(TEST_CONFIG_PATH), looks=f"{test_look}")
-    print (f"ociodisplay #4 (forwards look):                     {buf.get_pixels(oiio.HALF)}     ({buf.spec()['oiio:ColorSpace']})")
-    buf = oiio.ImageBufAlgo.ociodisplay(buf, "", "", colorconfig=str(TEST_CONFIG_PATH), looks=f"-{test_look}, +{test_look}")
+    buf = oiio.ImageBufAlgo.ociodisplay(buf, "", "", colorconfig=str(TEST_CONFIG_PATH), looks="-ACES 1.3 Reference Gamut Compression, +ACES 1.3 Reference Gamut Compression")
     print (f"ociodisplay #5 (inverse look + forwards look):      {buf.get_pixels(oiio.HALF)}     ({buf.spec()['oiio:ColorSpace']})")
     print ("")
 
+    # Interop-ID / equivalency tests
     # Demonstrate that "srgb_rec709_scene" is _not_ an alias for "sRGB Encoded Rec.709 (sRGB)" in the test OCIO config
     assert "srgb_rec709_scene" not in config.getAliases("sRGB Encoded Rec.709 (sRGB)")
+
     # Demonstrate that we can still resolve known colorInteropID "srgb_rec709_scene" back to a matching color space
     assert config.resolve("srgb_rec709_scene") == 'sRGB Encoded Rec.709 (sRGB)'
+
     # Demonstrate that we can still divine a colorInteropID for the color space (in non-strict mode)
     assert config.get_color_interop_id('sRGB Encoded Rec.709 (sRGB)') == "srgb_rec709_scene"
+
     # Demonstrate that "sRGB Encoded Rec.709 (sRGB)" does not have a defined interop_id value.
     assert config.get_color_interop_id('sRGB Encoded Rec.709 (sRGB)', strict=True) == ""
 
+    print ("Done.")
 
 except Exception as detail:
     print ("Unknown exception:", detail)

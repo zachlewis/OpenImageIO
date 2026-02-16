@@ -46,6 +46,16 @@ declare_colorconfig(py::module& m)
 {
     using namespace pybind11::literals;
 
+    py::enum_<ColorConfig::FingerprintSubjectType>(m, "FingerprintSubjectType")
+        .value("ColorSpace", ColorConfig::FingerprintSubjectType::ColorSpace)
+        .export_values();
+
+    py::enum_<ColorConfig::FingerprintMatchMode>(m, "FingerprintMatchMode")
+        .value("First", ColorConfig::FingerprintMatchMode::First)
+        .value("Best", ColorConfig::FingerprintMatchMode::Best)
+        .value("All", ColorConfig::FingerprintMatchMode::All)
+        .export_values();
+
     py::class_<ColorConfig>(m, "ColorConfig")
 
         .def(py::init<>())
@@ -286,15 +296,22 @@ declare_colorconfig(py::module& m)
             },
             "colorspace"_a, "context"_a = py::dict())
         .def(
-            "find_colorspace_from_fingerprint",
+            "find_matches",
             [](const ColorConfig& self, const std::vector<float>& fingerprint,
-               bool display_referred, const py::dict& context) {
+               ColorConfig::FingerprintSubjectType subject_type,
+               ColorConfig::FingerprintMatchMode match_mode,
+               const py::dict& context) {
                 auto parsed = parse_context_vars(context);
-                return self.find_colorspace_from_fingerprint(fingerprint,
-                                                             display_referred,
-                                                             parsed);
+                py::list out;
+                for (const auto& name :
+                     self.find_matches(fingerprint, subject_type, match_mode,
+                                       parsed)) {
+                    out.append(decode_utf8_or_bytes(name));
+                }
+                return out;
             },
-            "fingerprint"_a, "display_referred"_a = false,
+            "fingerprint"_a, "subject_type"_a,
+            "match_mode"_a = ColorConfig::FingerprintMatchMode::First,
             "context"_a = py::dict())
         .def(
             "get_intersection",

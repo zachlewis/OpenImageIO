@@ -38,7 +38,18 @@ namespace OCIO = OCIO_NAMESPACE;
 OIIO_NAMESPACE_3_1_BEGIN
 
 namespace ConfigUtils {
-// A single colorspace fingerprint (computed values + reference space type).
+// Fingerprint system overview:
+//   1) A fingerprint is the result of running a fixed probe set of RGBA values
+//      through a color space's FROM_REFERENCE transform.
+//   2) Fingerprints are compared with a small absolute tolerance and only
+//      within the same OCIO reference-space type (scene or display).
+//   3) Values are cached per (config cache ID + context cache ID) so
+//      context-driven configs resolve consistently and cheaply.
+//   4) FastColorSpaceMatcher preloads fingerprints for the built-in interop
+//      identities config and uses them to quickly map arbitrary config spaces
+//      to equivalent interop IDs.
+//
+// A single colorspace fingerprint (computed values + reference-space type).
 struct Fingerprint {
     std::string csName;
     OCIO::ReferenceSpaceType type;
@@ -53,6 +64,8 @@ struct ColorSpaceFingerprints {
 };
 
 // Cache entry keyed by config+context cache ID.
+// by_name is a fast lookup for a single colorspace fingerprint, while
+// fingerprints.vec supports full scans for reverse matching.
 struct FingerprintCacheEntry {
     std::string cache_id;
     ColorSpaceFingerprints fingerprints;
@@ -317,9 +330,11 @@ public:
     std::vector<float> get_colorspace_fingerprint(
         string_view colorspace,
         const std::map<std::string, std::string>& context) const;
-    std::string find_colorspace_from_fingerprint(
-        const std::vector<float>& fingerprint, bool display_referred,
-        const std::map<std::string, std::string>& context) const;
+    std::vector<std::string>
+    find_matches(const std::vector<float>& fingerprint,
+                 ColorConfig::FingerprintSubjectType subject_type,
+                 ColorConfig::FingerprintMatchMode match_mode,
+                 const std::map<std::string, std::string>& context) const;
     std::vector<std::pair<std::string, std::string>> get_intersection(
         const ColorConfig& other,
         const std::map<std::string, std::string>& base_context,
@@ -2881,14 +2896,14 @@ ColorConfig::get_colorspace_fingerprint(
     return getImpl()->get_colorspace_fingerprint(colorspace, context);
 }
 
-std::string
-ColorConfig::find_colorspace_from_fingerprint(
-    const std::vector<float>& fingerprint, bool display_referred,
+std::vector<std::string>
+ColorConfig::find_matches(
+    const std::vector<float>& fingerprint, FingerprintSubjectType subject_type,
+    FingerprintMatchMode match_mode,
     const std::map<std::string, std::string>& context) const
 {
-    return getImpl()->find_colorspace_from_fingerprint(fingerprint,
-                                                       display_referred,
-                                                       context);
+    return getImpl()->find_matches(fingerprint, subject_type, match_mode,
+                                   context);
 }
 
 std::vector<std::pair<std::string, std::string>>
@@ -3013,7 +3028,31 @@ get_colorspace_fingerprint(const ConstConfigRcPtr& config,
                            const ConstContextRcPtr& context,
                            FingerprintCacheMap& cache, std::mutex& cache_mutex);
 
+enum class FingerprintMatchMode {
+    First,
+    Best,
+    All,
+};
+
+// Find colorspace matches according to match mode and optional reference-space
+// filtering.
+std::vector<std::string>
+find_colorspace_matches_from_fingerprint(
+    const ConstConfigRcPtr& config, cspan<const float> fingerprint,
+    bool filter_ref_space, ReferenceSpaceType refSpaceType,
+    FingerprintMatchMode match_mode, const ConstContextRcPtr& context,
+    FingerprintCacheMap& cache, std::mutex& cache_mutex);
+
 // Find a colorspace whose fingerprint matches the given values.
+std::vector<std::string>
+find_colorspaces_from_fingerprint(const ConstConfigRcPtr& config,
+                                  cspan<const float> fingerprint,
+                                  ReferenceSpaceType refSpaceType,
+                                  const ConstContextRcPtr& context,
+                                  FingerprintCacheMap& cache,
+                                  std::mutex& cache_mutex);
+
+// Find the first colorspace whose fingerprint matches the given values.
 std::string
 find_colorspace_from_fingerprint(const ConstConfigRcPtr& config,
                                  cspan<const float> fingerprint,
@@ -3022,7 +3061,9 @@ find_colorspace_from_fingerprint(const ConstConfigRcPtr& config,
                                  FingerprintCacheMap& cache,
                                  std::mutex& cache_mutex);
 
-// Fast matcher that compares fingerprints to the built-in interop identities.
+// Utilitiy class for efficiently matching a color space from an input
+// config to a color space from a base config, matched by fingerprint.
+// The input config must use the same reference spaces as the base config.
 class FastColorSpaceMatcher {
 public:
     FastColorSpaceMatcher(const ConstConfigRcPtr& baseConfig,
@@ -3031,8 +3072,15 @@ public:
     std::string findEquivalentColorspace(const ConstConfigRcPtr& inputConfig,
                                          string_view csName,
                                          const ConstContextRcPtr& context) const;
+    std::vector<std::string>
+    findEquivalentColorspaces(const ConstConfigRcPtr& inputConfig,
+                              string_view csName,
+                              const ConstContextRcPtr& context) const;
 
 private:
+    std::vector<std::string> findEquivalentColorspacesFromFingerprint(
+        const std::vector<float>& inputVals,
+        ReferenceSpaceType refSpaceType) const;
     std::string findEquivalentColorspaceFromFingerprint(
         const std::vector<float>& inputVals,
         ReferenceSpaceType refSpaceType) const;
@@ -3866,30 +3914,82 @@ find_colorspace_from_fingerprint(const ConstConfigRcPtr& config,
                                  FingerprintCacheMap& cache,
                                  std::mutex& cache_mutex)
 {
+    const auto matches = find_colorspace_matches_from_fingerprint(
+        config, fingerprint, true, refSpaceType, FingerprintMatchMode::First,
+        context, cache, cache_mutex);
+    return matches.empty() ? std::string() : matches.front();
+}
+
+std::vector<std::string>
+find_colorspaces_from_fingerprint(const ConstConfigRcPtr& config,
+                                  cspan<const float> fingerprint,
+                                  ReferenceSpaceType refSpaceType,
+                                  const ConstContextRcPtr& context,
+                                  FingerprintCacheMap& cache,
+                                  std::mutex& cache_mutex)
+{
+    return find_colorspace_matches_from_fingerprint(config, fingerprint, true,
+                                                    refSpaceType,
+                                                    FingerprintMatchMode::All,
+                                                    context, cache,
+                                                    cache_mutex);
+}
+
+std::vector<std::string>
+find_colorspace_matches_from_fingerprint(
+    const ConstConfigRcPtr& config, cspan<const float> fingerprint,
+    bool filter_ref_space, ReferenceSpaceType refSpaceType,
+    FingerprintMatchMode match_mode, const ConstContextRcPtr& context,
+    FingerprintCacheMap& cache, std::mutex& cache_mutex)
+{
+    std::vector<std::string> matches;
     if (!config || fingerprint.empty())
-        return "";
+        return matches;
 
     FingerprintCacheEntry entry
         = get_fingerprint_cache_entry(config, context, cache, cache_mutex);
     const float absTolerance = 5e-3f;
     const size_t n           = fingerprint.size();
+
+    float best_max_abs_err = std::numeric_limits<float>::max();
+    std::string best_name;
+
     for (const auto& fp : entry.fingerprints.vec) {
-        if (fp.type != refSpaceType)
+        if (filter_ref_space && fp.type != refSpaceType)
             continue;
         if (fp.vals.size() != n)
             continue;
 
-        bool match = true;
+        float max_abs_err = 0.0f;
+        bool in_tolerance = true;
         for (size_t i = 0; i < n; ++i) {
-            if (std::abs(fp.vals[i] - fingerprint[i]) > absTolerance) {
-                match = false;
-                break;
-            }
+            const float abs_err = std::abs(fp.vals[i] - fingerprint[i]);
+            max_abs_err         = std::max(max_abs_err, abs_err);
+            if (abs_err > absTolerance)
+                in_tolerance = false;
         }
-        if (match)
-            return fp.csName;
+
+        if (match_mode == FingerprintMatchMode::Best) {
+            if (max_abs_err < best_max_abs_err) {
+                best_max_abs_err = max_abs_err;
+                best_name        = fp.csName;
+            }
+            continue;
+        }
+
+        if (!in_tolerance)
+            continue;
+
+        if (match_mode == FingerprintMatchMode::First)
+            return { fp.csName };
+
+        matches.emplace_back(fp.csName);
     }
-    return "";
+
+    if (match_mode == FingerprintMatchMode::Best && !best_name.empty())
+        return { best_name };
+
+    return matches;
 }
 
 FastColorSpaceMatcher::FastColorSpaceMatcher(const ConstConfigRcPtr& baseConfig,
@@ -3913,8 +4013,18 @@ FastColorSpaceMatcher::findEquivalentColorspace(
     const ConstConfigRcPtr& inputConfig, string_view csName,
     const ConstContextRcPtr& context) const
 {
+    const auto matches = findEquivalentColorspaces(inputConfig, csName,
+                                                   context);
+    return matches.empty() ? std::string() : matches.front();
+}
+
+std::vector<std::string>
+FastColorSpaceMatcher::findEquivalentColorspaces(
+    const ConstConfigRcPtr& inputConfig, string_view csName,
+    const ConstContextRcPtr& context) const
+{
     if (!inputConfig || csName.empty())
-        return "";
+        return {};
 
     ConstContextRcPtr ctx   = context ? context
                                       : inputConfig->getCurrentContext();
@@ -3922,7 +4032,7 @@ FastColorSpaceMatcher::findEquivalentColorspace(
     ConstColorSpaceRcPtr cs = inputConfig->getColorSpace(c_str(csName));
 
     if (!cs || cs->isData())
-        return "";
+        return {};
 
     std::vector<float> inputVals;
     ColorSpaceFingerprints input_fingerprints;
@@ -3937,7 +4047,7 @@ FastColorSpaceMatcher::findEquivalentColorspace(
             = calcColorSpaceFingerprint(inputVals, input_fingerprints,
                                         inputConfig, cs, ctx);
         if (skipColorSpace || inputVals.empty())
-            return "";
+            return {};
 
         Fingerprint fprint;
         fprint.csName = cs->getName();
@@ -3959,20 +4069,32 @@ FastColorSpaceMatcher::findEquivalentColorspace(
     }
 
     if (inputVals.empty())
-        return "";
+        return {};
 
-    return findEquivalentColorspaceFromFingerprint(inputVals,
-                                                   cs->getReferenceSpaceType());
+    return findEquivalentColorspacesFromFingerprint(inputVals,
+                                                    cs->getReferenceSpaceType());
 }
 
 std::string
 FastColorSpaceMatcher::findEquivalentColorspaceFromFingerprint(
     const std::vector<float>& inputVals, ReferenceSpaceType refSpaceType) const
 {
+    const auto matches = findEquivalentColorspacesFromFingerprint(inputVals,
+                                                                  refSpaceType);
+    return matches.empty() ? std::string() : matches.front();
+}
+
+std::vector<std::string>
+FastColorSpaceMatcher::findEquivalentColorspacesFromFingerprint(
+    const std::vector<float>& inputVals, ReferenceSpaceType refSpaceType) const
+{
+    std::vector<std::string> matches;
     const float absTolerance = 5e-3f;
     const size_t n           = inputVals.size();
     for (const auto& fp : m_base_fingerprints.vec) {
         if (fp.type != refSpaceType)
+            continue;
+        if (fp.vals.size() != n)
             continue;
 
         bool match = true;
@@ -3983,9 +4105,9 @@ FastColorSpaceMatcher::findEquivalentColorspaceFromFingerprint(
             }
         }
         if (match)
-            return fp.csName;
+            matches.emplace_back(fp.csName);
     }
-    return "";
+    return matches;
 }
 
 // Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
@@ -4630,24 +4752,39 @@ ColorConfig::Impl::get_colorspace_fingerprint(
                                                    m_fingerprint_cache_mutex);
 }
 
-std::string
-ColorConfig::Impl::find_colorspace_from_fingerprint(
-    const std::vector<float>& fingerprint, bool display_referred,
+std::vector<std::string>
+ColorConfig::Impl::find_matches(
+    const std::vector<float>& fingerprint,
+    ColorConfig::FingerprintSubjectType subject_type,
+    ColorConfig::FingerprintMatchMode match_mode,
     const std::map<std::string, std::string>& context) const
 {
     if (!config_ || fingerprint.empty())
-        return "";
+        return {};
+    if (subject_type != ColorConfig::FingerprintSubjectType::ColorSpace)
+        return {};
 
     OCIO::ConstContextRcPtr ctx
         = ConfigUtils::make_context_with_overrides(config_, context);
 
-    const OCIO::ReferenceSpaceType refSpaceType
-        = display_referred ? OCIO::REFERENCE_SPACE_DISPLAY
-                           : OCIO::REFERENCE_SPACE_SCENE;
+    ConfigUtils::FingerprintMatchMode mode
+        = ConfigUtils::FingerprintMatchMode::First;
+    switch (match_mode) {
+    case ColorConfig::FingerprintMatchMode::First:
+        mode = ConfigUtils::FingerprintMatchMode::First;
+        break;
+    case ColorConfig::FingerprintMatchMode::Best:
+        mode = ConfigUtils::FingerprintMatchMode::Best;
+        break;
+    case ColorConfig::FingerprintMatchMode::All:
+        mode = ConfigUtils::FingerprintMatchMode::All;
+        break;
+    }
 
-    return ConfigUtils::find_colorspace_from_fingerprint(
-        config_, cspan<const float>(fingerprint), refSpaceType, ctx,
-        m_fingerprint_cache, m_fingerprint_cache_mutex);
+    return ConfigUtils::find_colorspace_matches_from_fingerprint(
+        config_, cspan<const float>(fingerprint), false,
+        OCIO::REFERENCE_SPACE_SCENE, mode, ctx, m_fingerprint_cache,
+        m_fingerprint_cache_mutex);
 }
 
 std::vector<std::pair<std::string, std::string>>
@@ -4659,6 +4796,13 @@ ColorConfig::Impl::get_intersection(
     std::vector<std::pair<std::string, std::string>> result;
     if (!config_)
         return result;
+    auto* other_impl = other.getImpl();
+    if (!other_impl || !other_impl->config_)
+        return result;
+
+    OCIO::ConstContextRcPtr other_ctx
+        = ConfigUtils::make_context_with_overrides(other_impl->config_,
+                                                   other_context);
 
     const auto color_spaces
         = m_self->getColorSpaceNamesFiltered(true, true, true, true, false);
@@ -4674,8 +4818,12 @@ ColorConfig::Impl::get_intersection(
             = m_self->get_colorspace_fingerprint(name, base_context);
         if (fingerprint.empty())
             continue;
-        const std::string match = other.find_colorspace_from_fingerprint(
-            fingerprint, display_referred, other_context);
+        const std::string match = ConfigUtils::find_colorspace_from_fingerprint(
+            other_impl->config_, cspan<const float>(fingerprint),
+            display_referred ? OCIO::REFERENCE_SPACE_DISPLAY
+                             : OCIO::REFERENCE_SPACE_SCENE,
+            other_ctx, other_impl->m_fingerprint_cache,
+            other_impl->m_fingerprint_cache_mutex);
         if (!match.empty())
             result.emplace_back(name, match);
     }

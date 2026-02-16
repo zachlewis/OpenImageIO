@@ -77,6 +77,16 @@ using ColorProcessorHandle = std::shared_ptr<ColorProcessor>;
 
 class OIIO_API ColorConfig {
 public:
+    enum class FingerprintSubjectType {
+        ColorSpace = 0,
+    };
+
+    enum class FingerprintMatchMode {
+        First = 0,
+        Best  = 1,
+        All   = 2,
+    };
+
     /// Construct a ColorConfig using the named OCIO configuration file,
     /// or if filename is empty, to the current color configuration
     /// specified by env variable $OCIO.
@@ -455,13 +465,21 @@ public:
     /// get_color_interop_id for non-strict matching, and it is NOT the
     /// explicitly-specified interop_id on the colorspace.
     ///
+    /// Fingerprint model:
+    /// A "fingerprint" is a deterministic vector of float values computed by
+    /// passing fixed probe RGBA values through a colorspace transform. Matches
+    /// are done by absolute tolerance and only against spaces of the same
+    /// reference type (scene or display). Fingerprint data is cached per
+    /// config+context cache ID.
+    ///
     /// @version 3.1
     std::map<std::string, std::string> get_equality_ids() const;
 
     /// Return a mapping of colorspace names to definitionally equivalent
     /// built-in interop IDs. If `exhaustive` is false, only attempt to
     /// fingerprint simple color spaces; if true, attempt all color spaces.
-    /// If `context` is non-empty, use those context overrides for matching.
+    /// If `context` is non-empty, use those context overrides for
+    /// fingerprint generation and matching.
     ///
     /// @version 3.1
     std::map<std::string, std::string>
@@ -482,26 +500,34 @@ public:
         const std::map<std::string, std::string>& context = {}) const;
 
     /// Return the fingerprint values for the given colorspace using optional
-    /// OCIO context overrides. Returns an empty vector if no fingerprint could
-    /// be computed. Results are cached per config+context.
+    /// OCIO context overrides. The returned vector represents transformed
+    /// probe samples and is suitable for cross-config equivalence checks.
+    /// Returns an empty vector if no fingerprint could be computed.
+    /// Results are cached per config+context.
     ///
     /// @version 3.1
     std::vector<float> get_colorspace_fingerprint(
         string_view colorspace,
         const std::map<std::string, std::string>& context = {}) const;
 
-    /// Find a color space in the config that matches the given fingerprint
-    /// values. Set `display_referred` to match display-referred color spaces;
-    /// otherwise (the default), scene-referred spaces are matched. Returns an
-    /// empty string if no match is found.
+    /// Find matching subjects in this config for the given fingerprint.
+    /// `subject_type` selects which category to search (currently color
+    /// spaces). `match_mode` controls selection strategy:
+    /// `First` returns the first tolerance match, `Best` returns the closest
+    /// candidate by absolute error, and `All` returns all tolerance matches.
+    /// Returns an empty vector if no match is found.
     ///
     /// @version 3.1
-    std::string find_colorspace_from_fingerprint(
-        const std::vector<float>& fingerprint, bool display_referred,
+    std::vector<std::string> find_matches(
+        const std::vector<float>& fingerprint,
+        FingerprintSubjectType subject_type,
+        FingerprintMatchMode match_mode = FingerprintMatchMode::First,
         const std::map<std::string, std::string>& context = {}) const;
 
     /// Return pairs of (this_config_colorspace, other_config_colorspace) where
-    /// fingerprints match between configs for the given contexts.
+    /// fingerprints match between configs for the given contexts. This is a
+    /// convenience wrapper around get_colorspace_fingerprint() on this config
+    /// and find_matches() on `other` with subject type `ColorSpace`.
     ///
     /// @version 3.1
     std::vector<std::pair<std::string, std::string>> get_intersection(

@@ -3967,7 +3967,7 @@ is provided for minimal color support.
 
         colorconfig = oiio.ColorConfig()
         interop_id = colorconfig.get_color_interop_id("sRGB - Texture")
-        assert interop_id == "srgb_rec709_scene""
+        assert interop_id == "srgb_rec709_scene"
 
     This function was added in OpenImageIO 3.1.
 
@@ -3995,11 +3995,20 @@ is provided for minimal color support.
     eligible for matching. This is NOT a mapping from colorspace to any
     explicitly specified interop_id in the OCIO config.
 
-    Example:
+    Fingerprint summary:
+
+    A fingerprint is a deterministic float vector produced by passing fixed
+    probe RGBA values through a colorspace transform. Fingerprints are only
+    compared within the same reference-space type (scene vs display), with a
+    small absolute tolerance. Results are cached per config+context cache ID.
+
+    Matching behavior:
 
     If ``exhaustive`` is False, only attempt to fingerprint simple color
     spaces; if True, attempt all color spaces. If ``context`` is not None,
     it should be a dict of OCIO context overrides used for matching.
+
+    Example:
 
     .. code-block:: python
 
@@ -4024,6 +4033,69 @@ is provided for minimal color support.
         colorconfig = oiio.ColorConfig()
         cs_to_id = colorconfig.get_interop_ids()
         assert cs_to_id["sRGB - Texture"] == "srgb_rec709_scene"
+
+    This function was added in OpenImageIO 3.1.
+
+.. py:method:: get_colorspace_fingerprint (colorspace: str, context: dict[str, str | None] | None = None) -> list[float]
+
+    Return the fingerprint vector for ``colorspace`` using optional OCIO
+    context overrides. Returns an empty list if no fingerprint could be
+    computed.
+
+    The result is designed for equivalence tests (for example, passing into
+    :py:meth:`find_matches` on this or another config).
+
+    Example:
+
+    .. code-block:: python
+
+        colorconfig = oiio.ColorConfig()
+        fp = colorconfig.get_colorspace_fingerprint(
+            "lin_rec709_scene", context={"SHOT": "sh010"}
+        )
+        if fp:
+            matches = colorconfig.find_matches(
+                fp, oiio.FingerprintSubjectType.ColorSpace
+            )
+
+    This function was added in OpenImageIO 3.1.
+
+.. py:class:: FingerprintSubjectType
+
+    Enum describing which kind of subject to match.
+
+    Values:
+
+    - ``ColorSpace``
+
+.. py:class:: FingerprintMatchMode
+
+    Enum controlling match selection behavior.
+
+    Values:
+
+    - ``First``: first candidate within tolerance.
+    - ``Best``: closest candidate by absolute error.
+    - ``All``: all candidates within tolerance.
+
+.. py:method:: find_matches (fingerprint: list[float], subject_type: FingerprintSubjectType, match_mode: FingerprintMatchMode = FingerprintMatchMode.First, context: dict[str, str | None] | None = None) -> list[str]
+
+    Find matching subjects for ``fingerprint`` in this config.
+    Returns a list of subject names. The list contains 0 or 1 entries for
+    ``First``/``Best`` modes, and all tolerance matches for ``All`` mode.
+
+    Example:
+
+    .. code-block:: python
+
+        base = oiio.ColorConfig("base.ocio")
+        other = oiio.ColorConfig("other.ocio")
+        fp = base.get_colorspace_fingerprint("lin_rec709_scene")
+        matches = other.find_matches(
+            fp,
+            oiio.FingerprintSubjectType.ColorSpace,
+            oiio.FingerprintMatchMode.All,
+        ) if fp else []
 
     This function was added in OpenImageIO 3.1.
 

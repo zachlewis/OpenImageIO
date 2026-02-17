@@ -452,6 +452,8 @@ public:
             m_interopconfig_init_ns.load(std::memory_order_relaxed));
         const auto refspace_converter_init_ms = ns_to_ms(
             m_refspace_converter_init_ns.load(std::memory_order_relaxed));
+        const auto oiio_overhead_ms   = std::max(0.0,
+                                                 total_ms - ocio_load_config_ms);
         double fingerprint_compute_ms = 0.0;
         {
             std::lock_guard<std::mutex> lock(m_fingerprint_cache_mutex);
@@ -476,6 +478,8 @@ public:
               Strutil::fmt::format("{:.3f}", builtin_equivalents_ms) },
             { "init.ocio_load_config_ms",
               Strutil::fmt::format("{:.3f}", ocio_load_config_ms) },
+            { "init.oiio_overhead_ms",
+              Strutil::fmt::format("{:.3f}", oiio_overhead_ms) },
             { "init.interopconfig_init_ms",
               Strutil::fmt::format("{:.3f}", interopconfig_init_ms) },
             { "init.refspace_converter_init_ms",

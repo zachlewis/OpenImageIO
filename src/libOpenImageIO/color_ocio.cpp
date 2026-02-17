@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -77,6 +79,19 @@ struct FingerprintCacheEntry {
 using FingerprintCacheMap
     = std::unordered_map<std::string, FingerprintCacheEntry>;
 class FastColorSpaceMatcher;
+std::vector<float>
+get_colorspace_fingerprint(const OCIO::ConstConfigRcPtr& config,
+                           string_view colorspace,
+                           const OCIO::ConstContextRcPtr& context,
+                           FingerprintCacheMap& cache,
+                           std::mutex& cache_mutex);
+std::string
+find_colorspace_from_fingerprint(const OCIO::ConstConfigRcPtr& config,
+                                 cspan<const float> fingerprint,
+                                 OCIO::ReferenceSpaceType refSpaceType,
+                                 const OCIO::ConstContextRcPtr& context,
+                                 FingerprintCacheMap& cache,
+                                 std::mutex& cache_mutex);
 OCIO::ConfigRcPtr
 adaptConfigReferenceSpaces(const OCIO::ConstConfigRcPtr& config,
                            const OCIO::ConstConfigRcPtr& otherConfig);
@@ -118,6 +133,37 @@ static int disable_builtin_configs = Strutil::stoi(
 static int disable_equality_reverse_cache = Strutil::stoi(
     Sysutil::getenv("OIIO_DISABLE_EQUALITY_REVERSE_CACHE"));
 static OCIO::ConstConfigRcPtr ocio_current_config;
+namespace {
+const ColorConfig&
+get_latest_cg_config()
+{
+    static const ColorConfig config("ocio://cg-config-default");
+    return config;
+}
+
+class ScopedNsAccumulator {
+public:
+    explicit ScopedNsAccumulator(std::atomic<uint64_t>& dest)
+        : m_dest(dest)
+        , m_start(std::chrono::steady_clock::now())
+    {
+    }
+
+    ~ScopedNsAccumulator()
+    {
+        const auto end = std::chrono::steady_clock::now();
+        const auto ns
+            = std::chrono::duration_cast<std::chrono::nanoseconds>(end
+                                                                   - m_start)
+                  .count();
+        m_dest.fetch_add(static_cast<uint64_t>(ns), std::memory_order_relaxed);
+    }
+
+private:
+    std::atomic<uint64_t>& m_dest;
+    std::chrono::steady_clock::time_point m_start;
+};
+}  // namespace
 
 
 
@@ -299,6 +345,14 @@ private:
     mutable std::unique_ptr<ConfigUtils::FastColorSpaceMatcher> m_interop_matcher;
     mutable std::mutex m_interop_matcher_mutex;
     mutable std::atomic<bool> m_equality_reverse_cache_enabled { true };
+    mutable std::atomic<uint64_t> m_init_total_ns { 0 };
+    mutable std::atomic<uint64_t> m_inventory_ns { 0 };
+    mutable std::atomic<uint64_t> m_classify_conversions_ns { 0 };
+    mutable std::atomic<uint64_t> m_classify_heuristics_ns { 0 };
+    mutable std::atomic<uint64_t> m_initialize_equality_id_map_ns { 0 };
+    mutable std::atomic<uint64_t> m_get_simple_color_spaces_ns { 0 };
+    mutable std::atomic<uint64_t> m_ocio_load_config_ns { 0 };
+    mutable std::atomic<uint64_t> m_interopconfig_init_ns { 0 };
 
 public:
     Impl(ColorConfig* self)
@@ -334,6 +388,7 @@ public:
     find_matches(const std::vector<float>& fingerprint,
                  ColorConfig::FingerprintSubjectType subject_type,
                  ColorConfig::FingerprintMatchMode match_mode,
+                 bool exhaustive,
                  const std::map<std::string, std::string>& context) const;
     std::vector<std::pair<std::string, std::string>> get_intersection(
         const ColorConfig& other,
@@ -355,6 +410,54 @@ public:
         const std::string config_id = config ? config->getCacheID()
                                              : std::string();
         return Strutil::fmt::format("{}@{}", ctx_id, config_id);
+    }
+    std::map<std::string, std::string> getDebugInfo() const
+    {
+        auto ns_to_ms = [](uint64_t ns) { return double(ns) / 1.0e6; };
+        const auto total_ms
+            = ns_to_ms(m_init_total_ns.load(std::memory_order_relaxed));
+        const auto inventory_ms
+            = ns_to_ms(m_inventory_ns.load(std::memory_order_relaxed));
+        const auto conversions_ms = ns_to_ms(
+            m_classify_conversions_ns.load(std::memory_order_relaxed));
+        const auto heuristics_ms = ns_to_ms(
+            m_classify_heuristics_ns.load(std::memory_order_relaxed));
+        const auto equality_map_ms = ns_to_ms(
+            m_initialize_equality_id_map_ns.load(std::memory_order_relaxed));
+        const auto simple_spaces_ms = ns_to_ms(
+            m_get_simple_color_spaces_ns.load(std::memory_order_relaxed));
+        const auto ocio_load_config_ms
+            = ns_to_ms(m_ocio_load_config_ns.load(std::memory_order_relaxed));
+        const auto interopconfig_init_ms = ns_to_ms(
+            m_interopconfig_init_ns.load(std::memory_order_relaxed));
+        double fingerprint_compute_ms = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(m_fingerprint_cache_mutex);
+            for (const auto& kv : m_fingerprint_cache) {
+                fingerprint_compute_ms += kv.second.seconds * 1000.0;
+            }
+        }
+
+        return {
+            { "init.total_ms", Strutil::fmt::format("{:.3f}", total_ms) },
+            { "init.inventory_ms",
+              Strutil::fmt::format("{:.3f}", inventory_ms) },
+            { "init.classify_by_conversions_ms",
+              Strutil::fmt::format("{:.3f}", conversions_ms) },
+            { "init.classify_by_heuristics_ms",
+              Strutil::fmt::format("{:.3f}", heuristics_ms) },
+            { "init.initialize_equality_id_map_ms",
+              Strutil::fmt::format("{:.3f}", equality_map_ms) },
+            { "init.get_simple_color_spaces_ms",
+              Strutil::fmt::format("{:.3f}", simple_spaces_ms) },
+            { "init.ocio_load_config_ms",
+              Strutil::fmt::format("{:.3f}", ocio_load_config_ms) },
+            { "init.interopconfig_init_ms",
+              Strutil::fmt::format("{:.3f}", interopconfig_init_ms) },
+            { "runtime.fingerprint_compute_ms",
+              Strutil::fmt::format("{:.3f}", fingerprint_compute_ms) },
+            { "config.configname", configname() },
+        };
     }
 
     void add(const std::string& name, int index, int flags = 0)
@@ -571,6 +674,7 @@ private:
 void
 ColorConfig::Impl::inventory()
 {
+    ScopedNsAccumulator phase_time(m_inventory_ns);
     DBG("inventorying config {}\n", configname());
     if (config_ && !disable_ocio) {
         bool nonraw = false;
@@ -842,6 +946,7 @@ ColorConfig::Impl::classify_by_name(CSInfo& cs)
 void
 ColorConfig::Impl::classify_by_conversions(CSInfo& cs)
 {
+    ScopedNsAccumulator phase_time(m_classify_conversions_ns);
     DBG("classifying by conversions {}\n", cs.name);
     if (cs.examined)
         return;  // Already classified
@@ -899,6 +1004,7 @@ ColorConfig::Impl::classify_by_conversions(CSInfo& cs)
 void
 ColorConfig::Impl::reclassify_heuristics(CSInfo& cs)
 {
+    ScopedNsAccumulator phase_time(m_classify_heuristics_ns);
 #if OCIO_VERSION_HEX < MAKE_OCIO_VERSION_HEX(2, 2, 0)
     // Extra checks for OCIO < 2.2. For >= 2.2, there is no need, we
     // already figured this out using the built-in configs.
@@ -944,7 +1050,7 @@ ColorConfig::Impl::identify_builtin_equivalents()
         DBG("No config space identified as srgb\n");
     }
     DBG("identify_builtin_equivalents srgb took {:0.2f}s\n", timer.lap());
-    if (auto n = IdentifyBuiltinColorSpace("lin_rec709_scene")) {
+    if (auto n = IdentifyBuiltinColorSpace("lin_srgb")) {
         if (CSInfo* cs = find(n)) {
             cs->setflag(CSInfo::is_lin_srgb | CSInfo::is_linear_response,
                         lin_srgb_alias);
@@ -978,11 +1084,39 @@ ColorConfig::Impl::IdentifyBuiltinColorSpace(const char* name) const
                                                        name);
     } catch (...) {
     }
-    try {
-        return OCIO::Config::IdentifyBuiltinColorSpace(config_, builtinconfig_,
-                                                       name);
-    } catch (...) {
-    }
+
+    // Fallback: fingerprint a builtin colorspace from a builtin ColorConfig
+    // singleton and use ColorConfig matching idioms on the current config.
+    if (!name || !*name)
+        return nullptr;
+    static thread_local int fallback_depth = 0;
+    if (fallback_depth > 0)
+        return nullptr;
+    struct FallbackDepthGuard {
+        int& depth;
+        FallbackDepthGuard(int& d)
+            : depth(d)
+        {
+            ++depth;
+        }
+        ~FallbackDepthGuard() { --depth; }
+    } depth_guard(fallback_depth);
+
+    static const ColorConfig ocio_default_cc("ocio://default");
+    const ColorConfig& builtin_cc = Strutil::iequals(configname(),
+                                                     "ocio://default")
+                                        ? get_latest_cg_config()
+                                        : ocio_default_cc;
+    const auto fingerprint = builtin_cc.get_colorspace_fingerprint(name);
+    if (fingerprint.empty())
+        return nullptr;
+    const auto matches = m_self->find_matches(
+        fingerprint, ColorConfig::FingerprintSubjectType::ColorSpace,
+        ColorConfig::FingerprintMatchMode::First, false, {});
+    if (matches.empty())
+        return nullptr;
+    if (const CSInfo* cs = find(matches.front()))
+        return cs->name.c_str();
     return nullptr;
 }
 
@@ -1006,7 +1140,17 @@ ColorConfig::Impl::init(string_view filename)
     // - 
     // - Inventory the config for roles/aliases and run heuristics.
     OIIO_MAYBE_UNUSED Timer timer;
+    auto init_start = std::chrono::steady_clock::now();
     bool ok = true;
+
+    m_init_total_ns.store(0, std::memory_order_relaxed);
+    m_inventory_ns.store(0, std::memory_order_relaxed);
+    m_classify_conversions_ns.store(0, std::memory_order_relaxed);
+    m_classify_heuristics_ns.store(0, std::memory_order_relaxed);
+    m_initialize_equality_id_map_ns.store(0, std::memory_order_relaxed);
+    m_get_simple_color_spaces_ns.store(0, std::memory_order_relaxed);
+    m_ocio_load_config_ns.store(0, std::memory_order_relaxed);
+    m_interopconfig_init_ns.store(0, std::memory_order_relaxed);
 
     m_equality_reverse_cache_enabled.store(!disable_equality_reverse_cache);
 
@@ -1020,70 +1164,76 @@ ColorConfig::Impl::init(string_view filename)
     }
 
     // create builtin interop identities config
-    try {
-        interopconfig_ = build_interop_identities_config();
-    } catch (OCIO::Exception& e) {
-        error("Error making OCIO interop identities config: {}", e.what());
-    }
-
-    // If no filename was specified, use env $OCIO
-    if (filename.empty() || Strutil::iequals(filename, "$OCIO"))
-        filename = Sysutil::getenv("OCIO");
-    if (filename.empty())
-        filename = "ocio://default";
-    // If there's a newline in filename, treat it as the config data itself
-    if (filename.find('\n') != string_view::npos) {
+    {
+        ScopedNsAccumulator interop_init_time(m_interopconfig_init_ns);
         try {
-            std::istringstream iss;
-            iss.str(std::string(filename));
-            //TODO: check to see if the config's "ocio_version" metadata is
-            // compatible with the OCIO version we're using, and if not, error
-            config_   = OCIO::Config::CreateFromStream(iss);
-            auto name = config_->getName();
-            if (name && name[0])
-                configname(name);
-            else
-                configname(config_->getCacheID());
-            configfilename(filename);  // from stream, no filename
+            interopconfig_ = build_interop_identities_config();
         } catch (OCIO::Exception& e) {
-            error("Error reading OCIO config from stream: {}", e.what());
-            config_ = OCIO::Config::CreateFromFile("ocio://default");
-        }
-    }
-    if (filename.size() && !OIIO::Filesystem::exists(filename)
-        && !Strutil::istarts_with(filename, "ocio://")) {
-        error("Requested non-existent OCIO config \"{}\"", filename);
-    } else {
-        // Either filename passed, or taken from $OCIO, and it seems to exist
-        try {
-            config_ = OCIO::Config::CreateFromFile(
-                std::string(filename).c_str());
-            configname(filename);
-            configfilename(filename);
-            m_config_is_built_in = Strutil::istarts_with(filename, "ocio://");
-        } catch (OCIO::Exception& e) {
-            error("Error reading OCIO config \"{}\": {}", filename, e.what());
+            error("Error making OCIO interop identities config: {}", e.what());
         }
     }
 
-    if (!config_) {
-        OCIO::LogMessage(OCIO::LOGGING_LEVEL_DEBUG,
-                         "Falling back to current OCIO config");
-        auto current_config = OCIO::GetCurrentConfig();
-        if (current_config->getNumColorSpaces() == 1) {
-            config_ = OCIO::Config::CreateFromFile("ocio://default");
-            configname("ocio://default");
-            configfilename("ocio://default");
-            OCIO::LogMessage(
-                OCIO::LOGGING_LEVEL_DEBUG,
-                "Current OCIO config is invalid, using ocio://default "
-                "instead");
-            OCIO::SetCurrentConfig(config_);
-        } else
-            config_ = current_config;
-        auto config_name = current_config->getName();
-        configname(config_name ? config_name : "current");
-        configfilename("current");
+    {
+        ScopedNsAccumulator load_phase_time(m_ocio_load_config_ns);
+        // If no filename was specified, use env $OCIO
+        if (filename.empty() || Strutil::iequals(filename, "$OCIO"))
+            filename = Sysutil::getenv("OCIO");
+        if (filename.empty())
+            filename = "ocio://default";
+        // If there's a newline in filename, treat it as the config data itself
+        const bool from_stream = filename.find('\n') != string_view::npos;
+        if (from_stream) {
+            try {
+                std::istringstream iss;
+                iss.str(std::string(filename));
+                //TODO: check to see if the config's "ocio_version" metadata is
+                // compatible with the OCIO version we're using, and if not, error
+                config_   = OCIO::Config::CreateFromStream(iss);
+                auto name = config_->getName();
+                if (name && name[0])
+                    configname(name);
+                else
+                    configname(config_->getCacheID());
+                configfilename(filename);  // from stream, no filename
+            } catch (OCIO::Exception& e) {
+                error("Error reading OCIO config from stream: {}", e.what());
+                config_ = OCIO::Config::CreateFromFile("ocio://default");
+            }
+        } else if (filename.size() && !OIIO::Filesystem::exists(filename)
+                   && !Strutil::istarts_with(filename, "ocio://")) {
+            error("Requested non-existent OCIO config \"{}\"", filename);
+        } else if (!from_stream) {
+            // Either filename passed, or taken from $OCIO, and it seems to exist
+            try {
+                config_ = OCIO::Config::CreateFromFile(
+                    std::string(filename).c_str());
+                configname(filename);
+                configfilename(filename);
+                m_config_is_built_in = Strutil::istarts_with(filename, "ocio://");
+            } catch (OCIO::Exception& e) {
+                error("Error reading OCIO config \"{}\": {}", filename, e.what());
+            }
+        }
+
+        if (!config_) {
+            OCIO::LogMessage(OCIO::LOGGING_LEVEL_DEBUG,
+                             "Falling back to current OCIO config");
+            auto current_config = OCIO::GetCurrentConfig();
+            if (current_config->getNumColorSpaces() == 1) {
+                config_ = OCIO::Config::CreateFromFile("ocio://default");
+                configname("ocio://default");
+                configfilename("ocio://default");
+                OCIO::LogMessage(
+                    OCIO::LOGGING_LEVEL_DEBUG,
+                    "Current OCIO config is invalid, using ocio://default "
+                    "instead");
+                OCIO::SetCurrentConfig(config_);
+            } else
+                config_ = current_config;
+            auto config_name = current_config->getName();
+            configname(config_name ? config_name : "current");
+            configfilename("current");
+        }
     }
 
     if (config_ && interopconfig_) {
@@ -1151,6 +1301,13 @@ ColorConfig::Impl::init(string_view filename)
     debug_print_aliases();
     DBG("OCIO config {} classified in {:0.2f} seconds\n", filename,
         timer.lap());
+    const auto init_end = std::chrono::steady_clock::now();
+    const auto init_ns
+        = std::chrono::duration_cast<std::chrono::nanoseconds>(init_end
+                                                                - init_start)
+              .count();
+    m_init_total_ns.store(static_cast<uint64_t>(init_ns),
+                          std::memory_order_relaxed);
     return ok;
 }
 
@@ -1730,6 +1887,13 @@ ColorConfig::setWorkingDir(string_view dir)
     impl->clear_colorproc_cache();
 }
 
+std::map<std::string, std::string>
+ColorConfig::getDebugInfo() const
+{
+    return getImpl() ? getImpl()->getDebugInfo()
+                     : std::map<std::string, std::string>();
+}
+
 
 
 string_view
@@ -1847,38 +2011,45 @@ ColorConfig::Impl::resolve(string_view name) const
     if (cs)
         return cs->getName();
 
-    // OCIO did not know this name as a color space, role, or alias.
-    initialize_equality_id_map();
-    {
-        OCIO::ConstContextRcPtr ctx = config_ ? config_->getCurrentContext()
-                                              : nullptr;
-        const std::string key       = equality_cache_key(config_, ctx);
-        spin_rw_read_lock lock(m_mutex);
-        auto it_ctx = m_equality_id_to_cs_by_ctx.find(key);
-        if (m_equality_reverse_cache_enabled.load()
-            && it_ctx != m_equality_id_to_cs_by_ctx.end()) {
-            auto it = it_ctx->second.find(std::string(name));
-            if (it != it_ctx->second.end())
-                return it->second;
+    const auto interop_cs = interopconfig_ ? interopconfig_->getColorSpace(
+                                                namestr)
+                                           : nullptr;
+    if (interop_cs) {
+        // OCIO did not know this name directly. If this token is a known
+        // interop id, use the equality-id reverse map.
+        initialize_equality_id_map();
+        {
+            OCIO::ConstContextRcPtr ctx = config_ ? config_->getCurrentContext()
+                                                  : nullptr;
+            const std::string key       = equality_cache_key(config_, ctx);
+            spin_rw_read_lock lock(m_mutex);
+            auto it_ctx = m_equality_id_to_cs_by_ctx.find(key);
+            if (m_equality_reverse_cache_enabled.load()
+                && it_ctx != m_equality_id_to_cs_by_ctx.end()) {
+                auto it = it_ctx->second.find(std::string(name));
+                if (it != it_ctx->second.end())
+                    return it->second;
+            }
         }
-    }
 
-    spin_rw_write_lock lock(m_mutex);
-
-    // Check the interop identities config as well...
-    auto builtin_cs = interopconfig_->getColorSpace(namestr);
-    if (builtin_cs) {
+        // Interop fallback path.
         try {
             const char* equivalent_cs = OCIO::Config::IdentifyBuiltinColorSpace(
-                config_, interopconfig_, builtin_cs->getName());
+                config_, interopconfig_, interop_cs->getName());
             if (equivalent_cs && *equivalent_cs)
                 return equivalent_cs;
         } catch (OCIO::Exception& e) {
             // ignore
         }
+    } else if (builtinconfig_ && builtinconfig_->getColorSpace(namestr)) {
+        // If this name exists in the default builtin config, try the builtin
+        // equivalence path directly.
+        if (const char* equivalent_cs = IdentifyBuiltinColorSpace(namestr))
+            return equivalent_cs;
     }
 
     // Maybe it's an informal alias of common names?
+    spin_rw_read_lock lock(m_mutex);
     if ((Strutil::iequals(name, "sRGB")
          || Strutil::iequals(name, "srgb_rec709_scene"))
         && !srgb_alias.empty())
@@ -2910,11 +3081,11 @@ ColorConfig::get_colorspace_fingerprint(
 std::vector<std::string>
 ColorConfig::find_matches(
     const std::vector<float>& fingerprint, FingerprintSubjectType subject_type,
-    FingerprintMatchMode match_mode,
+    FingerprintMatchMode match_mode, bool exhaustive,
     const std::map<std::string, std::string>& context) const
 {
     return getImpl()->find_matches(fingerprint, subject_type, match_mode,
-                                   context);
+                                   exhaustive, context);
 }
 
 std::vector<std::pair<std::string, std::string>>
@@ -3052,8 +3223,9 @@ std::vector<std::string>
 find_colorspace_matches_from_fingerprint(
     const ConstConfigRcPtr& config, cspan<const float> fingerprint,
     bool filter_ref_space, ReferenceSpaceType refSpaceType,
-    FingerprintMatchMode match_mode, const ConstContextRcPtr& context,
-    FingerprintCacheMap& cache, std::mutex& cache_mutex);
+    FingerprintMatchMode match_mode, bool exhaustive,
+    const ConstContextRcPtr& context, FingerprintCacheMap& cache,
+    std::mutex& cache_mutex);
 
 // Find a colorspace whose fingerprint matches the given values.
 std::vector<std::string>
@@ -3931,7 +4103,7 @@ find_colorspace_from_fingerprint(const ConstConfigRcPtr& config,
 {
     const auto matches = find_colorspace_matches_from_fingerprint(
         config, fingerprint, true, refSpaceType, FingerprintMatchMode::First,
-        context, cache, cache_mutex);
+        false, context, cache, cache_mutex);
     return matches.empty() ? std::string() : matches.front();
 }
 
@@ -3946,7 +4118,7 @@ find_colorspaces_from_fingerprint(const ConstConfigRcPtr& config,
     return find_colorspace_matches_from_fingerprint(config, fingerprint, true,
                                                     refSpaceType,
                                                     FingerprintMatchMode::All,
-                                                    context, cache,
+                                                    false, context, cache,
                                                     cache_mutex);
 }
 
@@ -3954,31 +4126,31 @@ std::vector<std::string>
 find_colorspace_matches_from_fingerprint(
     const ConstConfigRcPtr& config, cspan<const float> fingerprint,
     bool filter_ref_space, ReferenceSpaceType refSpaceType,
-    FingerprintMatchMode match_mode, const ConstContextRcPtr& context,
-    FingerprintCacheMap& cache, std::mutex& cache_mutex)
+    FingerprintMatchMode match_mode, bool exhaustive,
+    const ConstContextRcPtr& context, FingerprintCacheMap& cache,
+    std::mutex& cache_mutex)
 {
     std::vector<std::string> matches;
     if (!config || fingerprint.empty())
         return matches;
 
-    FingerprintCacheEntry entry
-        = get_fingerprint_cache_entry(config, context, cache, cache_mutex);
     const float absTolerance = 5e-3f;
     const size_t n           = fingerprint.size();
 
     float best_max_abs_err = std::numeric_limits<float>::max();
     std::string best_name;
 
-    for (const auto& fp : entry.fingerprints.vec) {
-        if (filter_ref_space && fp.type != refSpaceType)
-            continue;
-        if (fp.vals.size() != n)
-            continue;
+    auto evaluate = [&](string_view name, ReferenceSpaceType type,
+                        cspan<const float> vals) -> bool {
+        if (filter_ref_space && type != refSpaceType)
+            return false;
+        if (vals.size() != n)
+            return false;
 
         float max_abs_err = 0.0f;
         bool in_tolerance = true;
         for (size_t i = 0; i < n; ++i) {
-            const float abs_err = std::abs(fp.vals[i] - fingerprint[i]);
+            const float abs_err = std::abs(vals[i] - fingerprint[i]);
             max_abs_err         = std::max(max_abs_err, abs_err);
             if (abs_err > absTolerance)
                 in_tolerance = false;
@@ -3987,18 +4159,46 @@ find_colorspace_matches_from_fingerprint(
         if (match_mode == FingerprintMatchMode::Best) {
             if (max_abs_err < best_max_abs_err) {
                 best_max_abs_err = max_abs_err;
-                best_name        = fp.csName;
+                best_name        = std::string(name);
             }
-            continue;
+            return false;
         }
 
         if (!in_tolerance)
-            continue;
+            return false;
 
-        if (match_mode == FingerprintMatchMode::First)
-            return { fp.csName };
+        if (match_mode == FingerprintMatchMode::First) {
+            matches = { std::string(name) };
+            return true;
+        }
 
-        matches.emplace_back(fp.csName);
+        matches.emplace_back(name);
+        return false;
+    };
+
+    if (exhaustive) {
+        for (int i = 0, e = config->getNumColorSpaces(); i < e; ++i) {
+            const char* csname = config->getColorSpaceNameByIndex(i);
+            if (!csname || !*csname)
+                continue;
+            ConstColorSpaceRcPtr cs = config->getColorSpace(csname);
+            if (!cs || cs->isData())
+                continue;
+            auto vals = get_colorspace_fingerprint(config, cs->getName(),
+                                                   context, cache, cache_mutex);
+            if (vals.empty())
+                continue;
+            if (evaluate(cs->getName(), cs->getReferenceSpaceType(),
+                         cspan<const float>(vals)))
+                return matches;
+        }
+    } else {
+        FingerprintCacheEntry entry
+            = get_fingerprint_cache_entry(config, context, cache, cache_mutex);
+        for (const auto& fp : entry.fingerprints.vec) {
+            if (evaluate(fp.csName, fp.type, cspan<const float>(fp.vals)))
+                return matches;
+        }
     }
 
     if (match_mode == FingerprintMatchMode::Best && !best_name.empty())
@@ -4546,11 +4746,12 @@ adaptConfigReferenceSpaces(const OCIO::ConstConfigRcPtr& config,
 }
 
 }  // namespace ConfigUtils
-
+// clang-format on
 
 void
 ColorConfig::Impl::initialize_equality_id_map() const
 {
+    ScopedNsAccumulator phase_time(m_initialize_equality_id_map_ns);
     if (!config_)
         return;
 
@@ -4568,7 +4769,7 @@ ColorConfig::Impl::initialize_equality_id_map() const
     tsl::robin_map<std::string, std::string> csToEqualityId;
     // equalityIdToCs is used for resolving equality ids (and interop_ids)
     // back to config spaces.
-    // Example: key="lin_rec709_scene", value="Rec709".
+    // Example: key="lin_rec709_scene", value="My Linear sRGB color space".
 
     if (interopconfig_ && config_) {
         auto& matcher            = get_interop_matcher();
@@ -4697,6 +4898,7 @@ ColorConfig::Impl::get_equality_ids(
 const std::vector<std::string>&
 ColorConfig::Impl::getSimpleColorSpaces() const
 {
+    ScopedNsAccumulator phase_time(m_get_simple_color_spaces_ns);
     {
         spin_rw_read_lock lock(m_mutex);
         if (m_simple_color_spaces_cached)
@@ -4772,6 +4974,7 @@ ColorConfig::Impl::find_matches(
     const std::vector<float>& fingerprint,
     ColorConfig::FingerprintSubjectType subject_type,
     ColorConfig::FingerprintMatchMode match_mode,
+    bool exhaustive,
     const std::map<std::string, std::string>& context) const
 {
     if (!config_ || fingerprint.empty())
@@ -4798,8 +5001,8 @@ ColorConfig::Impl::find_matches(
 
     return ConfigUtils::find_colorspace_matches_from_fingerprint(
         config_, cspan<const float>(fingerprint), false,
-        OCIO::REFERENCE_SPACE_SCENE, mode, ctx, m_fingerprint_cache,
-        m_fingerprint_cache_mutex);
+        OCIO::REFERENCE_SPACE_SCENE, mode, exhaustive, ctx,
+        m_fingerprint_cache, m_fingerprint_cache_mutex);
 }
 
 std::vector<std::pair<std::string, std::string>>

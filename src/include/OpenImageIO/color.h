@@ -515,6 +515,8 @@ public:
     /// spaces). `match_mode` controls selection strategy:
     /// `First` returns the first tolerance match, `Best` returns the closest
     /// candidate by absolute error, and `All` returns all tolerance matches.
+    /// If `exhaustive` is false, only prefiltered simple color spaces are
+    /// checked; if true, all candidate color spaces are checked.
     /// Returns an empty vector if no match is found.
     ///
     /// @version 3.1
@@ -522,6 +524,7 @@ public:
         const std::vector<float>& fingerprint,
         FingerprintSubjectType subject_type,
         FingerprintMatchMode match_mode = FingerprintMatchMode::First,
+        bool exhaustive                 = false,
         const std::map<std::string, std::string>& context = {}) const;
 
     /// Return pairs of (this_config_colorspace, other_config_colorspace) where
@@ -578,6 +581,12 @@ public:
     ///
     /// @version 3.1
     void setWorkingDir(string_view dir);
+
+    /// Return debugging info about ColorConfig initialization timing and
+    /// selected internal setup phases as key/value pairs.
+    ///
+    /// @version 3.1
+    std::map<std::string, std::string> getDebugInfo() const;
 
     /// Set the spec's metadata to presume that color space is `name` (or to
     /// assume nothing about the color space if `name` is empty). The core

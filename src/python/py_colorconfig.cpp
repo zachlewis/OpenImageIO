@@ -4,6 +4,7 @@
 
 #include "py_oiio.h"
 #include <OpenImageIO/color.h>
+#include <cstdlib>
 #include <optional>
 #include <utility>
 
@@ -92,6 +93,24 @@ declare_colorconfig(py::module& m)
         .def("getRoles", &ColorConfig::getRoles)
         .def("getName", &ColorConfig::getName)
         .def("getCacheID", &ColorConfig::getCacheID)
+        .def("getDebugInfo",
+             [](const ColorConfig& self) {
+                 py::dict out;
+                 for (const auto& kv : self.getDebugInfo()) {
+                     const bool is_ms_key
+                         = kv.first.size() >= 3
+                           && kv.first.compare(kv.first.size() - 3, 3, "_ms")
+                                  == 0;
+                     if (is_ms_key) {
+                         out[decode_utf8_or_bytes(kv.first)]
+                             = std::strtod(kv.second.c_str(), nullptr);
+                     } else {
+                         out[decode_utf8_or_bytes(kv.first)]
+                             = decode_utf8_or_bytes(kv.second);
+                     }
+                 }
+                 return out;
+             })
         .def("getWorkingDir",
              [](const ColorConfig& self) { return self.getWorkingDir(); })
         .def("setWorkingDir",
@@ -300,18 +319,20 @@ declare_colorconfig(py::module& m)
             [](const ColorConfig& self, const std::vector<float>& fingerprint,
                ColorConfig::FingerprintSubjectType subject_type,
                ColorConfig::FingerprintMatchMode match_mode,
+               bool exhaustive,
                const py::dict& context) {
                 auto parsed = parse_context_vars(context);
                 py::list out;
                 for (const auto& name :
                      self.find_matches(fingerprint, subject_type, match_mode,
-                                       parsed)) {
+                                       exhaustive, parsed)) {
                     out.append(decode_utf8_or_bytes(name));
                 }
                 return out;
             },
             "fingerprint"_a, "subject_type"_a,
             "match_mode"_a = ColorConfig::FingerprintMatchMode::First,
+            "exhaustive"_a = false,
             "context"_a = py::dict())
         .def(
             "get_intersection",

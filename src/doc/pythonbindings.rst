@@ -4078,11 +4078,13 @@ is provided for minimal color support.
     - ``Best``: closest candidate by absolute error.
     - ``All``: all candidates within tolerance.
 
-.. py:method:: find_matches (fingerprint: list[float], subject_type: FingerprintSubjectType, match_mode: FingerprintMatchMode = FingerprintMatchMode.First, context: dict[str, str | None] | None = None) -> list[str]
+.. py:method:: find_matches (fingerprint: list[float], subject_type: FingerprintSubjectType, match_mode: FingerprintMatchMode = FingerprintMatchMode.First, exhaustive: bool = False, context: dict[str, str | None] | None = None) -> list[str]
 
     Find matching subjects for ``fingerprint`` in this config.
     Returns a list of subject names. The list contains 0 or 1 entries for
     ``First``/``Best`` modes, and all tolerance matches for ``All`` mode.
+    If ``exhaustive`` is False, only prefiltered simple color spaces are
+    considered; if True, all color spaces are considered.
 
     Example:
 
@@ -4095,6 +4097,7 @@ is provided for minimal color support.
             fp,
             oiio.FingerprintSubjectType.ColorSpace,
             oiio.FingerprintMatchMode.All,
+            exhaustive=True,
         ) if fp else []
 
     This function was added in OpenImageIO 3.1.

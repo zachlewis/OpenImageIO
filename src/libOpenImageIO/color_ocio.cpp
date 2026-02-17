@@ -475,8 +475,9 @@ public:
 
 private:
     // Initialize the reverse cache for equality IDs, if it hasn't already been
-    // initialized for this config+context. This is a bit expensive, so we only
-    // do it on demand, and then cache the results for future use.
+    // initialized for this config+context. This is lightly expensive (25-50 ms)
+    // to warm up with simple color spaces, so we only do it on demand, and then 
+    // cache the results for future use. 
     // This map gets initialized lazily upon use of resolve, get_color_interop_id,
     // or get_equality_ids with exhaustive=true.
     // Since the cache is keyed by config+context cache ID, it will be correctly
@@ -933,7 +934,7 @@ ColorConfig::Impl::identify_builtin_equivalents()
     if (disable_builtin_configs)
         return;
     Timer timer;
-    if (auto n = IdentifyBuiltinColorSpace("srgb_tx")) {
+    if (auto n = IdentifyBuiltinColorSpace("srgb_rec709_scene")) {
         if (CSInfo* cs = find(n)) {
             cs->setflag(CSInfo::is_srgb, srgb_alias);
             DBG("Identified {} = builtin '{}'\n", "srgb_rec709_scene",
@@ -943,7 +944,7 @@ ColorConfig::Impl::identify_builtin_equivalents()
         DBG("No config space identified as srgb\n");
     }
     DBG("identify_builtin_equivalents srgb took {:0.2f}s\n", timer.lap());
-    if (auto n = IdentifyBuiltinColorSpace("lin_srgb")) {
+    if (auto n = IdentifyBuiltinColorSpace("lin_rec709_scene")) {
         if (CSInfo* cs = find(n)) {
             cs->setflag(CSInfo::is_lin_srgb | CSInfo::is_linear_response,
                         lin_srgb_alias);
@@ -1000,10 +1001,9 @@ ColorConfig::Impl::init(string_view filename)
 {
     // High-level init flow:
     // - Load the OCIO config (or fall back to current/builtin).
-    // - Build the built-in interop identities config (once) and adapt the
-    //   working config to match its reference spaces.
-    // - Clear per-config caches (processors, equality ids, fingerprints,
-    //   simple color spaces, matchers).
+    // - Build / get built-in interop identities config singleton
+    // - Adapt the config to the interop reference spaces, if needed.
+    // - 
     // - Inventory the config for roles/aliases and run heuristics.
     OIIO_MAYBE_UNUSED Timer timer;
     bool ok = true;
@@ -2961,7 +2961,8 @@ namespace ConfigUtils {
 using namespace OCIO;
 // NOTE: The helpers below are adapted from OCIO's internal utilities.
 // We keep them here to avoid depending on private OCIO headers while still
-// matching OCIO's config manipulation behavior.
+// matching OCIO's config manipulation behavior. 
+// OpenColorIO is licensed under BSD-3-Clause See THIRD-PARTY.md for details.
 
 
 // Invert a transform by toggling its direction.
@@ -3685,7 +3686,10 @@ void initializeTestVals(ColorSpaceFingerprints & fingerprints, const ConstConfig
 // clang-format off
 // Slightly modified from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026:
 //   - Take OCIO Context into account when computing fingerprints.
-// Calculate a fingerprint for every color space in a base config. These will be used
+//   - Only compute initial fingerprints for "simple" color spaces.
+//     (see get_simple_color_spaces and get_simple_color_space_blockers for details)
+
+// Calculate a fingerprint for simple color spaces in a base config. These will be used
 // to compare against color spaces in an input config for merging. Store the results in
 // the fingerprint struct.
 //

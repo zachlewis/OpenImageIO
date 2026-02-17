@@ -474,6 +474,14 @@ public:
     bool isColorSpaceLinear(string_view name) const;
 
 private:
+    // Initialize the reverse cache for equality IDs, if it hasn't already been
+    // initialized for this config+context. This is a bit expensive, so we only
+    // do it on demand, and then cache the results for future use.
+    // This map gets initialized lazily upon use of resolve, get_color_interop_id,
+    // or get_equality_ids with exhaustive=true.
+    // Since the cache is keyed by config+context cache ID, it will be correctly
+    // populated for context-sensitive configs, and will be shared across all
+    // threads using the same config+context.
     void initialize_equality_id_map() const;
 
     // Return the CSInfo flags for the given color space name
@@ -1028,6 +1036,8 @@ ColorConfig::Impl::init(string_view filename)
         try {
             std::istringstream iss;
             iss.str(std::string(filename));
+            //TODO: check to see if the config's "ocio_version" metadata is
+            // compatible with the OCIO version we're using, and if not, error
             config_   = OCIO::Config::CreateFromStream(iss);
             auto name = config_->getName();
             if (name && name[0])
@@ -1037,6 +1047,7 @@ ColorConfig::Impl::init(string_view filename)
             configfilename(filename);  // from stream, no filename
         } catch (OCIO::Exception& e) {
             error("Error reading OCIO config from stream: {}", e.what());
+            config_ = OCIO::Config::CreateFromFile("ocio://default");
         }
     }
     if (filename.size() && !OIIO::Filesystem::exists(filename)
@@ -5304,7 +5315,6 @@ ImageBufAlgo::ociodisplay(ImageBuf& dst, const ImageBuf& src,
     OIIO::pvt::LoggedTimer logtime("IBA::ociodisplay");
     ColorProcessorHandle processor;
     {
-        //bool input_cs_exists_in_current_config = true;
         if (!colorconfig)
             colorconfig = &ColorConfig::default_colorconfig();
         if (from.empty() || from == "current") {

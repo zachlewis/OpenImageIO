@@ -4,8 +4,8 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -78,23 +78,36 @@ struct FingerprintCacheEntry {
 
 using FingerprintCacheMap
     = std::unordered_map<std::string, FingerprintCacheEntry>;
+struct RefSpaceConverters {
+    OCIO::ConstTransformRcPtr input_to_base_scene;
+    OCIO::ConstTransformRcPtr input_to_base_display;
+    bool enabled = false;
+};
+struct FingerprintRuntime {
+    FingerprintCacheMap& cache;
+    std::mutex& cache_mutex;
+    RefSpaceConverters refspace_converters;
+};
 class FastColorSpaceMatcher;
 std::vector<float>
 get_colorspace_fingerprint(const OCIO::ConstConfigRcPtr& config,
                            string_view colorspace,
                            const OCIO::ConstContextRcPtr& context,
-                           FingerprintCacheMap& cache,
-                           std::mutex& cache_mutex);
+                           const FingerprintRuntime& runtime);
 std::string
 find_colorspace_from_fingerprint(const OCIO::ConstConfigRcPtr& config,
                                  cspan<const float> fingerprint,
                                  OCIO::ReferenceSpaceType refSpaceType,
                                  const OCIO::ConstContextRcPtr& context,
-                                 FingerprintCacheMap& cache,
-                                 std::mutex& cache_mutex);
-OCIO::ConfigRcPtr
-adaptConfigReferenceSpaces(const OCIO::ConstConfigRcPtr& config,
-                           const OCIO::ConstConfigRcPtr& otherConfig);
+                                 const FingerprintRuntime& runtime);
+void
+initializeRefSpaceConverters(
+    OCIO::ConstTransformRcPtr& inputToBaseGtScene,
+    OCIO::ConstTransformRcPtr& inputToBaseGtDisplay,
+    const OCIO::ConstConfigRcPtr& baseConfig,
+    const OCIO::ConstConfigRcPtr& inputConfig,
+    const OCIO::ConstContextRcPtr& baseContext  = nullptr,
+    const OCIO::ConstContextRcPtr& inputContext = nullptr);
 }  // namespace ConfigUtils
 
 namespace {
@@ -152,10 +165,9 @@ public:
     ~ScopedNsAccumulator()
     {
         const auto end = std::chrono::steady_clock::now();
-        const auto ns
-            = std::chrono::duration_cast<std::chrono::nanoseconds>(end
-                                                                   - m_start)
-                  .count();
+        const auto ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            end - m_start)
+                            .count();
         m_dest.fetch_add(static_cast<uint64_t>(ns), std::memory_order_relaxed);
     }
 
@@ -351,8 +363,13 @@ private:
     mutable std::atomic<uint64_t> m_classify_heuristics_ns { 0 };
     mutable std::atomic<uint64_t> m_initialize_equality_id_map_ns { 0 };
     mutable std::atomic<uint64_t> m_get_simple_color_spaces_ns { 0 };
+    mutable std::atomic<uint64_t> m_identify_builtin_equivalents_ns { 0 };
     mutable std::atomic<uint64_t> m_ocio_load_config_ns { 0 };
     mutable std::atomic<uint64_t> m_interopconfig_init_ns { 0 };
+    mutable std::atomic<uint64_t> m_refspace_converter_init_ns { 0 };
+    mutable tsl::robin_map<std::string, ConfigUtils::RefSpaceConverters>
+        m_refspace_converters_by_ctx;
+    mutable std::vector<std::string> m_fingerprinted_colorspaces;
 
 public:
     Impl(ColorConfig* self)
@@ -387,8 +404,7 @@ public:
     std::vector<std::string>
     find_matches(const std::vector<float>& fingerprint,
                  ColorConfig::FingerprintSubjectType subject_type,
-                 ColorConfig::FingerprintMatchMode match_mode,
-                 bool exhaustive,
+                 ColorConfig::FingerprintMatchMode match_mode, bool exhaustive,
                  const std::map<std::string, std::string>& context) const;
     std::vector<std::pair<std::string, std::string>> get_intersection(
         const ColorConfig& other,
@@ -398,6 +414,8 @@ public:
         string_view colorspace, bool strict,
         const std::map<std::string, std::string>& context) const;
     ConfigUtils::FastColorSpaceMatcher& get_interop_matcher() const;
+    ConfigUtils::RefSpaceConverters
+    get_refspace_converters(const OCIO::ConstContextRcPtr& context) const;
     std::string context_cache_id(const OCIO::ConstContextRcPtr& context) const
     {
         const char* id = context ? context->getCacheID() : nullptr;
@@ -413,11 +431,11 @@ public:
     }
     std::map<std::string, std::string> getDebugInfo() const
     {
-        auto ns_to_ms = [](uint64_t ns) { return double(ns) / 1.0e6; };
-        const auto total_ms
-            = ns_to_ms(m_init_total_ns.load(std::memory_order_relaxed));
-        const auto inventory_ms
-            = ns_to_ms(m_inventory_ns.load(std::memory_order_relaxed));
+        auto ns_to_ms       = [](uint64_t ns) { return double(ns) / 1.0e6; };
+        const auto total_ms = ns_to_ms(
+            m_init_total_ns.load(std::memory_order_relaxed));
+        const auto inventory_ms = ns_to_ms(
+            m_inventory_ns.load(std::memory_order_relaxed));
         const auto conversions_ms = ns_to_ms(
             m_classify_conversions_ns.load(std::memory_order_relaxed));
         const auto heuristics_ms = ns_to_ms(
@@ -426,10 +444,14 @@ public:
             m_initialize_equality_id_map_ns.load(std::memory_order_relaxed));
         const auto simple_spaces_ms = ns_to_ms(
             m_get_simple_color_spaces_ns.load(std::memory_order_relaxed));
-        const auto ocio_load_config_ms
-            = ns_to_ms(m_ocio_load_config_ns.load(std::memory_order_relaxed));
+        const auto builtin_equivalents_ms = ns_to_ms(
+            m_identify_builtin_equivalents_ns.load(std::memory_order_relaxed));
+        const auto ocio_load_config_ms = ns_to_ms(
+            m_ocio_load_config_ns.load(std::memory_order_relaxed));
         const auto interopconfig_init_ms = ns_to_ms(
             m_interopconfig_init_ns.load(std::memory_order_relaxed));
+        const auto refspace_converter_init_ms = ns_to_ms(
+            m_refspace_converter_init_ns.load(std::memory_order_relaxed));
         double fingerprint_compute_ms = 0.0;
         {
             std::lock_guard<std::mutex> lock(m_fingerprint_cache_mutex);
@@ -450,12 +472,18 @@ public:
               Strutil::fmt::format("{:.3f}", equality_map_ms) },
             { "init.get_simple_color_spaces_ms",
               Strutil::fmt::format("{:.3f}", simple_spaces_ms) },
+            { "init.identify_builtin_equivalents_ms",
+              Strutil::fmt::format("{:.3f}", builtin_equivalents_ms) },
             { "init.ocio_load_config_ms",
               Strutil::fmt::format("{:.3f}", ocio_load_config_ms) },
             { "init.interopconfig_init_ms",
               Strutil::fmt::format("{:.3f}", interopconfig_init_ms) },
+            { "init.refspace_converter_init_ms",
+              Strutil::fmt::format("{:.3f}", refspace_converter_init_ms) },
             { "runtime.fingerprint_compute_ms",
               Strutil::fmt::format("{:.3f}", fingerprint_compute_ms) },
+            { "runtime.fingerprinted_colorspace_count",
+              Strutil::fmt::format("{}", m_fingerprinted_colorspaces.size()) },
             { "config.configname", configname() },
         };
     }
@@ -579,8 +607,8 @@ public:
 private:
     // Initialize the reverse cache for equality IDs, if it hasn't already been
     // initialized for this config+context. This is lightly expensive (25-50 ms)
-    // to warm up with simple color spaces, so we only do it on demand, and then 
-    // cache the results for future use. 
+    // to warm up with simple color spaces, so we only do it on demand, and then
+    // cache the results for future use.
     // This map gets initialized lazily upon use of resolve, get_color_interop_id,
     // or get_equality_ids with exhaustive=true.
     // Since the cache is keyed by config+context cache ID, it will be correctly
@@ -1037,6 +1065,7 @@ ColorConfig::Impl::reclassify_heuristics(CSInfo& cs)
 void
 ColorConfig::Impl::identify_builtin_equivalents()
 {
+    ScopedNsAccumulator phase_time(m_identify_builtin_equivalents_ns);
     if (disable_builtin_configs)
         return;
     Timer timer;
@@ -1107,7 +1136,7 @@ ColorConfig::Impl::IdentifyBuiltinColorSpace(const char* name) const
                                                      "ocio://default")
                                         ? get_latest_cg_config()
                                         : ocio_default_cc;
-    const auto fingerprint = builtin_cc.get_colorspace_fingerprint(name);
+    const auto fingerprint        = builtin_cc.get_colorspace_fingerprint(name);
     if (fingerprint.empty())
         return nullptr;
     const auto matches = m_self->find_matches(
@@ -1136,12 +1165,11 @@ ColorConfig::Impl::init(string_view filename)
     // High-level init flow:
     // - Load the OCIO config (or fall back to current/builtin).
     // - Build / get built-in interop identities config singleton
-    // - Adapt the config to the interop reference spaces, if needed.
-    // - 
+    // - Initialize reference-space converters for interop fingerprinting.
     // - Inventory the config for roles/aliases and run heuristics.
     OIIO_MAYBE_UNUSED Timer timer;
     auto init_start = std::chrono::steady_clock::now();
-    bool ok = true;
+    bool ok         = true;
 
     m_init_total_ns.store(0, std::memory_order_relaxed);
     m_inventory_ns.store(0, std::memory_order_relaxed);
@@ -1149,8 +1177,10 @@ ColorConfig::Impl::init(string_view filename)
     m_classify_heuristics_ns.store(0, std::memory_order_relaxed);
     m_initialize_equality_id_map_ns.store(0, std::memory_order_relaxed);
     m_get_simple_color_spaces_ns.store(0, std::memory_order_relaxed);
+    m_identify_builtin_equivalents_ns.store(0, std::memory_order_relaxed);
     m_ocio_load_config_ns.store(0, std::memory_order_relaxed);
     m_interopconfig_init_ns.store(0, std::memory_order_relaxed);
+    m_refspace_converter_init_ns.store(0, std::memory_order_relaxed);
 
     m_equality_reverse_cache_enabled.store(!disable_equality_reverse_cache);
 
@@ -1209,9 +1239,11 @@ ColorConfig::Impl::init(string_view filename)
                     std::string(filename).c_str());
                 configname(filename);
                 configfilename(filename);
-                m_config_is_built_in = Strutil::istarts_with(filename, "ocio://");
+                m_config_is_built_in = Strutil::istarts_with(filename,
+                                                             "ocio://");
             } catch (OCIO::Exception& e) {
-                error("Error reading OCIO config \"{}\": {}", filename, e.what());
+                error("Error reading OCIO config \"{}\": {}", filename,
+                      e.what());
             }
         }
 
@@ -1237,13 +1269,8 @@ ColorConfig::Impl::init(string_view filename)
     }
 
     if (config_ && interopconfig_) {
-        try {
-            config_ = ConfigUtils::adaptConfigReferenceSpaces(config_,
-                                                              interopconfig_);
-        } catch (OCIO::Exception& e) {
-            error("Error adapting OCIO config to interop reference spaces: {}",
-                  e.what());
-        }
+        // Warm converters for default context during init.
+        get_refspace_converters(config_->getCurrentContext());
     }
 
     OCIO::SetLoggingLevel(oldlog);
@@ -1258,6 +1285,7 @@ ColorConfig::Impl::init(string_view filename)
         m_equality_id_to_cs_by_ctx.clear();
         m_cs_to_equality_id_by_ctx.clear();
         m_equality_map_initialized_ctx.clear();
+        m_refspace_converters_by_ctx.clear();
         // Simple colorspaces are prefiltered to avoid expensive transforms.
         m_simple_color_spaces_cache.clear();
         m_simple_color_spaces_cached = false;
@@ -1273,6 +1301,11 @@ ColorConfig::Impl::init(string_view filename)
 
     inventory();
     // NOTE: inventory already does classify_by_name
+
+    m_fingerprinted_colorspaces = getSimpleColorSpaces();
+
+    // Warm the default-context equality-id maps during init.
+    initialize_equality_id_map();
 
     DBG("\nIDENTIFY BUILTIN EQUIVALENTS\n");
     identify_builtin_equivalents();  // OCIO 2.3+ only
@@ -1302,10 +1335,9 @@ ColorConfig::Impl::init(string_view filename)
     DBG("OCIO config {} classified in {:0.2f} seconds\n", filename,
         timer.lap());
     const auto init_end = std::chrono::steady_clock::now();
-    const auto init_ns
-        = std::chrono::duration_cast<std::chrono::nanoseconds>(init_end
-                                                                - init_start)
-              .count();
+    const auto init_ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             init_end - init_start)
+                             .count();
     m_init_total_ns.store(static_cast<uint64_t>(init_ns),
                           std::memory_order_relaxed);
     return ok;
@@ -2011,9 +2043,9 @@ ColorConfig::Impl::resolve(string_view name) const
     if (cs)
         return cs->getName();
 
-    const auto interop_cs = interopconfig_ ? interopconfig_->getColorSpace(
-                                                namestr)
-                                           : nullptr;
+    const auto interop_cs = interopconfig_
+                                ? interopconfig_->getColorSpace(namestr)
+                                : nullptr;
     if (interop_cs) {
         // OCIO did not know this name directly. If this token is a known
         // interop id, use the equality-id reverse map.
@@ -3132,7 +3164,7 @@ namespace ConfigUtils {
 using namespace OCIO;
 // NOTE: The helpers below are adapted from OCIO's internal utilities.
 // We keep them here to avoid depending on private OCIO headers while still
-// matching OCIO's config manipulation behavior. 
+// matching OCIO's config manipulation behavior.
 // OpenColorIO is licensed under BSD-3-Clause See THIRD-PARTY.md for details.
 
 
@@ -3147,7 +3179,9 @@ getTransformDir(const ConstColorSpaceRcPtr& cs, ColorSpaceDirection dir);
 ConstTransformRcPtr
 getRefSpaceConverter(const ConstConfigRcPtr& srcConfig,
                      const ConstConfigRcPtr& dstConfig,
-                     ReferenceSpaceType refSpaceType);
+                     ReferenceSpaceType refSpaceType,
+                     const ConstContextRcPtr& srcContext = nullptr,
+                     const ConstContextRcPtr& dstContext = nullptr);
 
 // Precompute converters from an input config to a base config for both
 // scene- and display-referred spaces.
@@ -3155,44 +3189,31 @@ void
 initializeRefSpaceConverters(ConstTransformRcPtr& inputToBaseGtScene,
                              ConstTransformRcPtr& inputToBaseGtDisplay,
                              const ConstConfigRcPtr& baseConfig,
-                             const ConstConfigRcPtr& inputConfig);
-
-// Rewrite a colorspace's transforms to a new reference space.
-void
-updateReferenceColorspace(ColorSpaceRcPtr& cs,
-                          const ConstTransformRcPtr& toNewReferenceTransform);
-// Rewrite a view transform to new scene/display reference spaces.
-void
-updateReferenceView(ViewTransformRcPtr& vt,
-                    const ConstTransformRcPtr& toNewSceneReferenceTransform,
-                    const ConstTransformRcPtr& toNewDisplayReferenceTransform);
-
-// Return a copy of config whose reference spaces are adapted to otherConfig.
-ConfigRcPtr
-adaptConfigReferenceSpaces(const ConstConfigRcPtr& config,
-                           const ConstConfigRcPtr& otherConfig);
+                             const ConstConfigRcPtr& inputConfig,
+                             const ConstContextRcPtr& baseContext,
+                             const ConstContextRcPtr& inputContext);
 
 // Compute a fingerprint for a colorspace, optionally skipping complex transforms.
 bool
-calcColorSpaceFingerprint(std::vector<float>& fingerprintVals,
-                          const ColorSpaceFingerprints& fingerprints,
-                          const ConstConfigRcPtr& config,
-                          const ConstColorSpaceRcPtr& cs,
-                          const ConstContextRcPtr& context);
+calcColorSpaceFingerprint(
+    std::vector<float>& fingerprintVals,
+    const ColorSpaceFingerprints& fingerprints, const ConstConfigRcPtr& config,
+    const ConstColorSpaceRcPtr& cs, const ConstContextRcPtr& context,
+    const RefSpaceConverters* refspace_converters = nullptr);
 
 // Populate the fingerprints container and name lookup for a config.
 void
 initializeColorSpaceFingerprints(
     ColorSpaceFingerprints& fingerprints,
     std::unordered_map<std::string, Fingerprint>& by_name,
-    const ConstConfigRcPtr& config, const ConstContextRcPtr& context);
+    const ConstConfigRcPtr& config, const ConstContextRcPtr& context,
+    const RefSpaceConverters* refspace_converters = nullptr);
 
 // Get (or create) a cache entry for the config+context key.
 FingerprintCacheEntry
 get_fingerprint_cache_entry(const ConstConfigRcPtr& config,
                             const ConstContextRcPtr& context,
-                            FingerprintCacheMap& cache,
-                            std::mutex& cache_mutex);
+                            const FingerprintRuntime& runtime);
 
 // Try to fetch a cached fingerprint for a colorspace.
 bool
@@ -3201,15 +3222,14 @@ get_cached_fingerprint_for_colorspace(const ConstConfigRcPtr& config,
                                       const ConstContextRcPtr& context,
                                       ColorSpaceFingerprints& fingerprints,
                                       std::vector<float>& fingerprintVals,
-                                      FingerprintCacheMap& cache,
-                                      std::mutex& cache_mutex);
+                                      const FingerprintRuntime& runtime);
 
 // Compute (and cache) a fingerprint for a colorspace name.
 std::vector<float>
 get_colorspace_fingerprint(const ConstConfigRcPtr& config,
                            string_view colorspace,
                            const ConstContextRcPtr& context,
-                           FingerprintCacheMap& cache, std::mutex& cache_mutex);
+                           const FingerprintRuntime& runtime);
 
 enum class FingerprintMatchMode {
     First,
@@ -3224,8 +3244,7 @@ find_colorspace_matches_from_fingerprint(
     const ConstConfigRcPtr& config, cspan<const float> fingerprint,
     bool filter_ref_space, ReferenceSpaceType refSpaceType,
     FingerprintMatchMode match_mode, bool exhaustive,
-    const ConstContextRcPtr& context, FingerprintCacheMap& cache,
-    std::mutex& cache_mutex);
+    const ConstContextRcPtr& context, const FingerprintRuntime& runtime);
 
 // Find a colorspace whose fingerprint matches the given values.
 std::vector<std::string>
@@ -3233,8 +3252,7 @@ find_colorspaces_from_fingerprint(const ConstConfigRcPtr& config,
                                   cspan<const float> fingerprint,
                                   ReferenceSpaceType refSpaceType,
                                   const ConstContextRcPtr& context,
-                                  FingerprintCacheMap& cache,
-                                  std::mutex& cache_mutex);
+                                  const FingerprintRuntime& runtime);
 
 // Find the first colorspace whose fingerprint matches the given values.
 std::string
@@ -3242,10 +3260,9 @@ find_colorspace_from_fingerprint(const ConstConfigRcPtr& config,
                                  cspan<const float> fingerprint,
                                  ReferenceSpaceType refSpaceType,
                                  const ConstContextRcPtr& context,
-                                 FingerprintCacheMap& cache,
-                                 std::mutex& cache_mutex);
+                                 const FingerprintRuntime& runtime);
 
-// Utilitiy class for efficiently matching a color space from an input
+// Utility class for efficiently matching a color space from an input
 // config to a color space from a base config, matched by fingerprint.
 // The input config must use the same reference spaces as the base config.
 class FastColorSpaceMatcher {
@@ -3253,13 +3270,14 @@ public:
     FastColorSpaceMatcher(const ConstConfigRcPtr& baseConfig,
                           FingerprintCacheMap& cache, std::mutex& cache_mutex);
 
-    std::string findEquivalentColorspace(const ConstConfigRcPtr& inputConfig,
-                                         string_view csName,
-                                         const ConstContextRcPtr& context) const;
-    std::vector<std::string>
-    findEquivalentColorspaces(const ConstConfigRcPtr& inputConfig,
-                              string_view csName,
-                              const ConstContextRcPtr& context) const;
+    std::string findEquivalentColorspace(
+        const ConstConfigRcPtr& inputConfig, string_view csName,
+        const ConstContextRcPtr& context,
+        const RefSpaceConverters* refspace_converters = nullptr) const;
+    std::vector<std::string> findEquivalentColorspaces(
+        const ConstConfigRcPtr& inputConfig, string_view csName,
+        const ConstContextRcPtr& context,
+        const RefSpaceConverters* refspace_converters = nullptr) const;
 
 private:
     std::vector<std::string> findEquivalentColorspacesFromFingerprint(
@@ -3369,16 +3387,24 @@ getTransformForDir(const ConstColorSpaceRcPtr& cs, ColorSpaceDirection dir)
 
 // clang-format off
 // Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
+
 // Get a transform to convert from the source config reference space to the
 // destination config reference space.  The ref_space_type specifies whether
 // to work with the scene-referred or display-referred reference space.
 ConstTransformRcPtr getRefSpaceConverter(const ConstConfigRcPtr & srcConfig, 
                                          const ConstConfigRcPtr & dstConfig, 
-                                         ReferenceSpaceType refSpaceType)
+                                         ReferenceSpaceType refSpaceType,
+                                         const ConstContextRcPtr& srcContext,
+                                         const ConstContextRcPtr& dstContext)
 {
     ConstConfigRcPtr builtinConfig = Config::CreateFromBuiltinConfig("ocio://cg-config-latest");
+    ConstContextRcPtr srcCtx = srcContext ? srcContext
+                                          : (srcConfig ? srcConfig->getCurrentContext() : nullptr);
+    ConstContextRcPtr dstCtx = dstContext ? dstContext
+                                          : (dstConfig ? dstConfig->getCurrentContext() : nullptr);
 
-    auto getColorspaceOfRefType = [](const ConstConfigRcPtr & config, 
+    auto getColorspaceOfRefType = [](const ConstConfigRcPtr & config,
+                                     const ConstContextRcPtr& context,
                                      ReferenceSpaceType refType) -> const char *
     {
         // Just return the first one, doesn't matter if it's inactive or a data space.
@@ -3388,7 +3414,8 @@ ConstTransformRcPtr getRefSpaceConverter(const ConstConfigRcPtr & srcConfig,
         for (int i = 0; i < config->getNumColorSpaces(searchRefType, COLORSPACE_ALL); i++)
         {
             const char * name = config->getColorSpaceNameByIndex(searchRefType, COLORSPACE_ALL, i);
-            ConstColorSpaceRcPtr cs = config->getColorSpace(name);
+            ConstColorSpaceRcPtr cs = config->getColorSpace(
+                (context ? context->resolveStringVar(name) : name));
             return cs->getName();
         }
 
@@ -3406,9 +3433,12 @@ ConstTransformRcPtr getRefSpaceConverter(const ConstConfigRcPtr & srcConfig,
     Config::IdentifyInterchangeSpace(&srcInterchange,
                                      &srcBuiltinInterchange,
                                      srcConfig,
-                                     getColorspaceOfRefType(srcConfig, refSpaceType),
+                                     getColorspaceOfRefType(srcConfig, srcCtx,
+                                                            refSpaceType),
                                      builtinConfig,
-                                     getColorspaceOfRefType(builtinConfig, refSpaceType));
+                                     getColorspaceOfRefType(builtinConfig,
+                                                            nullptr,
+                                                            refSpaceType));
 
     // Identify an interchange space for the dst config.
     // Note that the interchange space will always be a linear color space.
@@ -3417,12 +3447,19 @@ ConstTransformRcPtr getRefSpaceConverter(const ConstConfigRcPtr & srcConfig,
     Config::IdentifyInterchangeSpace(&dstInterchange,
                                      &dstBuiltinInterchange,
                                      dstConfig,
-                                     getColorspaceOfRefType(dstConfig, refSpaceType),
+                                     getColorspaceOfRefType(dstConfig, dstCtx,
+                                                            refSpaceType),
                                      builtinConfig,
-                                     getColorspaceOfRefType(builtinConfig, refSpaceType));
+                                     getColorspaceOfRefType(builtinConfig,
+                                                            nullptr,
+                                                            refSpaceType));
 
     // Get the from_ref transform from the srcInterchange space.
-    ConstTransformRcPtr srcFromRef = getTransformForDir(srcConfig->getColorSpace(srcInterchange), 
+    ConstTransformRcPtr srcFromRef = getTransformForDir(srcConfig->getColorSpace(
+                                                            srcCtx
+                                                                ? srcCtx->resolveStringVar(
+                                                                      srcInterchange)
+                                                                : srcInterchange), 
                                                         COLORSPACE_DIR_FROM_REFERENCE);
 
     // Get a conversion from one builtin interchange to another
@@ -3439,7 +3476,11 @@ ConstTransformRcPtr getRefSpaceConverter(const ConstConfigRcPtr & srcConfig,
     }
 
     // Append to_ref transform from the dstInterchange space.
-    ConstTransformRcPtr dstToRef = getTransformForDir(dstConfig->getColorSpace(dstInterchange), 
+    ConstTransformRcPtr dstToRef = getTransformForDir(dstConfig->getColorSpace(
+                                                          dstCtx
+                                                              ? dstCtx->resolveStringVar(
+                                                                    dstInterchange)
+                                                              : dstInterchange), 
                                                       COLORSPACE_DIR_TO_REFERENCE);
 
     // Combine into a group transform.
@@ -3452,170 +3493,15 @@ ConstTransformRcPtr getRefSpaceConverter(const ConstConfigRcPtr & srcConfig,
     // on the search_path of the original configs. This is necessary for simplifyTransform
     // below and would fail if the conversion involved a transform that may not appear
     // in a config, such as a LUT.
-    gt->appendTransform(srcConfig->getProcessor(srcFromRef)->createGroupTransform());
+    gt->appendTransform(
+        srcConfig->getProcessor(srcCtx, srcFromRef, TRANSFORM_DIR_FORWARD)
+            ->createGroupTransform());
     gt->appendTransform(srcBuiltinToDstBuiltin);
-    gt->appendTransform(dstConfig->getProcessor(dstToRef)->createGroupTransform());
+    gt->appendTransform(
+        dstConfig->getProcessor(dstCtx, dstToRef, TRANSFORM_DIR_FORWARD)
+            ->createGroupTransform());
 
     return simplifyTransform(gt);
-}
-// clang-format on
-
-bool
-transformIsEmpty(const ConstTransformRcPtr& tr)
-{
-    if (tr->getTransformType() == TRANSFORM_TYPE_GROUP) {
-        ConstGroupTransformRcPtr gt = DynamicPtrCast<const GroupTransform>(tr);
-        if (gt->getNumTransforms() == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-
-// clang-format off
-// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
-// Update the reference space used by a color space's transforms.
-// The argument is a group transform that converts from the current to the new ref. space.
-//
-void updateReferenceColorspace(ColorSpaceRcPtr & cs, 
-                               const ConstTransformRcPtr & toNewReferenceTransform)
-{
-    if (!toNewReferenceTransform || !cs)
-    {
-        std::ostringstream os;
-        os << "Could not update reference space, converter transform was not initialized.";
-        throw Exception(os.str().c_str());
-    }
-
-    if (transformIsEmpty(toNewReferenceTransform))
-    {
-        return;
-    }
-
-    ConstTransformRcPtr transformTo = cs->getTransform(COLORSPACE_DIR_TO_REFERENCE);
-    if (transformTo)
-    {
-        GroupTransformRcPtr gt = GroupTransform::Create();
-        gt->appendTransform(transformTo->createEditableCopy());
-        gt->appendTransform(toNewReferenceTransform->createEditableCopy());
-
-        // NB: Don't want to call simplify_transforms on gt since it would do things like
-        // expand built-in or file transforms. But as a result, there could be transforms that
-        // appear more complex than necessary. In some cases there could be color spaces
-        // with transforms present that would actually simplify into an identity.  In other
-        // words there could be color spaces that are effectively the reference space that
-        // have from_ref or to_ref transforms.
-        cs->setTransform(gt, COLORSPACE_DIR_TO_REFERENCE);
-    }
-
-    ConstTransformRcPtr transformFrom = cs->getTransform(COLORSPACE_DIR_FROM_REFERENCE);
-    if (transformFrom)
-    {
-        ConstTransformRcPtr inv = invertTransform(toNewReferenceTransform);
-        GroupTransformRcPtr gt = GroupTransform::Create();
-        gt->appendTransform(inv->createEditableCopy());
-        gt->appendTransform(transformFrom->createEditableCopy());
-        cs->setTransform(gt, COLORSPACE_DIR_FROM_REFERENCE);
-    }
-
-    if (transformTo == nullptr && transformFrom == nullptr && !cs->isData())
-    {
-        GroupTransformRcPtr gt = GroupTransform::Create();
-        gt->appendTransform(toNewReferenceTransform->createEditableCopy());
-        cs->setTransform(gt, COLORSPACE_DIR_TO_REFERENCE);
-    }
-}
-// clang-format on
-
-
-// clang-format off
-// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
-// Update the transforms in a view transform to adapt the reference spaces.
-// Note that the from_ref transform converts from the scene-referred reference space to
-// the display-referred reference space.
-//
-void updateReferenceView(ViewTransformRcPtr & vt, 
-                         const ConstTransformRcPtr & toNewSceneReferenceTransform,
-                         const ConstTransformRcPtr & toNewDisplayReferenceTransform)
-{
-    if (!toNewSceneReferenceTransform || !toNewDisplayReferenceTransform || !vt)
-    {
-        std::ostringstream os;
-        os << "Could not update view transform reference spaces, converter transforms were not initialized.";
-        throw Exception(os.str().c_str());
-    }
-    // TODO: Is any more error checking needed here for robustness?
-
-    const bool emptySceneSide = transformIsEmpty(toNewSceneReferenceTransform);
-    const bool emptyDisplaySide = transformIsEmpty(toNewDisplayReferenceTransform);
-
-    if (emptySceneSide && emptyDisplaySide) return;
-
-    ConstTransformRcPtr transformTo = vt->getTransform(VIEWTRANSFORM_DIR_TO_REFERENCE);
-    if (transformTo)
-    {
-        GroupTransformRcPtr gt = GroupTransform::Create();
-        if (!emptyDisplaySide)
-        {
-            ConstTransformRcPtr inv = invertTransform(toNewDisplayReferenceTransform);
-            gt->appendTransform(inv->createEditableCopy());
-        }
-
-        gt->appendTransform(transformTo->createEditableCopy());
-
-        if (vt->getReferenceSpaceType() == REFERENCE_SPACE_DISPLAY)
-        {
-            // Use the converter to display reference on both sides.
-            if (!emptyDisplaySide)
-            {
-                gt->appendTransform(toNewDisplayReferenceTransform->createEditableCopy());
-            }
-        }
-        else
-        {
-            if (!emptySceneSide)
-            {
-                gt->appendTransform(toNewSceneReferenceTransform->createEditableCopy());
-            }
-        }
-        vt->setTransform(gt, VIEWTRANSFORM_DIR_TO_REFERENCE);
-    }
-
-    ConstTransformRcPtr transformFrom = vt->getTransform(VIEWTRANSFORM_DIR_FROM_REFERENCE);
-    if (transformFrom)
-    {
-        GroupTransformRcPtr gt = GroupTransform::Create();
-
-        if (vt->getReferenceSpaceType() == REFERENCE_SPACE_DISPLAY)
-        {
-            // Use the converter to display reference on both sides.
-            if (!emptyDisplaySide)
-            {
-                ConstTransformRcPtr inv = invertTransform(toNewDisplayReferenceTransform);
-                gt->appendTransform(inv->createEditableCopy());
-            }
-        }
-        else
-        {
-            if (!emptySceneSide)
-            {
-                ConstTransformRcPtr inv = invertTransform(toNewSceneReferenceTransform); 
-                gt->appendTransform(inv->createEditableCopy());
-            }
-        }
-
-        gt->appendTransform(transformFrom->createEditableCopy());
-
-        if (!emptyDisplaySide)
-        {
-            gt->appendTransform(toNewDisplayReferenceTransform->createEditableCopy());
-        }
-        vt->setTransform(gt, VIEWTRANSFORM_DIR_FROM_REFERENCE);
-    }
-
-    // Note that Config::addViewTransform prevents creating a view transform that 
-    // has no transforms, so at least one direction will be present.
 }
 // clang-format on
 
@@ -3638,7 +3524,9 @@ bool hasColorSpaceRefType(const ConstConfigRcPtr & config, ReferenceSpaceType re
 void initializeRefSpaceConverters(ConstTransformRcPtr & inputToBaseGtScene,
                                   ConstTransformRcPtr & inputToBaseGtDisplay,
                                   const ConstConfigRcPtr & baseConfig,
-                                  const ConstConfigRcPtr & inputConfig)
+                                  const ConstConfigRcPtr & inputConfig,
+                                  const ConstContextRcPtr & baseContext,
+                                  const ConstContextRcPtr & inputContext)
 {
     // Note: The base config reference space is always used, regardless of strategy.
 
@@ -3648,7 +3536,9 @@ void initializeRefSpaceConverters(ConstTransformRcPtr & inputToBaseGtScene,
         inputToBaseGtScene = getRefSpaceConverter(
             inputConfig,
             baseConfig,
-            REFERENCE_SPACE_SCENE
+            REFERENCE_SPACE_SCENE,
+            inputContext,
+            baseContext
         );
     }
     else
@@ -3666,7 +3556,9 @@ void initializeRefSpaceConverters(ConstTransformRcPtr & inputToBaseGtScene,
         inputToBaseGtDisplay = getRefSpaceConverter(
             inputConfig,
             baseConfig,
-            REFERENCE_SPACE_DISPLAY
+            REFERENCE_SPACE_DISPLAY,
+            inputContext,
+            baseContext
         );
     }
     else
@@ -3686,18 +3578,35 @@ bool calcColorSpaceFingerprint(std::vector<float> & fingerprintVals,
                                const ColorSpaceFingerprints & fingerprints, 
                                const ConstConfigRcPtr & config, 
                                const ConstColorSpaceRcPtr & cs,
-                               const ConstContextRcPtr & context)
+                               const ConstContextRcPtr & context,
+                               const RefSpaceConverters* refspace_converters)
 {
     bool skipColorSpace = false;
 
     // TODO: Would it be helpful to compare to_refs to to_refs, rather than inverting?
     ConstTransformRcPtr fromRef = getTransformForDir(cs, COLORSPACE_DIR_FROM_REFERENCE);
+    ConstTransformRcPtr fingerprintTransform = fromRef;
+    if (refspace_converters && refspace_converters->enabled) {
+        ConstTransformRcPtr to_base
+            = (cs->getReferenceSpaceType() == REFERENCE_SPACE_DISPLAY)
+                  ? refspace_converters->input_to_base_display
+                  : refspace_converters->input_to_base_scene;
+        if (to_base) {
+            // Probe values are in interop/base reference space, but fromRef
+            // expects input-config reference values, so prepend inverse converter.
+            GroupTransformRcPtr gt = GroupTransform::Create();
+            gt->appendTransform(invertTransform(to_base)->createEditableCopy());
+            if (fromRef)
+                gt->appendTransform(fromRef->createEditableCopy());
+            fingerprintTransform = gt;
+        }
+    }
 
     ConstCPUProcessorRcPtr cpu;
     try
     {
         ConstContextRcPtr ctx = context ? context : config->getCurrentContext();
-        ConstProcessorRcPtr p = config->getProcessor(ctx, fromRef,
+        ConstProcessorRcPtr p = config->getProcessor(ctx, fingerprintTransform,
                                                      TRANSFORM_DIR_FORWARD);
         cpu = p->getOptimizedCPUProcessor(OPTIMIZATION_NONE);
     }
@@ -3733,6 +3642,7 @@ bool calcColorSpaceFingerprint(std::vector<float> & fingerprintVals,
 //
 void initializeTestVals(ColorSpaceFingerprints & fingerprints, const ConstConfigRcPtr & config)
 {
+    (void)config;
     // Define a set of test values that are slightly inside the Rec.709 gamut
     // for the most common scene-referred and display-referred reference spaces.
 
@@ -3756,101 +3666,11 @@ void initializeTestVals(ColorSpaceFingerprints & fingerprints, const ConstConfig
         0.034956685913f, 0.033530856964f, 0.023553027375f, 0.f, // lin_rec709 {0.05, 0.03, 0.02}
         0.950455927052f, 1.f            , 1.089057750760f, 1.f };
 
-    // Try to convert to the actual reference spaces of the config.
-
+    // Keep probes in canonical interop reference domains (ACES2065-1 for scene,
+    // CIE XYZ D65 for display). Any config-specific reference conversion is
+    // applied later in calcColorSpaceFingerprint via cached converters.
     fingerprints.sceneRefTestVals = ACESvals;
     fingerprints.displayRefTestVals = XYZvals;
-
-    ConstContextRcPtr ctx = config->getCurrentContext();
-    ConstProcessorRcPtr p;
-    try
-    {
-        // First check if the config recognizes one of the common names.
-        ConstColorSpaceRcPtr cs;
-        cs = config->getColorSpace("aces_interchange");
-        if (!cs)
-        {
-            cs = config->getColorSpace("ACES2065-1");
-            if (!cs)
-            {
-                cs = config->getColorSpace("lin_ap0_scene");
-                if (!cs)
-                {
-                    // Otherwise, see if it's present using a different name.
-                    ConstConfigRcPtr builtinConfig = Config::CreateFromBuiltinConfig("ocio://cg-config-latest");
-                    // This throws if it cannot find the requested space.
-                    const char * cs_name = 
-                        Config::IdentifyBuiltinColorSpace(config, builtinConfig, "aces_interchange");
-                    cs = config->getColorSpace(cs_name);
-                }
-            }
-        }
-
-        ConstTransformRcPtr toRef = getTransformForDir(cs, COLORSPACE_DIR_TO_REFERENCE);
-        p = config->getProcessor(ctx, toRef, TRANSFORM_DIR_FORWARD);
-
-        const size_t n = ACESvals.size();
-        std::vector<float> out(n, 0.f);
-
-        PackedImageDesc descSrc( &ACESvals[0], (long) n / 4, 1, CHANNEL_ORDERING_RGBA );
-        PackedImageDesc descDst( &out[0], (long) n / 4, 1, CHANNEL_ORDERING_RGBA );
-
-        ConstCPUProcessorRcPtr cpu  = p->getOptimizedCPUProcessor(OPTIMIZATION_NONE);
-        cpu->apply(descSrc, descDst);
-
-        fingerprints.sceneRefTestVals = out;
-    }
-    catch (...) 
-    { 
-        fingerprints.sceneRefTestVals = ACESvals;
-    }
-
-    const int m = config->getNumColorSpaces(SEARCH_REFERENCE_SPACE_DISPLAY, COLORSPACE_ALL);
-    if (m == 0)
-    {
-        return;
-    }
-
-    try
-    {
-        // First check if the config recognizes one of the common names.
-        ConstColorSpaceRcPtr cs;
-        cs = config->getColorSpace("cie_xyz_d65_interchange");
-        if (!cs)
-        {
-            cs = config->getColorSpace("CIE-XYZ-D65");
-            if (!cs)
-            {
-                cs = config->getColorSpace("CIE XYZ-D65");
-                if (!cs)
-                {
-                    // Otherwise, see if it's present using a different name.
-                    ConstConfigRcPtr builtinConfig = Config::CreateFromBuiltinConfig("ocio://cg-config-latest");
-                    const char * cs_name = 
-                        Config::IdentifyBuiltinColorSpace(config, builtinConfig, "cie_xyz_d65_interchange");
-                    cs = config->getColorSpace(cs_name);
-                }
-            }
-        }
-
-        ConstTransformRcPtr toRef = getTransformForDir(cs, COLORSPACE_DIR_TO_REFERENCE);
-        p = config->getProcessor(ctx, toRef, TRANSFORM_DIR_FORWARD);
-
-        const size_t n = XYZvals.size();
-        std::vector<float> out(n, 0.f);
-
-        PackedImageDesc descSrc( &XYZvals[0], (long) n / 4, 1, CHANNEL_ORDERING_RGBA );
-        PackedImageDesc descDst( &out[0], (long) n / 4, 1, CHANNEL_ORDERING_RGBA );
-
-        ConstCPUProcessorRcPtr cpu  = p->getOptimizedCPUProcessor(OPTIMIZATION_NONE);
-        cpu->apply(descSrc, descDst);
-
-        fingerprints.displayRefTestVals = out;
-    }
-    catch (...) 
-    { 
-        fingerprints.displayRefTestVals = XYZvals;
-    }
 }
 // clang-format on
 
@@ -3869,7 +3689,8 @@ void initializeColorSpaceFingerprints(
     ColorSpaceFingerprints & fingerprints,
     std::unordered_map<std::string, Fingerprint> & by_name,
     const ConstConfigRcPtr & config,
-    const ConstContextRcPtr & context)
+    const ConstContextRcPtr & context,
+    const RefSpaceConverters* refspace_converters)
 {
     SuspendCacheGuard srcGuard(config);
 
@@ -3912,7 +3733,8 @@ void initializeColorSpaceFingerprints(
 
         std::vector<float> fp;
         const bool skipColorSpace
-            = calcColorSpaceFingerprint(fp, fingerprints, config, cs, context);
+            = calcColorSpaceFingerprint(fp, fingerprints, config, cs, context,
+                                        refspace_converters);
         if (!skipColorSpace)
         {
             Fingerprint fprint;
@@ -3961,7 +3783,7 @@ fingerprint_cache_key(const ConstConfigRcPtr& config,
 FingerprintCacheEntry
 get_fingerprint_cache_entry(const ConstConfigRcPtr& config,
                             const ConstContextRcPtr& context,
-                            FingerprintCacheMap& cache, std::mutex& cache_mutex)
+                            const FingerprintRuntime& runtime)
 {
     FingerprintCacheEntry entry;
     if (!config)
@@ -3970,9 +3792,9 @@ get_fingerprint_cache_entry(const ConstConfigRcPtr& config,
     const std::string cacheID = fingerprint_cache_key(config, context);
     entry.cache_id            = cacheID;
     {
-        std::lock_guard<std::mutex> lock(cache_mutex);
-        auto it = cache.find(cacheID);
-        if (it != cache.end())
+        std::lock_guard<std::mutex> lock(runtime.cache_mutex);
+        auto it = runtime.cache.find(cacheID);
+        if (it != runtime.cache.end())
             return it->second;
     }
 
@@ -3984,12 +3806,12 @@ get_fingerprint_cache_entry(const ConstConfigRcPtr& config,
         entry.test_vals_initialized = true;
     }
     initializeColorSpaceFingerprints(entry.fingerprints, entry.by_name, config,
-                                     ctx);
+                                     ctx, &runtime.refspace_converters);
     entry.seconds += timer.lap();
 
     {
-        std::lock_guard<std::mutex> lock(cache_mutex);
-        cache.emplace(cacheID, entry);
+        std::lock_guard<std::mutex> lock(runtime.cache_mutex);
+        runtime.cache.emplace(cacheID, entry);
     }
 
     return entry;
@@ -4001,17 +3823,16 @@ get_cached_fingerprint_for_colorspace(const ConstConfigRcPtr& config,
                                       const ConstContextRcPtr& context,
                                       ColorSpaceFingerprints& fingerprints,
                                       std::vector<float>& fingerprintVals,
-                                      FingerprintCacheMap& cache,
-                                      std::mutex& cache_mutex)
+                                      const FingerprintRuntime& runtime)
 {
     if (!config || !cs)
         return false;
 
     const std::string cacheID = fingerprint_cache_key(config, context);
     {
-        std::lock_guard<std::mutex> lock(cache_mutex);
-        auto it = cache.find(cacheID);
-        if (it != cache.end()) {
+        std::lock_guard<std::mutex> lock(runtime.cache_mutex);
+        auto it = runtime.cache.find(cacheID);
+        if (it != runtime.cache.end()) {
             auto found = it->second.by_name.find(cs->getName());
             if (found != it->second.by_name.end()
                 && found->second.type == cs->getReferenceSpaceType()) {
@@ -4023,10 +3844,10 @@ get_cached_fingerprint_for_colorspace(const ConstConfigRcPtr& config,
     }
 
     // Ensure fingerprints are initialized for this config if not already cached.
-    FingerprintCacheEntry entry
-        = get_fingerprint_cache_entry(config, context, cache, cache_mutex);
-    fingerprints = entry.fingerprints;
-    auto found   = entry.by_name.find(cs->getName());
+    FingerprintCacheEntry entry = get_fingerprint_cache_entry(config, context,
+                                                              runtime);
+    fingerprints                = entry.fingerprints;
+    auto found                  = entry.by_name.find(cs->getName());
     if (found != entry.by_name.end()
         && found->second.type == cs->getReferenceSpaceType()) {
         fingerprintVals = found->second.vals;
@@ -4040,7 +3861,7 @@ std::vector<float>
 get_colorspace_fingerprint(const ConstConfigRcPtr& config,
                            string_view colorspace,
                            const ConstContextRcPtr& context,
-                           FingerprintCacheMap& cache, std::mutex& cache_mutex)
+                           const FingerprintRuntime& runtime)
 {
     std::vector<float> inputVals;
     if (!config || colorspace.empty())
@@ -4054,13 +3875,14 @@ get_colorspace_fingerprint(const ConstConfigRcPtr& config,
     ColorSpaceFingerprints fingerprints;
     bool have_cached
         = get_cached_fingerprint_for_colorspace(config, cs, ctx, fingerprints,
-                                                inputVals, cache, cache_mutex);
+                                                inputVals, runtime);
     if (have_cached)
         return inputVals;
 
     Timer timer;
     const bool skipColorSpace
-        = calcColorSpaceFingerprint(inputVals, fingerprints, config, cs, ctx);
+        = calcColorSpaceFingerprint(inputVals, fingerprints, config, cs, ctx,
+                                    &runtime.refspace_converters);
     if (skipColorSpace || inputVals.empty())
         return std::vector<float>();
 
@@ -4071,9 +3893,9 @@ get_colorspace_fingerprint(const ConstConfigRcPtr& config,
 
     const std::string cacheID = fingerprint_cache_key(config, ctx);
     {
-        std::lock_guard<std::mutex> lock(cache_mutex);
-        auto it = cache.find(cacheID);
-        if (it != cache.end()) {
+        std::lock_guard<std::mutex> lock(runtime.cache_mutex);
+        auto it = runtime.cache.find(cacheID);
+        if (it != runtime.cache.end()) {
             if (!it->second.by_name.count(fprint.csName)) {
                 it->second.by_name.emplace(fprint.csName, fprint);
                 it->second.fingerprints.vec.push_back(fprint);
@@ -4086,7 +3908,7 @@ get_colorspace_fingerprint(const ConstConfigRcPtr& config,
             entry.by_name.emplace(fprint.csName, fprint);
             entry.fingerprints.vec.push_back(fprint);
             entry.seconds = timer.lap();
-            cache.emplace(cacheID, entry);
+            runtime.cache.emplace(cacheID, entry);
         }
     }
 
@@ -4098,12 +3920,11 @@ find_colorspace_from_fingerprint(const ConstConfigRcPtr& config,
                                  cspan<const float> fingerprint,
                                  ReferenceSpaceType refSpaceType,
                                  const ConstContextRcPtr& context,
-                                 FingerprintCacheMap& cache,
-                                 std::mutex& cache_mutex)
+                                 const FingerprintRuntime& runtime)
 {
     const auto matches = find_colorspace_matches_from_fingerprint(
         config, fingerprint, true, refSpaceType, FingerprintMatchMode::First,
-        false, context, cache, cache_mutex);
+        false, context, runtime);
     return matches.empty() ? std::string() : matches.front();
 }
 
@@ -4112,14 +3933,12 @@ find_colorspaces_from_fingerprint(const ConstConfigRcPtr& config,
                                   cspan<const float> fingerprint,
                                   ReferenceSpaceType refSpaceType,
                                   const ConstContextRcPtr& context,
-                                  FingerprintCacheMap& cache,
-                                  std::mutex& cache_mutex)
+                                  const FingerprintRuntime& runtime)
 {
     return find_colorspace_matches_from_fingerprint(config, fingerprint, true,
                                                     refSpaceType,
                                                     FingerprintMatchMode::All,
-                                                    false, context, cache,
-                                                    cache_mutex);
+                                                    false, context, runtime);
 }
 
 std::vector<std::string>
@@ -4127,8 +3946,7 @@ find_colorspace_matches_from_fingerprint(
     const ConstConfigRcPtr& config, cspan<const float> fingerprint,
     bool filter_ref_space, ReferenceSpaceType refSpaceType,
     FingerprintMatchMode match_mode, bool exhaustive,
-    const ConstContextRcPtr& context, FingerprintCacheMap& cache,
-    std::mutex& cache_mutex)
+    const ConstContextRcPtr& context, const FingerprintRuntime& runtime)
 {
     std::vector<std::string> matches;
     if (!config || fingerprint.empty())
@@ -4185,7 +4003,7 @@ find_colorspace_matches_from_fingerprint(
             if (!cs || cs->isData())
                 continue;
             auto vals = get_colorspace_fingerprint(config, cs->getName(),
-                                                   context, cache, cache_mutex);
+                                                   context, runtime);
             if (vals.empty())
                 continue;
             if (evaluate(cs->getName(), cs->getReferenceSpaceType(),
@@ -4194,7 +4012,7 @@ find_colorspace_matches_from_fingerprint(
         }
     } else {
         FingerprintCacheEntry entry
-            = get_fingerprint_cache_entry(config, context, cache, cache_mutex);
+            = get_fingerprint_cache_entry(config, context, runtime);
         for (const auto& fp : entry.fingerprints.vec) {
             if (evaluate(fp.csName, fp.type, cspan<const float>(fp.vals)))
                 return matches;
@@ -4213,9 +4031,10 @@ FastColorSpaceMatcher::FastColorSpaceMatcher(const ConstConfigRcPtr& baseConfig,
     : m_cache(&cache)
     , m_cache_mutex(&cache_mutex)
 {
+    const FingerprintRuntime runtime { cache, cache_mutex, {} };
     FingerprintCacheEntry entry = get_fingerprint_cache_entry(
         baseConfig, baseConfig ? baseConfig->getCurrentContext() : nullptr,
-        cache, cache_mutex);
+        runtime);
     m_base_fingerprints = entry.fingerprints;
     const char* name    = baseConfig ? baseConfig->getName() : nullptr;
     m_baseConfigName    = (name && *name) ? name
@@ -4226,17 +4045,19 @@ FastColorSpaceMatcher::FastColorSpaceMatcher(const ConstConfigRcPtr& baseConfig,
 std::string
 FastColorSpaceMatcher::findEquivalentColorspace(
     const ConstConfigRcPtr& inputConfig, string_view csName,
-    const ConstContextRcPtr& context) const
+    const ConstContextRcPtr& context,
+    const RefSpaceConverters* refspace_converters) const
 {
-    const auto matches = findEquivalentColorspaces(inputConfig, csName,
-                                                   context);
+    const auto matches = findEquivalentColorspaces(inputConfig, csName, context,
+                                                   refspace_converters);
     return matches.empty() ? std::string() : matches.front();
 }
 
 std::vector<std::string>
 FastColorSpaceMatcher::findEquivalentColorspaces(
     const ConstConfigRcPtr& inputConfig, string_view csName,
-    const ConstContextRcPtr& context) const
+    const ConstContextRcPtr& context,
+    const RefSpaceConverters* refspace_converters) const
 {
     if (!inputConfig || csName.empty())
         return {};
@@ -4251,16 +4072,18 @@ FastColorSpaceMatcher::findEquivalentColorspaces(
 
     std::vector<float> inputVals;
     ColorSpaceFingerprints input_fingerprints;
-    bool have_cached
-        = get_cached_fingerprint_for_colorspace(inputConfig, cs, ctx,
-                                                input_fingerprints, inputVals,
-                                                *m_cache, *m_cache_mutex);
+    bool have_cached = get_cached_fingerprint_for_colorspace(
+        inputConfig, cs, ctx, input_fingerprints, inputVals,
+        FingerprintRuntime { *m_cache, *m_cache_mutex,
+                             refspace_converters ? *refspace_converters
+                                                 : RefSpaceConverters {} });
 
     if (!have_cached) {
         Timer timer;
         const bool skipColorSpace
             = calcColorSpaceFingerprint(inputVals, input_fingerprints,
-                                        inputConfig, cs, ctx);
+                                        inputConfig, cs, ctx,
+                                        refspace_converters);
         if (skipColorSpace || inputVals.empty())
             return {};
 
@@ -4350,7 +4173,7 @@ findEquivalentColorspace(const ColorSpaceFingerprints& fingerprints,
     std::vector<float> inputVals;
     const bool skipColorSpace = calcColorSpaceFingerprint(
         inputVals, fingerprints, inputConfig, inputCS,
-        inputConfig ? inputConfig->getCurrentContext() : nullptr);
+        inputConfig ? inputConfig->getCurrentContext() : nullptr, nullptr);
     if (skipColorSpace) {
         return "";
     }
@@ -4685,66 +4508,6 @@ get_simple_color_space_blockers(const ConstConfigRcPtr& config)
 }
 
 
-// Return a copy of `config` adapted to match the reference spaces of `otherConfig`.
-OCIO::ConfigRcPtr
-adaptConfigReferenceSpaces(const OCIO::ConstConfigRcPtr& config,
-                           const OCIO::ConstConfigRcPtr& otherConfig)
-{
-    using namespace OCIO;
-    ConstTransformRcPtr inputToBaseScene;
-    ConstTransformRcPtr inputToBaseDisplay;
-    ConfigUtils::initializeRefSpaceConverters(inputToBaseScene,
-                                              inputToBaseDisplay, otherConfig,
-                                              config);
-
-    ConfigRcPtr updatedConfig = config->createEditableCopy();
-// https://github.com/AcademySoftwareFoundation/OpenColorIO/issues/1885
-// If the OCIO version is older than 2.3.1, we need to explicitly set the default view transform name.
-#if OCIO_VERSION_HEX < 0x02030100
-    updatedConfig->setDefaultViewTransformName(
-        config->getDefaultViewTransformName());
-#endif
-
-    const int numColorSpaces
-        = updatedConfig->getNumColorSpaces(SEARCH_REFERENCE_SPACE_ALL,
-                                           COLORSPACE_ALL);
-    for (int i = 0; i < numColorSpaces; ++i) {
-        const char* name = updatedConfig->getColorSpaceNameByIndex(
-            SEARCH_REFERENCE_SPACE_ALL, COLORSPACE_ALL, i);
-        ConstColorSpaceRcPtr cs = updatedConfig->getColorSpace(name);
-        if (!cs) {
-            continue;
-        }
-
-        ColorSpaceRcPtr eCS = cs->createEditableCopy();
-        if (eCS->getReferenceSpaceType() == REFERENCE_SPACE_DISPLAY) {
-            ConfigUtils::updateReferenceColorspace(eCS, inputToBaseDisplay);
-        } else {
-            ConfigUtils::updateReferenceColorspace(eCS, inputToBaseScene);
-        }
-        updatedConfig->addColorSpace(eCS);
-    }
-
-    try {
-        const int numViewTransforms = updatedConfig->getNumViewTransforms();
-        for (int i = 0; i < numViewTransforms; ++i) {
-            const char* name = updatedConfig->getViewTransformNameByIndex(i);
-            ConstViewTransformRcPtr vt = updatedConfig->getViewTransform(name);
-            if (!vt) {
-                continue;
-            }
-
-            ViewTransformRcPtr eVT = vt->createEditableCopy();
-            ConfigUtils::updateReferenceView(eVT, inputToBaseScene,
-                                             inputToBaseDisplay);
-            updatedConfig->addViewTransform(eVT);
-        }
-    } catch (Exception&) {
-    }
-
-    return updatedConfig;
-}
-
 }  // namespace ConfigUtils
 // clang-format on
 
@@ -4773,6 +4536,7 @@ ColorConfig::Impl::initialize_equality_id_map() const
 
     if (interopconfig_ && config_) {
         auto& matcher            = get_interop_matcher();
+        auto converters          = get_refspace_converters(ctx);
         const auto& simpleSpaces = getSimpleColorSpaces();
         for (const auto& name : simpleSpaces) {
             auto name_cs                  = ctx->resolveStringVar(name.c_str());
@@ -4782,8 +4546,9 @@ ColorConfig::Impl::initialize_equality_id_map() const
             if (cs->hasCategory("is-unique"))
                 continue;
 
-            std::string interop
-                = matcher.findEquivalentColorspace(config_, name_cs, ctx);
+            std::string interop = matcher.findEquivalentColorspace(config_,
+                                                                   name_cs, ctx,
+                                                                   &converters);
             if (!interop.empty()) {
                 csToEqualityId.emplace(name_cs, interop);
                 if (m_equality_reverse_cache_enabled.load())
@@ -4855,7 +4620,8 @@ ColorConfig::Impl::get_equality_ids(
         }
     }
 
-    auto& matcher = get_interop_matcher();
+    auto& matcher   = get_interop_matcher();
+    auto converters = get_refspace_converters(ctx);
     tsl::robin_map<std::string, std::string> interop_to_cs;
 
     std::vector<std::string> color_spaces_all;
@@ -4875,8 +4641,8 @@ ColorConfig::Impl::get_equality_ids(
         if (cs->hasCategory("is-unique"))
             continue;
 
-        std::string interop = matcher.findEquivalentColorspace(config_, name,
-                                                               ctx);
+        std::string interop
+            = matcher.findEquivalentColorspace(config_, name, ctx, &converters);
         if (!interop.empty()) {
             result.emplace(name, interop);
             interop_to_cs.emplace(interop, name);
@@ -4964,17 +4730,18 @@ ColorConfig::Impl::get_colorspace_fingerprint(
     if (resolved.empty())
         return {};
 
-    return ConfigUtils::get_colorspace_fingerprint(config_, resolved, ctx,
-                                                   m_fingerprint_cache,
-                                                   m_fingerprint_cache_mutex);
+    return ConfigUtils::get_colorspace_fingerprint(
+        config_, resolved, ctx,
+        ConfigUtils::FingerprintRuntime { m_fingerprint_cache,
+                                          m_fingerprint_cache_mutex,
+                                          get_refspace_converters(ctx) });
 }
 
 std::vector<std::string>
 ColorConfig::Impl::find_matches(
     const std::vector<float>& fingerprint,
     ColorConfig::FingerprintSubjectType subject_type,
-    ColorConfig::FingerprintMatchMode match_mode,
-    bool exhaustive,
+    ColorConfig::FingerprintMatchMode match_mode, bool exhaustive,
     const std::map<std::string, std::string>& context) const
 {
     if (!config_ || fingerprint.empty())
@@ -5002,7 +4769,9 @@ ColorConfig::Impl::find_matches(
     return ConfigUtils::find_colorspace_matches_from_fingerprint(
         config_, cspan<const float>(fingerprint), false,
         OCIO::REFERENCE_SPACE_SCENE, mode, exhaustive, ctx,
-        m_fingerprint_cache, m_fingerprint_cache_mutex);
+        ConfigUtils::FingerprintRuntime { m_fingerprint_cache,
+                                          m_fingerprint_cache_mutex,
+                                          get_refspace_converters(ctx) });
 }
 
 std::vector<std::pair<std::string, std::string>>
@@ -5040,8 +4809,11 @@ ColorConfig::Impl::get_intersection(
             other_impl->config_, cspan<const float>(fingerprint),
             display_referred ? OCIO::REFERENCE_SPACE_DISPLAY
                              : OCIO::REFERENCE_SPACE_SCENE,
-            other_ctx, other_impl->m_fingerprint_cache,
-            other_impl->m_fingerprint_cache_mutex);
+            other_ctx,
+            ConfigUtils::FingerprintRuntime {
+                other_impl->m_fingerprint_cache,
+                other_impl->m_fingerprint_cache_mutex,
+                other_impl->get_refspace_converters(other_ctx) });
         if (!match.empty())
             result.emplace_back(name, match);
     }
@@ -5130,6 +4902,46 @@ ColorConfig::Impl::get_interop_matcher() const
         }
     }
     return *m_interop_matcher;
+}
+
+ConfigUtils::RefSpaceConverters
+ColorConfig::Impl::get_refspace_converters(
+    const OCIO::ConstContextRcPtr& context) const
+{
+    if (!config_ || !interopconfig_)
+        return {};
+    OCIO::ConstContextRcPtr ctx = context ? context
+                                          : config_->getCurrentContext();
+    const std::string key       = equality_cache_key(config_, ctx);
+    {
+        spin_rw_read_lock lock(m_mutex);
+        auto it = m_refspace_converters_by_ctx.find(key);
+        if (it != m_refspace_converters_by_ctx.end())
+            return it->second;
+    }
+
+    ConfigUtils::RefSpaceConverters converters;
+    const auto start = std::chrono::steady_clock::now();
+    try {
+        ConfigUtils::initializeRefSpaceConverters(
+            converters.input_to_base_scene, converters.input_to_base_display,
+            interopconfig_, config_, interopconfig_->getCurrentContext(), ctx);
+        converters.enabled = true;
+    } catch (OCIO::Exception& e) {
+        error("Error initializing OCIO ref-space converters: {}", e.what());
+        converters = {};
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - start);
+    m_refspace_converter_init_ns.fetch_add(static_cast<uint64_t>(
+                                               elapsed.count()),
+                                           std::memory_order_relaxed);
+    {
+        spin_rw_write_lock lock(m_mutex);
+        auto [it, inserted] = m_refspace_converters_by_ctx.emplace(key,
+                                                                   converters);
+        return inserted ? converters : it->second;
+    }
 }
 
 

@@ -1132,34 +1132,32 @@ ColorConfig::Impl::identify_builtin_equivalents()
     if (disable_builtin_configs)
         return;
     Timer timer;
-    // TODO: replace with resolve()
-    if (auto n = IdentifyBuiltinColorSpace("srgb_rec709_scene")) {
-        if (CSInfo* cs = find(n)) {
-            cs->setflag(CSInfo::is_srgb, srgb_alias);
-            DBG("Identified {} = builtin '{}'\n", "srgb_rec709_scene",
-                cs->name);
+    auto resolve_and_flag = [this](const char* builtin_name, int flags,
+                                   std::string& alias) -> bool {
+        string_view resolved = resolve(builtin_name);
+        if (resolved.empty())
+            return false;
+        if (CSInfo* cs = find(resolved)) {
+            cs->setflag(flags, alias);
+            DBG("Identified {} = builtin '{}'\n", builtin_name, cs->name);
+            return true;
         }
-    } else {
+        return false;
+    };
+
+    if (!resolve_and_flag("srgb_rec709_scene", CSInfo::is_srgb, srgb_alias)) {
         DBG("No config space identified as srgb\n");
     }
     DBG("identify_builtin_equivalents srgb took {:0.2f}s\n", timer.lap());
-    if (auto n = IdentifyBuiltinColorSpace("lin_srgb")) {
-        if (CSInfo* cs = find(n)) {
-            cs->setflag(CSInfo::is_lin_srgb | CSInfo::is_linear_response,
-                        lin_srgb_alias);
-            DBG("Identified {} = builtin '{}'\n", "lin_rec709_scene", cs->name);
-        }
-    } else {
+    if (!resolve_and_flag("lin_srgb",
+                          CSInfo::is_lin_srgb | CSInfo::is_linear_response,
+                          lin_srgb_alias)) {
         DBG("No config space identified as lin_srgb\n");
     }
     DBG("identify_builtin_equivalents lin_srgb took {:0.2f}s\n", timer.lap());
-    if (auto n = IdentifyBuiltinColorSpace("ACEScg")) {
-        if (CSInfo* cs = find(n)) {
-            cs->setflag(CSInfo::is_ACEScg | CSInfo::is_linear_response,
-                        ACEScg_alias);
-            DBG("Identified {} = builtin '{}'\n", "ACEScg", cs->name);
-        }
-    } else {
+    if (!resolve_and_flag("ACEScg",
+                          CSInfo::is_ACEScg | CSInfo::is_linear_response,
+                          ACEScg_alias)) {
         DBG("No config space identified as acescg\n");
     }
     DBG("identify_builtin_equivalents acescg took {:0.2f}s\n", timer.lap());
@@ -1172,16 +1170,14 @@ ColorConfig::Impl::IdentifyBuiltinColorSpace(const char* name) const
 {
     if (!config_ || disable_builtin_configs)
         return nullptr;
-    try {
-        return OCIO::Config::IdentifyBuiltinColorSpace(config_, interopconfig_,
-                                                       name);
-    } catch (...) {
-    }
 
-    // Fallback: fingerprint a builtin colorspace from a builtin ColorConfig
-    // singleton and use ColorConfig matching idioms on the current config.
     if (!name || !*name)
         return nullptr;
+    if (builtinconfig_ && !builtinconfig_->getColorSpace(name))
+        return nullptr;
+    // Recursion guard: fallback matching may re-enter builtin identification
+    // via resolve/find_matches paths. A thread-local depth check prevents
+    // cycles while allowing independent calls on other threads.
     static thread_local int fallback_depth = 0;
     if (fallback_depth > 0)
         return nullptr;
@@ -1195,23 +1191,34 @@ ColorConfig::Impl::IdentifyBuiltinColorSpace(const char* name) const
         ~FallbackDepthGuard() { --depth; }
     } depth_guard(fallback_depth);
 
+    // First try OIIO's fallback path: fingerprint the builtin colorspace and
+    // match it in the current config.
     static const ColorConfig ocio_default_cc("ocio://default");
     const ColorConfig& builtin_cc = Strutil::iequals(configname(),
                                                      "ocio://default")
                                         ? get_latest_cg_config()
                                         : ocio_default_cc;
     const auto fingerprint        = builtin_cc.get_colorspace_fingerprint(name);
-    if (fingerprint.empty())
+    if (!fingerprint.empty()) {
+        const auto matches = m_self->find_matches(
+            fingerprint, ColorConfig::FingerprintSubjectType::ColorSpace,
+            ColorConfig::FingerprintMatchMode::First, false, {});
+        if (!matches.empty()) {
+            if (const CSInfo* cs = find(matches.front()))
+                return cs->name.c_str();
+        }
+    }
+
+    // If we could could not identify a space with OIIO's methods,
+    // defer to OCIO's. It can't hurt to try.
+    try {
+        return OCIO::Config::IdentifyBuiltinColorSpace(config_, interopconfig_,
+                                                       name);
+    } catch (...) {
         return nullptr;
-    const auto matches = m_self->find_matches(
-        fingerprint, ColorConfig::FingerprintSubjectType::ColorSpace,
-        ColorConfig::FingerprintMatchMode::First, false, {});
-    if (matches.empty())
-        return nullptr;
-    if (const CSInfo* cs = find(matches.front()))
-        return cs->name.c_str();
-    return nullptr;
+    }
 }
+
 
 
 void
@@ -2192,16 +2199,6 @@ ColorConfig::Impl::resolve(string_view name) const
                 if (it != it_ctx->second.end())
                     return it->second;
             }
-        }
-
-        // Interop fallback path.
-        try {
-            const char* equivalent_cs = OCIO::Config::IdentifyBuiltinColorSpace(
-                config_, interopconfig_, interop_cs->getName());
-            if (equivalent_cs && *equivalent_cs)
-                return equivalent_cs;
-        } catch (OCIO::Exception& e) {
-            // ignore
         }
     } else if (builtinconfig_ && builtinconfig_->getColorSpace(namestr)) {
         // If this name exists in the default builtin config, try the builtin

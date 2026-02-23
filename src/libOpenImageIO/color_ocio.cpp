@@ -586,6 +586,7 @@ public:
     }
 
     string_view resolve(string_view name) const;
+    string_view resolve(string_view name, string_view default_value) const;
 
     // Note: Uses std::format syntax
     template<typename... Args>
@@ -1149,13 +1150,13 @@ ColorConfig::Impl::identify_builtin_equivalents()
         DBG("No config space identified as srgb\n");
     }
     DBG("identify_builtin_equivalents srgb took {:0.2f}s\n", timer.lap());
-    if (!resolve_and_flag("lin_srgb",
+    if (!resolve_and_flag("lin_rec709_scene",
                           CSInfo::is_lin_srgb | CSInfo::is_linear_response,
                           lin_srgb_alias)) {
         DBG("No config space identified as lin_srgb\n");
     }
     DBG("identify_builtin_equivalents lin_srgb took {:0.2f}s\n", timer.lap());
-    if (!resolve_and_flag("ACEScg",
+    if (!resolve_and_flag("lin_ap1_scene",
                           CSInfo::is_ACEScg | CSInfo::is_linear_response,
                           ACEScg_alias)) {
         DBG("No config space identified as acescg\n");
@@ -2074,13 +2075,7 @@ ColorConfig::resolve(string_view name) const
 string_view
 ColorConfig::resolve(string_view name, string_view default_value) const
 {
-    string_view resolved = resolve(name);
-    if (resolved == name) {
-        if (!color_space_exists(name))
-            return default_value;
-        return name;
-    }
-    return resolved;
+    return getImpl()->resolve(name, default_value);
 }
 
 std::string
@@ -2099,9 +2094,7 @@ ColorConfig::color_space_exists(string_view cs_name) const
     auto config = getImpl()->config_;
     if (!config)
         return false;
-    string_view resolved = resolve(cs_name);
-    return !resolved.empty()
-           && config->getColorSpace(c_str(resolved)) != nullptr;
+    return config->getCanonicalName(c_str(cs_name)) != nullptr;
 }
 
 std::vector<std::string>
@@ -2230,6 +2223,18 @@ ColorConfig::Impl::resolve(string_view name) const
         return Rec709_alias;
 
     return name;
+}
+
+string_view
+ColorConfig::Impl::resolve(string_view name, string_view default_value) const
+{
+    string_view resolved = resolve(name);
+    if (resolved == name) {
+        if (!config_ || !config_->getColorSpace(c_str(name)))
+            return default_value;
+        return name;
+    }
+    return resolved;
 }
 
 

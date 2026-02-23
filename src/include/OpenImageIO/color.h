@@ -93,7 +93,7 @@ public:
     ///
     /// Multiple calls to this are potentially expensive. A ColorConfig
     /// should usually be shared by an app for its entire runtime.
-    ColorConfig(string_view filename = "");
+    ColorConfig(string_view filename = "", string_view workingdir = "");
 
     ~ColorConfig();
 
@@ -104,7 +104,7 @@ public:
     ///
     /// Multiple calls to this are potentially expensive. A ColorConfig
     /// should usually be shared by an app for its entire runtime.
-    bool reset(string_view filename = "");
+    bool reset(string_view filename = "", string_view workingdir = "");
 
     /// Has an error string occurred?
     /// (This will not affect the error state.)
@@ -520,12 +520,12 @@ public:
     /// Returns an empty vector if no match is found.
     ///
     /// @version 3.1
-    std::vector<std::string> find_matches(
-        const std::vector<float>& fingerprint,
-        FingerprintSubjectType subject_type,
-        FingerprintMatchMode match_mode = FingerprintMatchMode::First,
-        bool exhaustive                 = false,
-        const std::map<std::string, std::string>& context = {}) const;
+    std::vector<std::string>
+    find_matches(const std::vector<float>& fingerprint,
+                 FingerprintSubjectType subject_type,
+                 FingerprintMatchMode match_mode = FingerprintMatchMode::First,
+                 bool exhaustive                 = false,
+                 const std::map<std::string, std::string>& context = {}) const;
 
     /// Return pairs of (this_config_colorspace, other_config_colorspace) where
     /// fingerprints match between configs for the given contexts. This is a
@@ -576,11 +576,6 @@ public:
     ///
     /// @version 3.1
     std::string getWorkingDir() const;
-
-    /// Set the OCIO config working directory.
-    ///
-    /// @version 3.1
-    void setWorkingDir(string_view dir);
 
     /// Return debugging info about ColorConfig initialization timing and
     /// selected internal setup phases as key/value pairs.

@@ -59,8 +59,8 @@ declare_colorconfig(py::module& m)
 
     py::class_<ColorConfig>(m, "ColorConfig")
 
-        .def(py::init<>())
-        .def(py::init<const std::string&>())
+        .def(py::init<const std::string&, const std::string&>(),
+             "filename"_a = "", "workingdir"_a = "")
         .def("geterror",
              [](ColorConfig& self) { return PY_STR(self.geterror()); })
 
@@ -113,10 +113,6 @@ declare_colorconfig(py::module& m)
              })
         .def("getWorkingDir",
              [](const ColorConfig& self) { return self.getWorkingDir(); })
-        .def("setWorkingDir",
-             [](ColorConfig& self, const std::string& dir) {
-                 self.setWorkingDir(dir);
-             })
         .def(
             "getColorSpaceDataType",
             [](const ColorConfig& self, const std::string& name) {
@@ -318,8 +314,7 @@ declare_colorconfig(py::module& m)
             "find_matches",
             [](const ColorConfig& self, const std::vector<float>& fingerprint,
                ColorConfig::FingerprintSubjectType subject_type,
-               ColorConfig::FingerprintMatchMode match_mode,
-               bool exhaustive,
+               ColorConfig::FingerprintMatchMode match_mode, bool exhaustive,
                const py::dict& context) {
                 auto parsed = parse_context_vars(context);
                 py::list out;
@@ -332,8 +327,7 @@ declare_colorconfig(py::module& m)
             },
             "fingerprint"_a, "subject_type"_a,
             "match_mode"_a = ColorConfig::FingerprintMatchMode::First,
-            "exhaustive"_a = false,
-            "context"_a = py::dict())
+            "exhaustive"_a = false, "context"_a = py::dict())
         .def(
             "get_intersection",
             [](const ColorConfig& self, const ColorConfig& other,

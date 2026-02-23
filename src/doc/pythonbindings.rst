@@ -4137,18 +4137,12 @@ is provided for minimal color support.
 
     This function was added in OpenImageIO 3.1.
 
-.. py:method:: setWorkingDir (dir: str) -> None
+To set a working directory for a color config, pass it when constructing
+``ColorConfig``:
 
-    Set the OCIO config working directory.
+.. code-block:: python
 
-    Example:
-
-    .. code-block:: python
-
-        colorconfig = oiio.ColorConfig()
-        colorconfig.setWorkingDir("/path/to/dir")
-
-    This function was added in OpenImageIO 3.1.
+    colorconfig = oiio.ColorConfig(filename="", workingdir="/path/to/dir")
 
 
 .. _sec-pythonmiscapi:

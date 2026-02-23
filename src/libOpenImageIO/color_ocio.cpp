@@ -411,7 +411,7 @@ public:
 #endif
     }
 
-    bool init(string_view filename);
+    bool init(string_view filename, string_view workingdir);
 
     std::map<std::string, std::string> get_equality_ids() const;
     std::map<std::string, std::string>
@@ -1294,7 +1294,10 @@ ColorConfig::Impl::bootstrap_config()
 }
 
 
-ColorConfig::ColorConfig(string_view filename) { reset(filename); }
+ColorConfig::ColorConfig(string_view filename, string_view workingdir)
+{
+    reset(filename, workingdir);
+}
 
 
 
@@ -1303,7 +1306,7 @@ ColorConfig::~ColorConfig() {}
 
 
 bool
-ColorConfig::Impl::init(string_view filename)
+ColorConfig::Impl::init(string_view filename, string_view workingdir)
 {
     // High-level init flow:
     // - Load the OCIO config (or fall back to current/builtin).
@@ -1349,6 +1352,16 @@ ColorConfig::Impl::init(string_view filename)
 
     {
         ScopedNsAccumulator load_phase_time(m_ocio_load_config_ns);
+        auto assign_config = [this, workingdir](OCIO::ConstConfigRcPtr cfg) {
+            if (!cfg)
+                return;
+            if (!workingdir.empty()) {
+                OCIO::ConfigRcPtr editable = cfg->createEditableCopy();
+                editable->setWorkingDir(c_str(workingdir));
+                cfg = editable;
+            }
+            config_ = cfg;
+        };
         // If no filename was specified, use env $OCIO
         if (filename.empty() || Strutil::iequals(filename, "$OCIO"))
             filename = Sysutil::getenv("OCIO");
@@ -1362,7 +1375,7 @@ ColorConfig::Impl::init(string_view filename)
                 iss.str(std::string(filename));
                 //TODO: check to see if the config's "ocio_version" metadata is
                 // compatible with the OCIO version we're using, and if not, error
-                config_   = OCIO::Config::CreateFromStream(iss);
+                assign_config(OCIO::Config::CreateFromStream(iss));
                 auto name = config_->getName();
                 if (name && name[0])
                     configname(name);
@@ -1371,7 +1384,7 @@ ColorConfig::Impl::init(string_view filename)
                 configfilename(filename);  // from stream, no filename
             } catch (OCIO::Exception& e) {
                 error("Error reading OCIO config from stream: {}", e.what());
-                config_ = OCIO::Config::CreateFromFile("ocio://default");
+                assign_config(OCIO::Config::CreateFromFile("ocio://default"));
             }
         } else if (filename.size() && !OIIO::Filesystem::exists(filename)
                    && !Strutil::istarts_with(filename, "ocio://")) {
@@ -1379,8 +1392,8 @@ ColorConfig::Impl::init(string_view filename)
         } else if (!from_stream) {
             // Either filename passed, or taken from $OCIO, and it seems to exist
             try {
-                config_ = OCIO::Config::CreateFromFile(
-                    std::string(filename).c_str());
+                assign_config(OCIO::Config::CreateFromFile(
+                    std::string(filename).c_str()));
                 configname(filename);
                 configfilename(filename);
                 m_config_is_built_in = Strutil::istarts_with(filename,
@@ -1396,7 +1409,7 @@ ColorConfig::Impl::init(string_view filename)
                              "Falling back to current OCIO config");
             auto current_config = OCIO::GetCurrentConfig();
             if (current_config->getNumColorSpaces() == 1) {
-                config_ = OCIO::Config::CreateFromFile("ocio://default");
+                assign_config(OCIO::Config::CreateFromFile("ocio://default"));
                 configname("ocio://default");
                 configfilename("ocio://default");
                 OCIO::LogMessage(
@@ -1405,7 +1418,7 @@ ColorConfig::Impl::init(string_view filename)
                     "instead");
                 OCIO::SetCurrentConfig(config_);
             } else
-                config_ = current_config;
+                assign_config(current_config);
             auto config_name = current_config->getName();
             configname(config_name ? config_name : "current");
             configfilename("current");
@@ -1484,7 +1497,7 @@ ColorConfig::Impl::init(string_view filename)
 
 
 bool
-ColorConfig::reset(string_view filename)
+ColorConfig::reset(string_view filename, string_view workingdir)
 {
     OIIO::pvt::LoggedTimer logtime("ColorConfig::reset");
     if (m_impl
@@ -1497,7 +1510,7 @@ ColorConfig::reset(string_view filename)
     }
 
     m_impl.reset(new ColorConfig::Impl(this));
-    return m_impl->init(filename);
+    return m_impl->init(filename, workingdir);
 }
 
 
@@ -2041,20 +2054,6 @@ ColorConfig::getWorkingDir() const
         return {};
     const char* dir = config->getWorkingDir();
     return dir ? std::string(dir) : std::string();
-}
-
-void
-ColorConfig::setWorkingDir(string_view dir)
-{
-    auto impl   = getImpl();
-    auto config = impl->config_;
-    if (!config)
-        return;
-    OCIO::ConfigRcPtr editable = config->createEditableCopy();
-    editable->setWorkingDir(c_str(dir));
-    impl->config_ = editable;
-    // Processor cache does not include config cacheID, so reset it.
-    impl->clear_colorproc_cache();
 }
 
 std::map<std::string, std::string>

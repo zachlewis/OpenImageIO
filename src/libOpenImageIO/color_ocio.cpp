@@ -312,7 +312,13 @@ struct CSInfo {
 
 
 
-// Hidden implementation of ColorConfig
+// Hidden implementation of ColorConfig.
+//
+// High-level responsibilities:
+// - hold OCIO config state and name/alias inventory data
+// - manage interop bootstrap state (interchange colorspace availability)
+// - own fingerprint/equality caches and matching helpers
+// - expose ColorConfig-facing orchestration methods
 class ColorConfig::Impl {
 public:
     OCIO::ConstConfigRcPtr config_;
@@ -3376,8 +3382,6 @@ private:
 
 std::vector<std::string>
 get_simple_color_spaces(const ConstConfigRcPtr& config);
-std::map<std::string, std::string>
-get_simple_color_space_blockers(const ConstConfigRcPtr& config);
 
 // Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
 // Temporarily deactivate the Processor cache on a Config object.
@@ -4066,6 +4070,54 @@ containsBlockableTransform(const ConstConfigRcPtr& config,
                            std::unordered_set<std::string>& keep,
                            std::unordered_set<std::string>& omit);
 
+std::unordered_set<std::string>
+scan_simple_color_space_names(const ConstConfigRcPtr& config)
+{
+    std::unordered_set<std::string> keep;
+    if (!config) {
+        return keep;
+    }
+
+    std::unordered_set<std::string> omit;
+    ConstContextRcPtr ctx = config->getCurrentContext();
+
+    const int n = config->getNumColorSpaces(SEARCH_REFERENCE_SPACE_ALL,
+                                            COLORSPACE_ALL);
+    for (int i = 0; i < n; ++i) {
+        const char* name
+            = config->getColorSpaceNameByIndex(SEARCH_REFERENCE_SPACE_ALL,
+                                               COLORSPACE_ALL, i);
+        if (!name || !*name) {
+            continue;
+        }
+        if (keep.count(name) || omit.count(name)) {
+            continue;
+        }
+
+        if (containsBlockableTransform(config, ctx, name, keep, omit)) {
+            omit.insert(name);
+        } else {
+            keep.insert(name);
+        }
+    }
+
+    return keep;
+}
+
+FingerprintSearchMode
+to_fingerprint_search_mode(ColorConfig::FingerprintMatchMode match_mode)
+{
+    switch (match_mode) {
+    case ColorConfig::FingerprintMatchMode::First:
+        return FingerprintSearchMode::First;
+    case ColorConfig::FingerprintMatchMode::Best:
+        return FingerprintSearchMode::Best;
+    case ColorConfig::FingerprintMatchMode::All:
+        return FingerprintSearchMode::All;
+    }
+    return FingerprintSearchMode::First;
+}
+
 bool
 colorSpaceHasBlockableTransform(const ConstConfigRcPtr& config,
                                 const ConstColorSpaceRcPtr& cs,
@@ -4266,33 +4318,7 @@ get_simple_color_spaces(const ConstConfigRcPtr& config)
     // - not blocked by unsupported/complex transform constructs
     // The actual transform policy lives in containsBlockableTransform().
     std::vector<std::string> simpleSpaces;
-    if (!config) {
-        return simpleSpaces;
-    }
-
-    std::unordered_set<std::string> keep;
-    std::unordered_set<std::string> omit;
-    ConstContextRcPtr ctx = config->getCurrentContext();
-
-    const int n = config->getNumColorSpaces(SEARCH_REFERENCE_SPACE_ALL,
-                                            COLORSPACE_ALL);
-    for (int i = 0; i < n; ++i) {
-        const char* name
-            = config->getColorSpaceNameByIndex(SEARCH_REFERENCE_SPACE_ALL,
-                                               COLORSPACE_ALL, i);
-        if (!name || !*name) {
-            continue;
-        }
-        if (keep.count(name) || omit.count(name)) {
-            continue;
-        }
-        if (containsBlockableTransform(config, ctx, name, keep, omit)) {
-            omit.insert(name);
-        } else {
-            keep.insert(name);
-        }
-    }
-
+    auto keep = scan_simple_color_space_names(config);
     simpleSpaces.reserve(keep.size());
     for (const auto& name : keep) {
         simpleSpaces.emplace_back(name);
@@ -4300,41 +4326,6 @@ get_simple_color_spaces(const ConstConfigRcPtr& config)
 
     return simpleSpaces;
 }
-
-std::map<std::string, std::string>
-get_simple_color_space_blockers(const ConstConfigRcPtr& config)
-{
-    std::map<std::string, std::string> blockers;
-    if (!config) {
-        return blockers;
-    }
-
-    std::unordered_set<std::string> keep;
-    std::unordered_set<std::string> omit;
-    ConstContextRcPtr ctx = config->getCurrentContext();
-
-    const int n = config->getNumColorSpaces(SEARCH_REFERENCE_SPACE_ALL,
-                                            COLORSPACE_ALL);
-    for (int i = 0; i < n; ++i) {
-        const char* name
-            = config->getColorSpaceNameByIndex(SEARCH_REFERENCE_SPACE_ALL,
-                                               COLORSPACE_ALL, i);
-        if (!name || !*name) {
-            continue;
-        }
-
-        if (containsBlockableTransform(config, ctx, name, keep, omit)) {
-            blockers.emplace(name,
-                             "blocked by unsupported or complex transform");
-            omit.insert(name);
-        } else {
-            keep.insert(name);
-        }
-    }
-
-    return blockers;
-}
-
 
 // clang-format on
 
@@ -4764,23 +4755,10 @@ ColorConfig::Impl::interop_find_matches(
     ColorConfig::FingerprintMatchMode match_mode, bool exhaustive,
     const OCIO::ConstContextRcPtr& context) const
 {
-    FingerprintSearchMode mode = FingerprintSearchMode::First;
-    switch (match_mode) {
-    case ColorConfig::FingerprintMatchMode::First:
-        mode = FingerprintSearchMode::First;
-        break;
-    case ColorConfig::FingerprintMatchMode::Best:
-        mode = FingerprintSearchMode::Best;
-        break;
-    case ColorConfig::FingerprintMatchMode::All:
-        mode = FingerprintSearchMode::All;
-        break;
-    }
-
     return find_colorspace_matches_from_fingerprint(
         config_, cspan<const float>(fingerprint), false,
-        OCIO::REFERENCE_SPACE_SCENE, mode, exhaustive, context,
-        make_fingerprint_runtime());
+        OCIO::REFERENCE_SPACE_SCENE, to_fingerprint_search_mode(match_mode),
+        exhaustive, context, make_fingerprint_runtime());
 }
 
 void

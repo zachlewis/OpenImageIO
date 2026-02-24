@@ -77,19 +77,26 @@ using ColorProcessorHandle = std::shared_ptr<ColorProcessor>;
 
 class OIIO_API ColorConfig {
 public:
+    /// Category of match target for fingerprint lookups.
+    /// Currently only color spaces are supported.
     enum class FingerprintSubjectType {
         ColorSpace = 0,
     };
 
+    /// Strategy for selecting fingerprint matches.
     enum class FingerprintMatchMode {
+        /// Return the first candidate found within tolerance.
         First = 0,
+        /// Return the candidate with the smallest max absolute error.
         Best  = 1,
+        /// Return all candidates found within tolerance.
         All   = 2,
     };
 
     /// Construct a ColorConfig using the named OCIO configuration file,
     /// or if filename is empty, to the current color configuration
-    /// specified by env variable $OCIO.
+    /// specified by env variable $OCIO. If `workingdir` is non-empty,
+    /// override the OCIO config working directory after load.
     ///
     /// Multiple calls to this are potentially expensive. A ColorConfig
     /// should usually be shared by an app for its entire runtime.
@@ -99,8 +106,9 @@ public:
 
     /// Reset the config to the named OCIO configuration file, or if
     /// filename is empty, to the current color configuration specified
-    /// by env variable $OCIO. Return true for success, false if there
-    /// was an error.
+    /// by env variable $OCIO. If `workingdir` is non-empty, override the
+    /// OCIO config working directory after load. Return true for success,
+    /// false if there was an error.
     ///
     /// Multiple calls to this are potentially expensive. A ColorConfig
     /// should usually be shared by an app for its entire runtime.
@@ -579,6 +587,7 @@ public:
 
     /// Return debugging info about ColorConfig initialization timing and
     /// selected internal setup phases as key/value pairs.
+    /// Keys ending in `_ms` are elapsed milliseconds encoded as strings.
     ///
     /// @version 3.1
     std::map<std::string, std::string> getDebugInfo() const;

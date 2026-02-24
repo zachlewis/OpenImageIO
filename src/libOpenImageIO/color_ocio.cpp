@@ -432,18 +432,26 @@ public:
     std::string get_color_interop_id(
         string_view colorspace, bool strict,
         const std::map<std::string, std::string>& context) const;
+    // Ensure interop bootstrap state is computed for the current config.
     void bootstrap_config();
+    // Identify an interchange colorspace used as the fingerprint source.
     void interop_bootstrap();
+    // Return (and lazily build) matcher for config -> interop comparisons.
     FastColorSpaceMatcher& interop_matcher() const;
+    // Compute or fetch a fingerprint in this config for a resolved colorspace.
     std::vector<float> interop_get_colorspace_fingerprint(
         string_view colorspace, const OCIO::ConstContextRcPtr& context) const;
+    // Match a fingerprint against this config using public match semantics.
     std::vector<std::string>
     interop_find_matches(const std::vector<float>& fingerprint,
                          ColorConfig::FingerprintMatchMode match_mode,
                          bool exhaustive,
                          const OCIO::ConstContextRcPtr& context) const;
+    // Clear interop-related caches whose lifetime is tied to init/reset.
     void interop_reset();
+    // Return total fingerprint compute time accumulated by cache entries.
     double interop_fingerprint_compute_ms() const;
+    // Build runtime view of cache + source colorspace for helper calls.
     FingerprintRuntime interop_fingerprint_runtime() const;
     std::string context_cache_id(const OCIO::ConstContextRcPtr& context) const
     {
@@ -622,6 +630,7 @@ public:
     }
 
     std::vector<std::string> get_builtin_interop_ids() const;
+    // Build and retain the builtin interop identities config singleton.
     static OCIO::ConstConfigRcPtr build_interop_identities_config();
     string_view get_cached_equality_id(string_view colorspace) const;
     const std::vector<std::string>& getSimpleColorSpaces() const;
@@ -652,11 +661,13 @@ private:
     // populated for context-sensitive configs, and will be shared across all
     // threads using the same config+context.
     void initialize_equality_id_map() const;
+    // Build equality_id maps for one context and search scope.
     void build_equality_maps(
         const OCIO::ConstContextRcPtr& ctx, bool exhaustive,
         bool key_by_resolved_name,
         tsl::robin_map<std::string, std::string>& csToEqualityId,
         tsl::robin_map<std::string, std::string>* equalityIdToCs) const;
+    // Convenience constructor for helper runtime struct.
     FingerprintRuntime make_fingerprint_runtime() const;
 
     // Return the CSInfo flags for the given color space name
@@ -2080,6 +2091,7 @@ ColorConfig::get_builtin_interop_ids() const
 OCIO::ConstConfigRcPtr
 ColorConfig::Impl::build_interop_identities_config()
 {
+    // Parse once and reuse for all ColorConfig instances.
     static OCIO::ConstConfigRcPtr s_interop_identities_config =
         []() -> OCIO::ConstConfigRcPtr {
         std::istringstream iss(kInteropIdentitiesConfig);
@@ -3259,13 +3271,6 @@ ColorConfig::get_cicp(string_view colorspace) const
 
 
 
-//////////////////////////////////////////////////////////////////////////////////
-//
-// ConfigUtils -- Helpers for working with OCIO Configs, taken from the OCIO
-// library itself. Necessary since these functions are not part of the public API.
-//
-// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
-
 using namespace OCIO;
 // NOTE: The helpers below are adapted from OCIO's internal utilities.
 // We keep them here to avoid depending on private OCIO headers while still
@@ -3331,14 +3336,6 @@ find_colorspace_matches_from_fingerprint(
     FingerprintSearchMode match_mode, bool exhaustive,
     const ConstContextRcPtr& context, const FingerprintRuntime& runtime);
 
-// Find a colorspace whose fingerprint matches the given values.
-std::vector<std::string>
-find_colorspaces_from_fingerprint(const ConstConfigRcPtr& config,
-                                  cspan<const float> fingerprint,
-                                  ReferenceSpaceType refSpaceType,
-                                  const ConstContextRcPtr& context,
-                                  const FingerprintRuntime& runtime);
-
 // Find the first colorspace whose fingerprint matches the given values.
 std::string
 find_colorspace_from_fingerprint(const ConstConfigRcPtr& config,
@@ -3375,7 +3372,6 @@ private:
         ReferenceSpaceType refSpaceType) const;
 
     ColorSpaceFingerprints m_base_fingerprints;
-    std::string m_baseConfigName;
     FingerprintCacheMap* m_cache = nullptr;
     std::mutex* m_cache_mutex    = nullptr;
 };
@@ -3405,22 +3401,6 @@ private:
     ConstConfigRcPtr m_config = nullptr;
     ProcessorCacheFlags m_origCacheFlags;
 };
-
-// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
-// Simplify a transform by removing nested group transforms and identities.
-//
-ConstTransformRcPtr
-simplifyTransform(const ConstGroupTransformRcPtr& gt)
-{
-    ConstConfigRcPtr config = Config::CreateRaw();
-    ConstProcessorRcPtr p   = config->getProcessor(gt);
-    ConstProcessorRcPtr opt = p->getOptimizedProcessor(OPTIMIZATION_DEFAULT);
-    GroupTransformRcPtr finalGt = opt->createGroupTransform();
-    if (finalGt->getNumTransforms() == 1) {
-        return finalGt->getTransform(0);
-    }
-    return finalGt;
-}
 
 // Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
 ConstTransformRcPtr
@@ -3572,7 +3552,7 @@ void initializeTestVals(ColorSpaceFingerprints & fingerprints, const ConstConfig
 // Slightly modified from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026:
 //   - Take OCIO Context into account when computing fingerprints.
 //   - Only compute initial fingerprints for "simple" color spaces.
-//     (see get_simple_color_spaces and get_simple_color_space_blockers for details)
+//     (see get_simple_color_spaces for details)
 
 // Calculate a fingerprint for simple color spaces in a base config. These will be used
 // to compare against color spaces in an input config for merging. Store the results in
@@ -3660,6 +3640,7 @@ make_context_with_overrides(
     return context;
 }
 
+// Build fingerprint cache key from config+context cache identities.
 static std::string
 fingerprint_cache_key(const ConstConfigRcPtr& config,
                       const ConstContextRcPtr& context)
@@ -3673,6 +3654,7 @@ fingerprint_cache_key(const ConstConfigRcPtr& config,
     return Strutil::fmt::format("{}@{}", ctx_id, config_id);
 }
 
+// Return cached fingerprints for a config/context, initializing on miss.
 FingerprintCacheEntry
 get_fingerprint_cache_entry(const ConstConfigRcPtr& config,
                             const ConstContextRcPtr& context,
@@ -3705,6 +3687,7 @@ get_fingerprint_cache_entry(const ConstConfigRcPtr& config,
     return entry;
 }
 
+// Try to retrieve one colorspace fingerprint from cache by name/type.
 bool
 get_cached_fingerprint_for_colorspace(const ConstConfigRcPtr& config,
                                       const ConstColorSpaceRcPtr& cs,
@@ -3745,6 +3728,7 @@ get_cached_fingerprint_for_colorspace(const ConstConfigRcPtr& config,
     return false;
 }
 
+// Compute one colorspace fingerprint and publish it into the cache.
 std::vector<float>
 helper_get_colorspace_fingerprint(const ConstConfigRcPtr& config,
                                   string_view colorspace,
@@ -3802,6 +3786,7 @@ helper_get_colorspace_fingerprint(const ConstConfigRcPtr& config,
     return inputVals;
 }
 
+// Return the first matching colorspace for the given reference-space type.
 std::string
 find_colorspace_from_fingerprint(const ConstConfigRcPtr& config,
                                  cspan<const float> fingerprint,
@@ -3813,19 +3798,6 @@ find_colorspace_from_fingerprint(const ConstConfigRcPtr& config,
         config, fingerprint, true, refSpaceType, FingerprintSearchMode::First,
         false, context, runtime);
     return matches.empty() ? std::string() : matches.front();
-}
-
-std::vector<std::string>
-find_colorspaces_from_fingerprint(const ConstConfigRcPtr& config,
-                                  cspan<const float> fingerprint,
-                                  ReferenceSpaceType refSpaceType,
-                                  const ConstContextRcPtr& context,
-                                  const FingerprintRuntime& runtime)
-{
-    return find_colorspace_matches_from_fingerprint(config, fingerprint, true,
-                                                    refSpaceType,
-                                                    FingerprintSearchMode::All,
-                                                    false, context, runtime);
 }
 
 std::vector<std::string>
@@ -3925,10 +3897,6 @@ FastColorSpaceMatcher::FastColorSpaceMatcher(const ConstConfigRcPtr& baseConfig,
         baseConfig, baseConfig ? baseConfig->getCurrentContext() : nullptr,
         runtime);
     m_base_fingerprints = entry.fingerprints;
-    const char* name    = baseConfig ? baseConfig->getName() : nullptr;
-    m_baseConfigName    = (name && *name) ? name
-                                          : (baseConfig ? baseConfig->getCacheID()
-                                                        : std::string());
 }
 
 std::string
@@ -4104,6 +4072,7 @@ scan_simple_color_space_names(const ConstConfigRcPtr& config)
     return keep;
 }
 
+// Translate public API match mode enum into internal search mode.
 FingerprintSearchMode
 to_fingerprint_search_mode(ColorConfig::FingerprintMatchMode match_mode)
 {

@@ -3908,6 +3908,13 @@ is provided for minimal color support.
 ..
   TODO: The documentation for this class is incomplete.
 
+To load a specific config (and optionally override its working directory):
+
+.. code-block:: python
+
+    colorconfig = oiio.ColorConfig(filename="show.ocio",
+                                   workingdir="/path/to/wd")
+
 .. py:method:: resolve (name: str) -> str
 
     Resolve a color space name, alias, role, or known universal name to a
@@ -4136,6 +4143,11 @@ is provided for minimal color support.
         working_dir = colorconfig.getWorkingDir()
 
     This function was added in OpenImageIO 3.1.
+
+.. py:method:: getDebugInfo () -> dict[str, str | float]
+
+    Return debug timing/setup information for this ``ColorConfig`` instance.
+    Keys ending in ``_ms`` are returned as floats; other values are strings.
 
 To set a working directory for a color config, pass it when constructing
 ``ColorConfig``:

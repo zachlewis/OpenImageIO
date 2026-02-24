@@ -68,11 +68,9 @@ struct ColorSpaceFingerprints {
 // by_name is a fast lookup for a single colorspace fingerprint, while
 // fingerprints.vec supports full scans for reverse matching.
 struct FingerprintCacheEntry {
-    std::string cache_id;
     ColorSpaceFingerprints fingerprints;
     std::unordered_map<std::string, Fingerprint> by_name;
-    double seconds             = 0.0;
-    bool test_vals_initialized = false;
+    double seconds = 0.0;
 };
 
 using FingerprintCacheMap
@@ -111,6 +109,16 @@ namespace {
 static const int n_test_colors = 5;
 static const Imath::C3f test_colors[n_test_colors]
     = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 1, 1, 1 }, { 0.5, 0.5, 0.5 } };
+
+// Shared tolerance for fingerprint comparisons.
+static constexpr float kFingerprintAbsTolerance = 5e-3f;
+
+// Alias candidates used to discover a scene-referred interchange colorspace.
+static constexpr std::array<const char*, 10> kInterchangeAliasCandidates
+    = { "aces2065-1",        "aces 2065-1", "aces20651",
+        "aces - aces2065-1", "ap0ln",       "ap0",
+        "lin_ap0_scene",     "lin_ap0",     "linear - aces ap0",
+        "linear - ap0" };
 }  // namespace
 
 
@@ -309,7 +317,6 @@ class ColorConfig::Impl {
 public:
     OCIO::ConstConfigRcPtr config_;
     OCIO::ConstConfigRcPtr builtinconfig_;
-    OCIO::ConstConfigRcPtr interopconfig_;
 
 private:
     // Compact bootstrap metadata that captures whether interop features are
@@ -319,40 +326,15 @@ private:
         bool is_interoperable = false;
         std::string interchange_colorspace;
     };
-    // Private backend seam that isolates interop/fingerprint mechanics from
-    // ColorConfig::Impl orchestration. This keeps OIIO behavior stable while
-    // making it easier to swap in OCIO-provided helpers later.
-    class ColorInteropBackend {
-    public:
-        virtual ~ColorInteropBackend()                        = default;
-        virtual void reset()                                  = 0;
-        virtual double runtime_fingerprint_compute_ms() const = 0;
-        virtual InteropState bootstrap(const OCIO::ConstConfigRcPtr& config,
-                                       const OCIO::ConstConfigRcPtr& interop,
-                                       string_view configname,
-                                       bool disable_builtin_configs)
-            = 0;
-        virtual std::vector<float>
-        get_colorspace_fingerprint(const OCIO::ConstConfigRcPtr& config,
-                                   string_view colorspace,
-                                   const OCIO::ConstContextRcPtr& context,
-                                   const InteropState& state)
-            = 0;
-        virtual std::vector<std::string>
-        find_matches(const OCIO::ConstConfigRcPtr& config,
-                     const std::vector<float>& fingerprint,
-                     ColorConfig::FingerprintMatchMode match_mode,
-                     bool exhaustive, const OCIO::ConstContextRcPtr& context,
-                     const InteropState& state)
-            = 0;
-        virtual FastColorSpaceMatcher&
-        get_interop_matcher(const OCIO::ConstConfigRcPtr& interop_config)
-            = 0;
-        virtual FingerprintRuntime
-        fingerprint_runtime(const InteropState& state)
-            = 0;
+    // Runtime interop/fingerprinting state, kept separate from generic
+    // ColorConfig inventory/classification state.
+    struct InteropRuntime {
+        OCIO::ConstConfigRcPtr interop_config;
+        mutable std::atomic<uint64_t> interopconfig_init_ns { 0 };
+        mutable std::atomic<uint64_t> bootstrap_config_ns { 0 };
+        mutable std::vector<std::string> fingerprinted_colorspaces;
+        InteropState state;
     };
-    class LocalColorInteropBackend;
 
     std::vector<CSInfo> colorspaces;
     std::string scene_linear_alias;  // Alias for a scene-linear color space
@@ -379,7 +361,19 @@ private:
     bool m_config_is_built_in = false;
     mutable std::vector<std::string> m_simple_color_spaces_cache;
     mutable bool m_simple_color_spaces_cached = false;
-    mutable std::unique_ptr<ColorInteropBackend> m_interop_backend;
+    InteropRuntime m_interop;
+    // Interop lock hierarchy (to avoid ABBA deadlocks):
+    //   1) m_interop_matcher_mutex
+    //   2) m_fingerprint_cache_mutex
+    // Do not acquire m_mutex while holding either interop mutex.
+    //
+    // Shared fingerprint cache for all config+context queries.
+    mutable std::mutex m_fingerprint_cache_mutex;
+    mutable FingerprintCacheMap m_fingerprint_cache;
+    // Lazy matcher built from the interop identities config and reused across
+    // equality/interop lookups.
+    mutable std::unique_ptr<FastColorSpaceMatcher> m_interop_matcher;
+    mutable std::mutex m_interop_matcher_mutex;
     mutable std::atomic<bool> m_equality_reverse_cache_enabled { true };
     mutable std::atomic<uint64_t> m_init_total_ns { 0 };
     mutable std::atomic<uint64_t> m_inventory_ns { 0 };
@@ -389,10 +383,6 @@ private:
     mutable std::atomic<uint64_t> m_get_simple_color_spaces_ns { 0 };
     mutable std::atomic<uint64_t> m_identify_builtin_equivalents_ns { 0 };
     mutable std::atomic<uint64_t> m_ocio_load_config_ns { 0 };
-    mutable std::atomic<uint64_t> m_interopconfig_init_ns { 0 };
-    mutable std::atomic<uint64_t> m_bootstrap_config_ns { 0 };
-    mutable std::vector<std::string> m_fingerprinted_colorspaces;
-    InteropState m_interop_state;
 
 public:
     Impl(ColorConfig* self)
@@ -436,9 +426,19 @@ public:
     std::string get_color_interop_id(
         string_view colorspace, bool strict,
         const std::map<std::string, std::string>& context) const;
-    FastColorSpaceMatcher& get_interop_matcher() const;
-    ColorInteropBackend& interop_backend() const;
     void bootstrap_config();
+    void interop_bootstrap();
+    FastColorSpaceMatcher& interop_matcher() const;
+    std::vector<float> interop_get_colorspace_fingerprint(
+        string_view colorspace, const OCIO::ConstContextRcPtr& context) const;
+    std::vector<std::string>
+    interop_find_matches(const std::vector<float>& fingerprint,
+                         ColorConfig::FingerprintMatchMode match_mode,
+                         bool exhaustive,
+                         const OCIO::ConstContextRcPtr& context) const;
+    void interop_reset();
+    double interop_fingerprint_compute_ms() const;
+    FingerprintRuntime interop_fingerprint_runtime() const;
     std::string context_cache_id(const OCIO::ConstContextRcPtr& context) const
     {
         const char* id = context ? context->getCacheID() : nullptr;
@@ -472,15 +472,12 @@ public:
         const auto ocio_load_config_ms = ns_to_ms(
             m_ocio_load_config_ns.load(std::memory_order_relaxed));
         const auto interopconfig_init_ms = ns_to_ms(
-            m_interopconfig_init_ns.load(std::memory_order_relaxed));
+            m_interop.interopconfig_init_ns.load(std::memory_order_relaxed));
         const auto bootstrap_config_ms = ns_to_ms(
-            m_bootstrap_config_ns.load(std::memory_order_relaxed));
-        const auto oiio_overhead_ms = std::max(0.0,
-                                               total_ms - ocio_load_config_ms);
-        const double fingerprint_compute_ms
-            = m_interop_backend
-                  ? m_interop_backend->runtime_fingerprint_compute_ms()
-                  : 0.0;
+            m_interop.bootstrap_config_ns.load(std::memory_order_relaxed));
+        const auto oiio_overhead_ms         = std::max(0.0,
+                                                       total_ms - ocio_load_config_ms);
+        const double fingerprint_compute_ms = interop_fingerprint_compute_ms();
 
         return {
             { "init.total_ms", Strutil::fmt::format("{:.3f}", total_ms) },
@@ -505,13 +502,14 @@ public:
             { "init.bootstrap_config_ms",
               Strutil::fmt::format("{:.3f}", bootstrap_config_ms) },
             { "interop.is_interoperable",
-              m_interop_state.is_interoperable ? "true" : "false" },
+              m_interop.state.is_interoperable ? "true" : "false" },
             { "interop.interchange_space",
-              m_interop_state.interchange_colorspace },
+              m_interop.state.interchange_colorspace },
             { "runtime.fingerprint_compute_ms",
               Strutil::fmt::format("{:.3f}", fingerprint_compute_ms) },
             { "runtime.fingerprinted_colorspace_count",
-              Strutil::fmt::format("{}", m_fingerprinted_colorspaces.size()) },
+              Strutil::fmt::format("{}",
+                                   m_interop.fingerprinted_colorspaces.size()) },
             { "config.configname", configname() },
         };
     }
@@ -627,6 +625,10 @@ public:
 
     const std::string& configname() const { return m_configname; }
     void configname(string_view name) { m_configname = name; }
+    OCIO::ConstConfigRcPtr interopconfig() const
+    {
+        return m_interop.interop_config;
+    }
 
     OCIO::ConstCPUProcessorRcPtr
     get_to_builtin_cpu_proc(const char* my_from, const char* builtin_to) const;
@@ -644,6 +646,12 @@ private:
     // populated for context-sensitive configs, and will be shared across all
     // threads using the same config+context.
     void initialize_equality_id_map() const;
+    void build_equality_maps(
+        const OCIO::ConstContextRcPtr& ctx, bool exhaustive,
+        bool key_by_resolved_name,
+        tsl::robin_map<std::string, std::string>& csToEqualityId,
+        tsl::robin_map<std::string, std::string>* equalityIdToCs) const;
+    FingerprintRuntime make_fingerprint_runtime() const;
 
     // Return the CSInfo flags for the given color space name
     int flags(string_view name)
@@ -722,42 +730,6 @@ private:
                                 cspan<Imath::C3f> result_colors) const;
     const char* IdentifyBuiltinColorSpace(const char* name) const;
 };
-
-
-class ColorConfig::Impl::LocalColorInteropBackend final
-    : public ColorConfig::Impl::ColorInteropBackend {
-public:
-    void reset() override;
-    double runtime_fingerprint_compute_ms() const override;
-    InteropState bootstrap(const OCIO::ConstConfigRcPtr& config,
-                           const OCIO::ConstConfigRcPtr& interop,
-                           string_view configname,
-                           bool disable_builtin_configs) override;
-    std::vector<float>
-    get_colorspace_fingerprint(const OCIO::ConstConfigRcPtr& config,
-                               string_view colorspace,
-                               const OCIO::ConstContextRcPtr& context,
-                               const InteropState& state) override;
-    std::vector<std::string>
-    find_matches(const OCIO::ConstConfigRcPtr& config,
-                 const std::vector<float>& fingerprint,
-                 ColorConfig::FingerprintMatchMode match_mode, bool exhaustive,
-                 const OCIO::ConstContextRcPtr& context,
-                 const InteropState& state) override;
-    FastColorSpaceMatcher&
-    get_interop_matcher(const OCIO::ConstConfigRcPtr& interop_config) override;
-    FingerprintRuntime fingerprint_runtime(const InteropState& state) override;
-
-private:
-    // Shared fingerprint cache for all config+context queries in this backend.
-    mutable std::mutex m_fingerprint_cache_mutex;
-    mutable FingerprintCacheMap m_fingerprint_cache;
-    // Lazy matcher built from the interop identities config and reused across
-    // equality/interop lookups.
-    mutable std::unique_ptr<FastColorSpaceMatcher> m_interop_matcher;
-    mutable std::mutex m_interop_matcher_mutex;
-};
-
 
 
 // ColorConfig utility to take inventory of the color spaces available.
@@ -1213,7 +1185,8 @@ ColorConfig::Impl::IdentifyBuiltinColorSpace(const char* name) const
     // If we could could not identify a space with OIIO's methods,
     // defer to OCIO's. It can't hurt to try.
     try {
-        return OCIO::Config::IdentifyBuiltinColorSpace(config_, interopconfig_,
+        return OCIO::Config::IdentifyBuiltinColorSpace(config_,
+                                                       m_interop.interop_config,
                                                        name);
     } catch (...) {
         return nullptr;
@@ -1225,15 +1198,13 @@ ColorConfig::Impl::IdentifyBuiltinColorSpace(const char* name) const
 void
 ColorConfig::Impl::bootstrap_config()
 {
-    ScopedNsAccumulator phase_time(m_bootstrap_config_ns);
+    ScopedNsAccumulator phase_time(m_interop.bootstrap_config_ns);
     // Primary path: discover an interchange colorspace from existing config
     // roles/names/aliases without mutating the config.
-    m_interop_state = interop_backend().bootstrap(config_, interopconfig_,
-                                                  configname(),
-                                                  disable_builtin_configs);
-    if (m_interop_state.is_interoperable) {
+    interop_bootstrap();
+    if (m_interop.state.is_interoperable) {
         DBG("bootstrap_config: using interchange colorspace {}\n",
-            m_interop_state.interchange_colorspace);
+            m_interop.state.interchange_colorspace);
         return;
     }
 
@@ -1275,13 +1246,10 @@ ColorConfig::Impl::bootstrap_config()
                 clear_colorproc_cache();
                 // Re-bootstrap from the updated config instead of manually
                 // forcing state fields, so discovery behavior stays unified.
-                m_interop_state
-                    = interop_backend().bootstrap(config_, interopconfig_,
-                                                  configname(),
-                                                  disable_builtin_configs);
-                if (m_interop_state.is_interoperable) {
+                interop_bootstrap();
+                if (m_interop.state.is_interoperable) {
                     DBG("bootstrap_config: synthesized interchange colorspace {}\n",
-                        m_interop_state.interchange_colorspace);
+                        m_interop.state.interchange_colorspace);
                     return;
                 }
             }
@@ -1325,9 +1293,9 @@ ColorConfig::Impl::init(string_view filename, string_view workingdir)
     m_get_simple_color_spaces_ns.store(0, std::memory_order_relaxed);
     m_identify_builtin_equivalents_ns.store(0, std::memory_order_relaxed);
     m_ocio_load_config_ns.store(0, std::memory_order_relaxed);
-    m_interopconfig_init_ns.store(0, std::memory_order_relaxed);
-    m_bootstrap_config_ns.store(0, std::memory_order_relaxed);
-    m_interop_state = {};
+    m_interop.interopconfig_init_ns.store(0, std::memory_order_relaxed);
+    m_interop.bootstrap_config_ns.store(0, std::memory_order_relaxed);
+    m_interop.state = {};
 
     m_equality_reverse_cache_enabled.store(!disable_equality_reverse_cache);
 
@@ -1342,9 +1310,9 @@ ColorConfig::Impl::init(string_view filename, string_view workingdir)
 
     // create builtin interop identities config
     {
-        ScopedNsAccumulator interop_init_time(m_interopconfig_init_ns);
+        ScopedNsAccumulator interop_init_time(m_interop.interopconfig_init_ns);
         try {
-            interopconfig_ = build_interop_identities_config();
+            m_interop.interop_config = build_interop_identities_config();
         } catch (OCIO::Exception& e) {
             error("Error making OCIO interop identities config: {}", e.what());
         }
@@ -1444,16 +1412,15 @@ ColorConfig::Impl::init(string_view filename, string_view workingdir)
         // Simple colorspaces are prefiltered to avoid expensive transforms.
         m_simple_color_spaces_cache.clear();
         m_simple_color_spaces_cached = false;
-        // Interop backend owns fingerprint/matcher caches; clear them when
-        // config identity changes so cache entries are not reused across
-        // different configs.
-        interop_backend().reset();
+        // Clear interop fingerprint/matcher caches when config identity
+        // changes so cache entries are not reused across different configs.
+        interop_reset();
     }
 
     inventory();
     // NOTE: inventory already does classify_by_name
 
-    m_fingerprinted_colorspaces = getSimpleColorSpaces();
+    m_interop.fingerprinted_colorspaces = getSimpleColorSpaces();
 
     // Warm the default-context equality-id maps during init.
     initialize_equality_id_map();
@@ -2122,19 +2089,21 @@ std::vector<std::string>
 ColorConfig::Impl::get_builtin_interop_ids() const
 {
     std::vector<std::string> ids;
-    if (interopconfig_) {
+    if (m_interop.interop_config) {
         const auto refspace   = OCIO::SEARCH_REFERENCE_SPACE_ALL;
         const auto visibility = OCIO::COLORSPACE_ACTIVE;
         for (int i = 0,
-                 e = interopconfig_->getNumColorSpaces(refspace, visibility);
+                 e = m_interop.interop_config->getNumColorSpaces(refspace,
+                                                                 visibility);
              i < e; ++i) {
             const char* name
-                = interopconfig_->getColorSpaceNameByIndex(refspace, visibility,
-                                                           i);
+                = m_interop.interop_config->getColorSpaceNameByIndex(refspace,
+                                                                     visibility,
+                                                                     i);
             if (!(name && *name))
                 continue;
 #if OCIO_VERSION_HEX >= MAKE_OCIO_VERSION_HEX(2, 5, 0)
-            auto cs = interopconfig_->getColorSpace(name);
+            auto cs = m_interop.interop_config->getColorSpace(name);
             if (!cs)
                 continue;
             const char* interop = cs->getInteropID();
@@ -2172,9 +2141,10 @@ ColorConfig::Impl::resolve(string_view name) const
     if (cs)
         return cs->getName();
 
-    const auto interop_cs = (m_interop_state.is_interoperable && interopconfig_)
-                                ? interopconfig_->getColorSpace(namestr)
-                                : nullptr;
+    const auto interop_cs
+        = (m_interop.state.is_interoperable && m_interop.interop_config)
+              ? m_interop.interop_config->getColorSpace(namestr)
+              : nullptr;
     if (interop_cs) {
         // OCIO did not know this name directly. If this token is a known
         // interop id, use the equality-id reverse map.
@@ -2460,7 +2430,7 @@ ColorConfig::createColorProcessor(ustring inputColorSpace,
 
         if (!cs_in) {
             input_in_current_config = false;
-            if (getImpl()->interopconfig_->getColorSpace(
+            if (getImpl()->interopconfig()->getColorSpace(
                     c_str(inputColorSpace))) {
                 // DBG("Input color space '{}' found in interop config\n",
                 //                inputColorSpace);
@@ -2470,7 +2440,7 @@ ColorConfig::createColorProcessor(ustring inputColorSpace,
         auto cs_out = config->getColorSpace(c_str(outputColorSpace));
         if (!cs_out) {
             output_in_current_config = false;
-            if (getImpl()->interopconfig_->getColorSpace(
+            if (getImpl()->interopconfig()->getColorSpace(
                     c_str(outputColorSpace))) {
                 // DBG("Output color space '{}' found in interop config\n",
                 //                outputColorSpace);
@@ -2483,7 +2453,7 @@ ColorConfig::createColorProcessor(ustring inputColorSpace,
                           || !output_in_current_config);
 
         if (use_interop) {
-            auto interop_config = getImpl()->interopconfig_;
+            auto interop_config = getImpl()->interopconfig();
             auto src_config     = config;
             auto dst_config     = config;
             if (input_matches_builtin_interop_id)
@@ -2731,7 +2701,7 @@ ColorConfig::createDisplayTransform(ustring display, ustring view,
 
         try {
             getImpl()->clear_error();
-            auto interop_config  = getImpl()->interopconfig_;
+            auto interop_config  = getImpl()->interopconfig();
             auto interop_context = interop_config->getCurrentContext();
             interop_csc          = OCIO::Config::GetProcessorFromConfigs(
                               interop_context, interop_config,
@@ -3151,7 +3121,7 @@ ColorConfig::get_color_interop_id(string_view colorspace, bool strict) const
         return colorspace;
 
     auto config        = getImpl()->config_;
-    auto interopconfig = getImpl()->interopconfig_;
+    auto interopconfig = getImpl()->interopconfig();
     auto cs = config ? config->getColorSpace(c_str(colorspace)) : nullptr;
     if (!cs && config) {
         // Resolve roles/aliases to a canonical color space name.
@@ -3403,11 +3373,6 @@ private:
     FingerprintCacheMap* m_cache = nullptr;
     std::mutex* m_cache_mutex    = nullptr;
 };
-
-std::string
-findEquivalentColorspace(const ColorSpaceFingerprints& fingerprints,
-                         const ConstConfigRcPtr& inputConfig,
-                         const ConstColorSpaceRcPtr& inputCS);
 
 std::vector<std::string>
 get_simple_color_spaces(const ConstConfigRcPtr& config);
@@ -3714,7 +3679,6 @@ get_fingerprint_cache_entry(const ConstConfigRcPtr& config,
         return entry;
 
     const std::string cacheID = fingerprint_cache_key(config, context);
-    entry.cache_id            = cacheID;
     {
         std::lock_guard<std::mutex> lock(runtime.cache_mutex);
         auto it = runtime.cache.find(cacheID);
@@ -3723,12 +3687,8 @@ get_fingerprint_cache_entry(const ConstConfigRcPtr& config,
     }
 
     Timer timer;
-    entry.cache_id        = cacheID;
     ConstContextRcPtr ctx = context ? context : config->getCurrentContext();
-    if (!entry.test_vals_initialized) {
-        initializeTestVals(entry.fingerprints, config);
-        entry.test_vals_initialized = true;
-    }
+    initializeTestVals(entry.fingerprints, config);
     initializeColorSpaceFingerprints(entry.fingerprints, entry.by_name, config,
                                      ctx, runtime.source_colorspace);
     entry.seconds += timer.lap();
@@ -3827,7 +3787,6 @@ helper_get_colorspace_fingerprint(const ConstConfigRcPtr& config,
             }
         } else {
             FingerprintCacheEntry entry;
-            entry.cache_id     = cacheID;
             entry.fingerprints = fingerprints;
             entry.by_name.emplace(fprint.csName, fprint);
             entry.fingerprints.vec.push_back(fprint);
@@ -3876,7 +3835,7 @@ find_colorspace_matches_from_fingerprint(
     if (!config || fingerprint.empty())
         return matches;
 
-    const float absTolerance = 5e-3f;
+    const float absTolerance = kFingerprintAbsTolerance;
     const size_t n           = fingerprint.size();
 
     float best_max_abs_err = std::numeric_limits<float>::max();
@@ -4050,7 +4009,7 @@ FastColorSpaceMatcher::findEquivalentColorspacesFromFingerprint(
     const std::vector<float>& inputVals, ReferenceSpaceType refSpaceType) const
 {
     std::vector<std::string> matches;
-    const float absTolerance = 5e-3f;
+    const float absTolerance = kFingerprintAbsTolerance;
     const size_t n           = inputVals.size();
     for (const auto& fp : m_base_fingerprints.vec) {
         if (fp.type != refSpaceType)
@@ -4069,70 +4028,6 @@ FastColorSpaceMatcher::findEquivalentColorspacesFromFingerprint(
             matches.emplace_back(fp.csName);
     }
     return matches;
-}
-
-// Copy-pasted from src/OpenColorIO/src/ConfigUtils.h/cpp on 1/22/2026
-// If the base config contains a color space equivalent to inputCS, return its name.
-// Return an empty string if no equivalent color space is found (within the tolerance).
-// The ref_space_type specifies the type of inputCS and determines which part of the
-// config is searched.
-//
-std::string
-findEquivalentColorspace(const ColorSpaceFingerprints& fingerprints,
-                         const ConstConfigRcPtr& inputConfig,
-                         const ConstColorSpaceRcPtr& inputCS)
-{
-    // The fingerprints must first be initialized from the base config.
-    // NB: The inputConfig/inputCS must use the same reference space as the base config.
-    // In general, this means that updateReferenceColorspace must be called on inputCS
-    // before calling this function.
-
-    // TODO: Should data spaces ever be replaced?
-    if (inputCS->isData()) {
-        return "";
-    }
-
-    // Calculate the fingerprint of inputCS from inputConfig.
-    std::vector<float> inputVals;
-    const bool skipColorSpace = calcColorSpaceFingerprint(
-        inputVals, fingerprints, inputConfig, inputCS,
-        inputConfig ? inputConfig->getCurrentContext() : nullptr, {});
-    if (skipColorSpace) {
-        return "";
-    }
-
-    // TODO: Before looping over all color spaces, check to see if there's one with the same name.
-    // TODO: Perhaps add a hash based on the transform cacheIDs and check that before trying
-    // to compare processed pixel values?
-
-    // Increased from 1e-3 to 5e-3 to allow for use of either Bradford or CAT02 adaptation.
-    const float absTolerance = 5e-3f;
-
-    // Compare to the fingerprints from the base config.
-    const size_t n = inputVals.size();
-    for (const auto& fp : fingerprints.vec) {
-        // Only compare color spaces that are using the same reference space type.
-        if (fp.type != inputCS->getReferenceSpaceType()) {
-            continue;
-        }
-
-        bool matchFound = true;
-        for (size_t i = 0; i < n; i++) {
-            // Comparison is done in the color space, not the reference space.
-            // Could be linear, gamma-corrected, or log encoding.
-            // TODO: Could adjust the comparison based on the color space encoding.
-            if (!Imath::equalWithAbsError(inputVals[i], fp.vals[i],
-                                          absTolerance)) {
-                matchFound = false;
-                continue;
-            }
-        }
-        if (matchFound) {
-            return fp.csName;
-        }
-    }
-
-    return "";
 }
 
 namespace {
@@ -4365,6 +4260,11 @@ containsBlockableTransform(const ConstConfigRcPtr& config,
 std::vector<std::string>
 get_simple_color_spaces(const ConstConfigRcPtr& config)
 {
+    // "Simple" here means spaces likely to be stable for fingerprint matching:
+    // - not data
+    // - not marked "is-unique"
+    // - not blocked by unsupported/complex transform constructs
+    // The actual transform policy lives in containsBlockableTransform().
     std::vector<std::string> simpleSpaces;
     if (!config) {
         return simpleSpaces;
@@ -4439,143 +4339,51 @@ get_simple_color_space_blockers(const ConstConfigRcPtr& config)
 // clang-format on
 
 void
-ColorConfig::Impl::LocalColorInteropBackend::reset()
+ColorConfig::Impl::build_equality_maps(
+    const OCIO::ConstContextRcPtr& ctx, bool exhaustive,
+    bool key_by_resolved_name,
+    tsl::robin_map<std::string, std::string>& csToEqualityId,
+    tsl::robin_map<std::string, std::string>* equalityIdToCs) const
 {
-    // Backend cache lifetime is tied to ColorConfig::Impl::init/reset.
-    std::lock_guard<std::mutex> lock(m_fingerprint_cache_mutex);
-    m_fingerprint_cache.clear();
-    std::lock_guard<std::mutex> matcher_lock(m_interop_matcher_mutex);
-    m_interop_matcher.reset();
-}
+    if (!config_ || !ctx)
+        return;
+    if (!m_interop.state.is_interoperable || !m_interop.interop_config)
+        return;
 
-double
-ColorConfig::Impl::LocalColorInteropBackend::runtime_fingerprint_compute_ms()
-    const
-{
-    double fingerprint_compute_ms = 0.0;
-    std::lock_guard<std::mutex> lock(m_fingerprint_cache_mutex);
-    for (const auto& kv : m_fingerprint_cache) {
-        fingerprint_compute_ms += kv.second.seconds * 1000.0;
-    }
-    return fingerprint_compute_ms;
-}
+    auto& matcher = interop_matcher();
 
-ColorConfig::Impl::InteropState
-ColorConfig::Impl::LocalColorInteropBackend::bootstrap(
-    const OCIO::ConstConfigRcPtr& config, const OCIO::ConstConfigRcPtr& interop,
-    string_view configname, bool disable_builtin_configs)
-{
-    InteropState state;
-    if (!config || disable_builtin_configs)
-        return state;
-
-    auto set_interchange = [&state](const char* cs_name) {
-        if (cs_name && *cs_name) {
-            state.interchange_colorspace = cs_name;
-            state.is_interoperable       = true;
-            return true;
-        }
-        return false;
-    };
-
-    // Preferred explicit canonical/role naming.
-    if (set_interchange(config->getCanonicalName(OCIO::ROLE_INTERCHANGE_SCENE)))
-        return state;
-
-    static const std::array<const char*, 10> aliases
-        = { "aces2065-1",        "aces 2065-1", "aces20651",
-            "aces - aces2065-1", "ap0ln",       "ap0",
-            "lin_ap0_scene",     "lin_ap0",     "linear - aces ap0",
-            "linear - ap0" };
-    for (const char* alias : aliases) {
-        if (set_interchange(config->getCanonicalName(alias)))
-            return state;
+    std::vector<std::string> color_spaces_all;
+    const std::vector<std::string>* color_spaces = nullptr;
+    if (!exhaustive) {
+        color_spaces = &getSimpleColorSpaces();
+    } else {
+        color_spaces_all = m_self->getColorSpaceNamesFiltered(true, true, true,
+                                                              true, false);
+        color_spaces     = &color_spaces_all;
     }
 
-    // Heuristic fallback via OCIO builtin-identification.
-    if (interop) {
-        try {
-            if (set_interchange(OCIO::Config::IdentifyBuiltinColorSpace(
-                    config, interop, OCIO::ROLE_INTERCHANGE_SCENE))) {
-                return state;
-            }
-        } catch (...) {
-        }
+    const bool build_reverse = equalityIdToCs
+                               && m_equality_reverse_cache_enabled.load();
+    for (const auto& name : *color_spaces) {
+        auto resolved_name            = ctx->resolveStringVar(name.c_str());
+        OCIO::ConstColorSpaceRcPtr cs = config_->getColorSpace(resolved_name);
+        if (!cs || cs->isData())
+            continue;
+        if (cs->hasCategory("is-unique"))
+            continue;
+
+        std::string interop = matcher.findEquivalentColorspace(
+            config_, resolved_name, ctx,
+            m_interop.state.interchange_colorspace);
+        if (interop.empty())
+            continue;
+
+        const std::string key_name = key_by_resolved_name ? resolved_name
+                                                          : std::string(name);
+        csToEqualityId.emplace(key_name, interop);
+        if (build_reverse)
+            equalityIdToCs->emplace(interop, key_name);
     }
-
-    // Final fallback for builtin config naming conventions.
-    if (Strutil::iequals(configname, "ocio://default")
-        && set_interchange(OCIO::ROLE_INTERCHANGE_SCENE)) {
-        return state;
-    }
-    return state;
-}
-
-std::vector<float>
-ColorConfig::Impl::LocalColorInteropBackend::get_colorspace_fingerprint(
-    const OCIO::ConstConfigRcPtr& config, string_view colorspace,
-    const OCIO::ConstContextRcPtr& context, const InteropState& state)
-{
-    return helper_get_colorspace_fingerprint(
-        config, colorspace, context,
-        FingerprintRuntime { m_fingerprint_cache, m_fingerprint_cache_mutex,
-                             state.is_interoperable
-                                 ? state.interchange_colorspace
-                                 : std::string() });
-}
-
-std::vector<std::string>
-ColorConfig::Impl::LocalColorInteropBackend::find_matches(
-    const OCIO::ConstConfigRcPtr& config, const std::vector<float>& fingerprint,
-    ColorConfig::FingerprintMatchMode match_mode, bool exhaustive,
-    const OCIO::ConstContextRcPtr& context, const InteropState& state)
-{
-    // Map public API match mode to internal helper mode in one place.
-    FingerprintSearchMode mode = FingerprintSearchMode::First;
-    switch (match_mode) {
-    case ColorConfig::FingerprintMatchMode::First:
-        mode = FingerprintSearchMode::First;
-        break;
-    case ColorConfig::FingerprintMatchMode::Best:
-        mode = FingerprintSearchMode::Best;
-        break;
-    case ColorConfig::FingerprintMatchMode::All:
-        mode = FingerprintSearchMode::All;
-        break;
-    }
-    return find_colorspace_matches_from_fingerprint(
-        config, cspan<const float>(fingerprint), false,
-        OCIO::REFERENCE_SPACE_SCENE, mode, exhaustive, context,
-        FingerprintRuntime { m_fingerprint_cache, m_fingerprint_cache_mutex,
-                             state.is_interoperable
-                                 ? state.interchange_colorspace
-                                 : std::string() });
-}
-
-FastColorSpaceMatcher&
-ColorConfig::Impl::LocalColorInteropBackend::get_interop_matcher(
-    const OCIO::ConstConfigRcPtr& interop_config)
-{
-    // Matcher construction is expensive; initialize lazily and reuse.
-    if (!m_interop_matcher) {
-        std::lock_guard<std::mutex> lock(m_interop_matcher_mutex);
-        if (!m_interop_matcher) {
-            m_interop_matcher.reset(
-                new FastColorSpaceMatcher(interop_config, m_fingerprint_cache,
-                                          m_fingerprint_cache_mutex));
-        }
-    }
-    return *m_interop_matcher;
-}
-
-FingerprintRuntime
-ColorConfig::Impl::LocalColorInteropBackend::fingerprint_runtime(
-    const InteropState& state)
-{
-    return FingerprintRuntime { m_fingerprint_cache, m_fingerprint_cache_mutex,
-                                state.is_interoperable
-                                    ? state.interchange_colorspace
-                                    : std::string() };
 }
 
 void
@@ -4601,26 +4409,9 @@ ColorConfig::Impl::initialize_equality_id_map() const
     // back to config spaces.
     // Example: key="lin_rec709_scene", value="My Linear sRGB color space".
 
-    if (interopconfig_ && config_ && m_interop_state.is_interoperable) {
-        auto& matcher            = get_interop_matcher();
-        const auto& simpleSpaces = getSimpleColorSpaces();
-        for (const auto& name : simpleSpaces) {
-            auto name_cs                  = ctx->resolveStringVar(name.c_str());
-            OCIO::ConstColorSpaceRcPtr cs = config_->getColorSpace(name_cs);
-            if (!cs || cs->isData())
-                continue;
-            if (cs->hasCategory("is-unique"))
-                continue;
-
-            std::string interop = matcher.findEquivalentColorspace(
-                config_, name_cs, ctx, m_interop_state.interchange_colorspace);
-            if (!interop.empty()) {
-                csToEqualityId.emplace(name_cs, interop);
-                if (m_equality_reverse_cache_enabled.load())
-                    equalityIdToCs.emplace(interop, name_cs);
-            }
-        }
-    }
+    build_equality_maps(ctx, /*exhaustive=*/false,
+                        /*key_by_resolved_name=*/true, csToEqualityId,
+                        &equalityIdToCs);
 
     spin_rw_write_lock lock(m_mutex);
     m_equality_id_to_cs_by_ctx[key] = std::move(equalityIdToCs);
@@ -4684,36 +4475,12 @@ ColorConfig::Impl::get_equality_ids(
         }
     }
 
-    if (!m_interop_state.is_interoperable || !interopconfig_)
-        return result;
-
-    auto& matcher = get_interop_matcher();
+    tsl::robin_map<std::string, std::string> cs_to_interop;
     tsl::robin_map<std::string, std::string> interop_to_cs;
-
-    std::vector<std::string> color_spaces_all;
-    const std::vector<std::string>* color_spaces = nullptr;
-    if (!exhaustive) {
-        color_spaces = &getSimpleColorSpaces();
-    } else {
-        color_spaces_all = m_self->getColorSpaceNamesFiltered(true, true, true,
-                                                              true, false);
-        color_spaces     = &color_spaces_all;
-    }
-
-    for (const auto& name : *color_spaces) {
-        OCIO::ConstColorSpaceRcPtr cs = config_->getColorSpace(name.c_str());
-        if (!cs || cs->isData())
-            continue;
-        if (cs->hasCategory("is-unique"))
-            continue;
-
-        std::string interop = matcher.findEquivalentColorspace(
-            config_, name, ctx, m_interop_state.interchange_colorspace);
-        if (!interop.empty()) {
-            result.emplace(name, interop);
-            interop_to_cs.emplace(interop, name);
-        }
-    }
+    build_equality_maps(ctx, exhaustive, /*key_by_resolved_name=*/false,
+                        cs_to_interop, exhaustive ? nullptr : &interop_to_cs);
+    for (const auto& kv : cs_to_interop)
+        result.emplace(kv.first, kv.second);
 
     if (!exhaustive) {
         spin_rw_write_lock lock(m_mutex);
@@ -4795,10 +4562,7 @@ ColorConfig::Impl::get_colorspace_fingerprint(
     if (resolved.empty())
         return {};
 
-    // Delegated to backend so the implementation can change without touching
-    // higher-level ColorConfig orchestration.
-    return interop_backend().get_colorspace_fingerprint(config_, resolved, ctx,
-                                                        m_interop_state);
+    return interop_get_colorspace_fingerprint(resolved, ctx);
 }
 
 std::vector<std::string>
@@ -4815,9 +4579,7 @@ ColorConfig::Impl::find_matches(
 
     OCIO::ConstContextRcPtr ctx = make_context_with_overrides(config_, context);
 
-    // Backend owns matching policy and cache/runtime details.
-    return interop_backend().find_matches(config_, fingerprint, match_mode,
-                                          exhaustive, ctx, m_interop_state);
+    return interop_find_matches(fingerprint, match_mode, exhaustive, ctx);
 }
 
 std::vector<std::pair<std::string, std::string>>
@@ -4855,10 +4617,9 @@ ColorConfig::Impl::get_intersection(
             display_referred ? OCIO::REFERENCE_SPACE_DISPLAY
                              : OCIO::REFERENCE_SPACE_SCENE,
             other_ctx,
-            // Use the other config's backend runtime so matching obeys that
-            // config's own bootstrap/interoperability state.
-            other_impl->interop_backend().fingerprint_runtime(
-                other_impl->m_interop_state));
+            // Use the other config's runtime so matching obeys that config's
+            // own bootstrap/interoperability state.
+            other_impl->interop_fingerprint_runtime());
         if (!match.empty())
             result.emplace_back(name, match);
     }
@@ -4879,7 +4640,7 @@ ColorConfig::Impl::get_color_interop_id(
         return std::string(interop);
     }
 
-    if (!interopconfig_ || !m_interop_state.is_interoperable)
+    if (!m_interop.interop_config || !m_interop.state.is_interoperable)
         return "";
 
     if (colorspace.empty())
@@ -4907,17 +4668,19 @@ ColorConfig::Impl::get_color_interop_id(
     // Check to see if this colorspace's name or any of its aliases match
     // a known interop ID in the interop config.
     if (cs) {
-        auto interop_cs = interopconfig_->getColorSpace(cs->getName());
+        auto interop_cs = m_interop.interop_config->getColorSpace(
+            cs->getName());
         if (interop_cs)
             return interop_cs->getName();
         for (size_t i = 0, e = cs->getNumAliases(); i < e; ++i) {
             string_view alias = cs->getAlias(static_cast<int>(i));
-            interop_cs        = interopconfig_->getColorSpace(c_str(alias));
+            interop_cs = m_interop.interop_config->getColorSpace(c_str(alias));
             if (interop_cs)
                 return interop_cs->getName();
         }
     }
-    auto interop_cs = interopconfig_->getColorSpace(colorspace_str.c_str());
+    auto interop_cs = m_interop.interop_config->getColorSpace(
+        colorspace_str.c_str());
     if (interop_cs)
         return interop_cs->getName();
 
@@ -4936,18 +4699,131 @@ ColorConfig::Impl::get_color_interop_id(
     return "";
 }
 
-FastColorSpaceMatcher&
-ColorConfig::Impl::get_interop_matcher() const
+void
+ColorConfig::Impl::interop_bootstrap()
 {
-    return interop_backend().get_interop_matcher(interopconfig_);
+    m_interop.state = {};
+    if (!config_ || disable_builtin_configs)
+        return;
+
+    auto set_interchange = [this](const char* cs_name) {
+        if (cs_name && *cs_name) {
+            m_interop.state.interchange_colorspace = cs_name;
+            m_interop.state.is_interoperable       = true;
+            return true;
+        }
+        return false;
+    };
+
+    // Preferred explicit canonical/role naming.
+    if (set_interchange(config_->getCanonicalName(OCIO::ROLE_INTERCHANGE_SCENE)))
+        return;
+
+    for (const char* alias : kInterchangeAliasCandidates) {
+        if (set_interchange(config_->getCanonicalName(alias)))
+            return;
+    }
+
+    // Heuristic fallback via OCIO builtin-identification.
+    if (m_interop.interop_config) {
+        try {
+            if (set_interchange(OCIO::Config::IdentifyBuiltinColorSpace(
+                    config_, m_interop.interop_config,
+                    OCIO::ROLE_INTERCHANGE_SCENE))) {
+                return;
+            }
+        } catch (...) {
+        }
+    }
+
+    // Final fallback for builtin config naming conventions.
+    if (Strutil::iequals(configname(), "ocio://default"))
+        (void)set_interchange(OCIO::ROLE_INTERCHANGE_SCENE);
 }
 
-ColorConfig::Impl::ColorInteropBackend&
-ColorConfig::Impl::interop_backend() const
+FingerprintRuntime
+ColorConfig::Impl::make_fingerprint_runtime() const
 {
-    if (!m_interop_backend)
-        m_interop_backend.reset(new LocalColorInteropBackend());
-    return *m_interop_backend;
+    return FingerprintRuntime { m_fingerprint_cache, m_fingerprint_cache_mutex,
+                                m_interop.state.is_interoperable
+                                    ? m_interop.state.interchange_colorspace
+                                    : std::string() };
+}
+
+std::vector<float>
+ColorConfig::Impl::interop_get_colorspace_fingerprint(
+    string_view colorspace, const OCIO::ConstContextRcPtr& context) const
+{
+    return helper_get_colorspace_fingerprint(config_, colorspace, context,
+                                             make_fingerprint_runtime());
+}
+
+std::vector<std::string>
+ColorConfig::Impl::interop_find_matches(
+    const std::vector<float>& fingerprint,
+    ColorConfig::FingerprintMatchMode match_mode, bool exhaustive,
+    const OCIO::ConstContextRcPtr& context) const
+{
+    FingerprintSearchMode mode = FingerprintSearchMode::First;
+    switch (match_mode) {
+    case ColorConfig::FingerprintMatchMode::First:
+        mode = FingerprintSearchMode::First;
+        break;
+    case ColorConfig::FingerprintMatchMode::Best:
+        mode = FingerprintSearchMode::Best;
+        break;
+    case ColorConfig::FingerprintMatchMode::All:
+        mode = FingerprintSearchMode::All;
+        break;
+    }
+
+    return find_colorspace_matches_from_fingerprint(
+        config_, cspan<const float>(fingerprint), false,
+        OCIO::REFERENCE_SPACE_SCENE, mode, exhaustive, context,
+        make_fingerprint_runtime());
+}
+
+void
+ColorConfig::Impl::interop_reset()
+{
+    // Cache lifetime is tied to ColorConfig::Impl::init/reset.
+    // Acquire interop locks in documented order: matcher -> cache.
+    std::lock_guard<std::mutex> matcher_lock(m_interop_matcher_mutex);
+    m_interop_matcher.reset();
+    std::lock_guard<std::mutex> cache_lock(m_fingerprint_cache_mutex);
+    m_fingerprint_cache.clear();
+}
+
+double
+ColorConfig::Impl::interop_fingerprint_compute_ms() const
+{
+    double fingerprint_compute_ms = 0.0;
+    std::lock_guard<std::mutex> lock(m_fingerprint_cache_mutex);
+    for (const auto& kv : m_fingerprint_cache) {
+        fingerprint_compute_ms += kv.second.seconds * 1000.0;
+    }
+    return fingerprint_compute_ms;
+}
+
+FingerprintRuntime
+ColorConfig::Impl::interop_fingerprint_runtime() const
+{
+    return make_fingerprint_runtime();
+}
+
+FastColorSpaceMatcher&
+ColorConfig::Impl::interop_matcher() const
+{
+    // Matcher construction is expensive; initialize lazily and reuse.
+    // Always take the lock before touching m_interop_matcher.
+    std::lock_guard<std::mutex> lock(m_interop_matcher_mutex);
+    if (!m_interop_matcher) {
+        m_interop_matcher.reset(
+            new FastColorSpaceMatcher(m_interop.interop_config,
+                                      m_fingerprint_cache,
+                                      m_fingerprint_cache_mutex));
+    }
+    return *m_interop_matcher;
 }
 
 //////////////////////////////////////////////////////////////////////////

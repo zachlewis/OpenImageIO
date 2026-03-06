@@ -11,6 +11,8 @@
 namespace PyOpenImageIO {
 
 namespace {
+    // Preserve undecodable bytes from OCIO names/metadata instead of raising,
+    // so Python callers can still inspect values losslessly.
     py::object decode_utf8_or_bytes(const std::string& s)
     {
         PyObject* obj = PyUnicode_DecodeUTF8(s.data(), s.size(),
@@ -25,6 +27,8 @@ namespace {
     std::map<std::string, std::string>
     parse_context_vars(const py::dict& context_vars)
     {
+        // Normalize Python context dict values to OCIO string overrides.
+        // None means "do not override this key".
         std::map<std::string, std::string> out;
         for (auto item : context_vars) {
             std::string key = py::cast<std::string>(item.first);

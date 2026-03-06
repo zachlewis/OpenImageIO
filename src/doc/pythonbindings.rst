@@ -3915,6 +3915,16 @@ To load a specific config (and optionally override its working directory):
     colorconfig = oiio.ColorConfig(filename="show.ocio",
                                    workingdir="/path/to/wd")
 
+.. py:method:: getColorSpaceNames () -> list[str]
+
+    Return all active color space names.
+
+.. py:method:: getColorSpaceNames (active: bool = True, inactive: bool = False, scene: bool = True, display: bool = True, simple: bool = False) -> list[str]
+
+    Return color space names filtered by activity and reference-space type.
+    If ``simple`` is True, only include color spaces that are eligible for
+    fast/simple transform matching.
+
 .. py:method:: resolve (name: str) -> str
 
     Resolve a color space name, alias, role, or known universal name to a
@@ -4144,17 +4154,24 @@ To load a specific config (and optionally override its working directory):
 
     This function was added in OpenImageIO 3.1.
 
+.. py:method:: getName () -> str
+
+    Return the OCIO config ``name`` field (equivalent to OCIO
+    ``Config.getName()``). Returns an empty string if not available.
+
+    This function was added in OpenImageIO 3.1.
+
+.. py:method:: getCacheID () -> str
+
+    Return the OCIO config cache ID for the loaded config and current context.
+    This is useful for cache invalidation and diagnostics.
+
+    This function was added in OpenImageIO 3.1.
+
 .. py:method:: getDebugInfo () -> dict[str, str | float]
 
     Return debug timing/setup information for this ``ColorConfig`` instance.
     Keys ending in ``_ms`` are returned as floats; other values are strings.
-
-To set a working directory for a color config, pass it when constructing
-``ColorConfig``:
-
-.. code-block:: python
-
-    colorconfig = oiio.ColorConfig(filename="", workingdir="/path/to/dir")
 
 
 .. _sec-pythonmiscapi:

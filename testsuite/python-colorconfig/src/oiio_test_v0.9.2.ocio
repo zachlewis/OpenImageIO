@@ -1,7 +1,7 @@
 ocio_profile_version: 2.2
 
 environment:
-  {}
+  SHOT_CAMERA_CS: acescct
 search_path: ""
 strictparsing: true
 luma: [0.2126, 0.7152, 0.0722]
@@ -35,27 +35,25 @@ file_rules:
   - !<Rule> {name: Default, colorspace: lin_rec709}
 
 viewing_rules:
-  - !<Rule> {name: video, encodings: [sdr-video, hdr-video, display-linear]}
+  - !<Rule> {name: output-referred, encodings: [sdr-video, hdr-video, display-linear]}
   - !<Rule> {name: log-or-linear, encodings: [log, scene-linear]}
 
 shared_views:
+  - !<View> {name: Raw, colorspace: Raw}
   - !<View> {name: ACES 1.0 - SDR Video, view_transform: ACES 1.0 - SDR Video, display_colorspace: <USE_DISPLAY_NAME>, rule: log-or-linear}
   - !<View> {name: Un-tone-mapped, view_transform: Un-tone-mapped, display_colorspace: <USE_DISPLAY_NAME>, rule: log-or-linear}
-  - !<View> {name: Colorimetry, view_transform: Un-tone-mapped, display_colorspace: <USE_DISPLAY_NAME>, rule: video}
+  - !<View> {name: Video (colorimetric), view_transform: Video (colorimetric), display_colorspace: <USE_DISPLAY_NAME>, rule: output-referred}
 
 displays:
   sRGB (~2.22) - Display:
-    - !<View> {name: Raw, colorspace: Raw}
-    - !<Views> [ACES 1.0 - SDR Video, Un-tone-mapped, Colorimetry]
+    - !<Views> [ACES 1.0 - SDR Video, Un-tone-mapped, Video (colorimetric), Raw]
   Gamma 2.2 Rec.709 - Display:
-    - !<View> {name: Raw, colorspace: Raw}
-    - !<Views> [ACES 1.0 - SDR Video, Un-tone-mapped, Colorimetry]
+    - !<Views> [ACES 1.0 - SDR Video, Un-tone-mapped, Video (colorimetric), Raw]
   Rec.1886 Rec.709 - Display:
-    - !<View> {name: Raw, colorspace: Raw}
-    - !<Views> [ACES 1.0 - SDR Video, Un-tone-mapped, Colorimetry]
+    - !<Views> [ACES 1.0 - SDR Video, Un-tone-mapped, Video (colorimetric), Raw]
 
 active_displays: [sRGB (~2.22) - Display, Gamma 2.2 Rec.709 - Display, Rec.1886 Rec.709 - Display]
-active_views: [ACES 1.0 - SDR Video,  Un-tone-mapped, Colorimetry, Raw]
+active_views: [ACES 1.0 - SDR Video,  Un-tone-mapped, Video (colorimetric), Raw]
 inactive_colorspaces: [CIE XYZ-D65 - Display-referred, CIE XYZ-D65 - Scene-referred, linear, rec709_tx]
 
 looks:
@@ -80,6 +78,10 @@ view_transforms:
   - !<ViewTransform>
     name: Un-tone-mapped
     from_scene_reference: !<BuiltinTransform> {style: UTILITY - ACES-AP0_to_CIE-XYZ-D65_BFD}
+
+  - !<ViewTransform>
+    name: Video (colorimetric)
+    from_scene_reference: !<MatrixTransform> {}
 
 display_colorspaces:
   - !<ColorSpace>
@@ -107,6 +109,14 @@ display_colorspaces:
     categories: [file-io]
     encoding: sdr-video
     from_display_reference: !<BuiltinTransform> {style: DISPLAY - CIE-XYZ-D65_to_REC.1886-REC.709}
+  
+  - !<ColorSpace>
+    name: Raw
+    aliases: [Utility - Raw, none]
+    isdata: true
+    categories: [file-io, texture]
+    encoding: data
+
 
 
 colorspaces:
@@ -118,10 +128,27 @@ colorspaces:
 
   - !<ColorSpace>
     name: ACEScct
-    aliases: [ACES - ACEScct, acescct_ap1]
+    aliases: [ACES - ACEScct, acescct_ap1, ocio:acescct_ap1_scene]
     categories: [file-io, working-space]
     encoding: log
     to_scene_reference: !<BuiltinTransform> {style: ACEScct_to_ACES2065-1}
+
+  - !<ColorSpace>
+    name: LogC4 AWG4
+    aliases: [logc4_awg4, ocio:arrilogc4_awg4_scene]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: ARRI_LOGC4_to_ACES2065-1}
+  
+  - !<ColorSpace>
+    name: LogC3 AWG3 EI800
+    aliases: [logc3_awg3_ei800, logc3_awg3, ocio:arrilogc3_awg3_ei800_scene]
+    encoding: log
+    to_scene_reference: !<BuiltinTransform> {style: ARRI_ALEXA-LOGC-EI800-AWG_to_ACES2065-1}
+  
+  - !<ColorSpace>
+    name: camera_log
+    encoding: log
+    to_scene_reference: !<ColorSpaceTransform> {src: $SHOT_CAMERA_CS, dst: ACES2065-1}
 
   - !<ColorSpace>
     name: ACEScg
@@ -216,12 +243,6 @@ colorspaces:
       children:
         - !<MatrixTransform> {matrix: [0.938279849239345, -0.00445144581227847, 0.0166275235564231, 0, 0.337368890823117, 0.729521566676754, -0.066890457499083, 0, 0.00117395084939056, -0.00371070640198378, 1.09159450636463, 0, 0, 0, 0, 1]}
 
-  - !<ColorSpace>
-    name: Raw
-    aliases: [Utility - Raw, none]
-    isdata: true
-    categories: [file-io, texture]
-    encoding: data
 
   - !<ColorSpace>
     name: linear

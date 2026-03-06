@@ -46,7 +46,7 @@ OIIO_NAMESPACE_3_1_BEGIN
 //      within the same OCIO reference-space type (scene or display).
 //   3) Values are cached per (config cache ID + context cache ID) so
 //      context-driven configs resolve consistently and cheaply.
-//   4) FastColorSpaceMatcher preloads fingerprints for the built-in interop
+//   4) InteropFingerprintMatcher preloads fingerprints for the built-in interop
 //      identities config and uses them to quickly map arbitrary config spaces
 //      to equivalent interop IDs.
 //
@@ -80,7 +80,7 @@ struct FingerprintRuntime {
     std::mutex& cache_mutex;
     std::string source_colorspace;
 };
-class FastColorSpaceMatcher;
+class InteropFingerprintMatcher;
 std::vector<float>
 helper_get_colorspace_fingerprint(const OCIO::ConstConfigRcPtr& config,
                                   string_view colorspace,
@@ -378,7 +378,7 @@ private:
     mutable FingerprintCacheMap m_fingerprint_cache;
     // Lazy matcher built from the interop identities config and reused across
     // equality/interop lookups.
-    mutable std::unique_ptr<FastColorSpaceMatcher> m_interop_matcher;
+    mutable std::unique_ptr<InteropFingerprintMatcher> m_interop_matcher;
     mutable std::mutex m_interop_matcher_mutex;
     mutable std::atomic<bool> m_equality_reverse_cache_enabled { true };
     mutable std::atomic<uint64_t> m_init_total_ns { 0 };
@@ -437,7 +437,7 @@ public:
     // Identify an interchange colorspace used as the fingerprint source.
     void interop_bootstrap();
     // Return (and lazily build) matcher for config -> interop comparisons.
-    FastColorSpaceMatcher& interop_matcher() const;
+    InteropFingerprintMatcher& interop_matcher() const;
     // Compute or fetch a fingerprint in this config for a resolved colorspace.
     std::vector<float> interop_get_colorspace_fingerprint(
         string_view colorspace, const OCIO::ConstContextRcPtr& context) const;
@@ -3347,9 +3347,9 @@ find_colorspace_from_fingerprint(const ConstConfigRcPtr& config,
 // Utility class for efficiently matching a color space from an input
 // config to a color space from a base config, matched by fingerprint.
 // The input config must use the same reference spaces as the base config.
-class FastColorSpaceMatcher {
+class InteropFingerprintMatcher {
 public:
-    FastColorSpaceMatcher(const ConstConfigRcPtr& baseConfig,
+    InteropFingerprintMatcher(const ConstConfigRcPtr& baseConfig,
                           FingerprintCacheMap& cache, std::mutex& cache_mutex);
 
     std::string
@@ -3884,7 +3884,7 @@ find_colorspace_matches_from_fingerprint(
     return matches;
 }
 
-FastColorSpaceMatcher::FastColorSpaceMatcher(const ConstConfigRcPtr& baseConfig,
+InteropFingerprintMatcher::InteropFingerprintMatcher(const ConstConfigRcPtr& baseConfig,
                                              FingerprintCacheMap& cache,
                                              std::mutex& cache_mutex)
     : m_cache(&cache)
@@ -3900,7 +3900,7 @@ FastColorSpaceMatcher::FastColorSpaceMatcher(const ConstConfigRcPtr& baseConfig,
 }
 
 std::string
-FastColorSpaceMatcher::findEquivalentColorspace(
+InteropFingerprintMatcher::findEquivalentColorspace(
     const ConstConfigRcPtr& inputConfig, string_view csName,
     const ConstContextRcPtr& context, string_view source_colorspace) const
 {
@@ -3910,7 +3910,7 @@ FastColorSpaceMatcher::findEquivalentColorspace(
 }
 
 std::vector<std::string>
-FastColorSpaceMatcher::findEquivalentColorspaces(
+InteropFingerprintMatcher::findEquivalentColorspaces(
     const ConstConfigRcPtr& inputConfig, string_view csName,
     const ConstContextRcPtr& context, string_view source_colorspace) const
 {
@@ -3968,7 +3968,7 @@ FastColorSpaceMatcher::findEquivalentColorspaces(
 }
 
 std::string
-FastColorSpaceMatcher::findEquivalentColorspaceFromFingerprint(
+InteropFingerprintMatcher::findEquivalentColorspaceFromFingerprint(
     const std::vector<float>& inputVals, ReferenceSpaceType refSpaceType) const
 {
     const auto matches = findEquivalentColorspacesFromFingerprint(inputVals,
@@ -3977,7 +3977,7 @@ FastColorSpaceMatcher::findEquivalentColorspaceFromFingerprint(
 }
 
 std::vector<std::string>
-FastColorSpaceMatcher::findEquivalentColorspacesFromFingerprint(
+InteropFingerprintMatcher::findEquivalentColorspacesFromFingerprint(
     const std::vector<float>& inputVals, ReferenceSpaceType refSpaceType) const
 {
     std::vector<std::string> matches;
@@ -4758,7 +4758,7 @@ ColorConfig::Impl::interop_fingerprint_runtime() const
     return make_fingerprint_runtime();
 }
 
-FastColorSpaceMatcher&
+InteropFingerprintMatcher&
 ColorConfig::Impl::interop_matcher() const
 {
     // Matcher construction is expensive; initialize lazily and reuse.
@@ -4766,7 +4766,7 @@ ColorConfig::Impl::interop_matcher() const
     std::lock_guard<std::mutex> lock(m_interop_matcher_mutex);
     if (!m_interop_matcher) {
         m_interop_matcher.reset(
-            new FastColorSpaceMatcher(m_interop.interop_config,
+            new InteropFingerprintMatcher(m_interop.interop_config,
                                       m_fingerprint_cache,
                                       m_fingerprint_cache_mutex));
     }

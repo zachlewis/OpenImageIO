@@ -11,6 +11,7 @@
 #    include <nanobind/ndarray.h>
 #    include <nanobind/operators.h>
 #    include <nanobind/stl/array.h>
+#    include <nanobind/stl/map.h>
 #    include <nanobind/stl/optional.h>
 #    include <nanobind/stl/string.h>
 #    include <nanobind/stl/string_view.h>

@@ -4,7 +4,11 @@
 
 #pragma once
 
+#include <cstdint>
+#include <map>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include <OpenImageIO/export.h>
 #include <OpenImageIO/fmath.h>
@@ -61,6 +65,137 @@ public:
 
 
 using ColorProcessorHandle = std::shared_ptr<ColorProcessor>;
+
+
+
+/// The individually queryable fields of a ColorSpaceInfo record, for the
+/// per-field computed()/available()/derived() cost-visibility queries.
+///
+/// @version 3.2
+enum class ColorSpaceInfoField : uint32_t {
+    EqualityID,
+    ColorInteropID,
+    Encoding,
+    ImageState,
+    Range,
+    Chromaticities,
+    TransferFunction,
+};
+
+
+/// Semantic classification of a color space's transfer function, as
+/// reported by ColorSpaceInfo::transfer_function_kind().
+///
+/// @version 3.2
+enum class ColorTransferFunctionKind : uint8_t {
+    Undetermined,  ///< not determined (or not yet attempted)
+    Linear,        ///< linear/identity curve
+    Named,         ///< a recognized named family (see transfer_function())
+    Sampled,       ///< successfully sampled behavior, but no known family
+};
+
+
+/// Per-call options for color-space property queries
+/// (ColorConfig::get_color_space_info). Default construction uses the
+/// ColorConfig's current context and the baseline policy view. The
+/// string_view fields are non-owning: the caller keeps their backing
+/// storage alive for the duration of the call, as with any string_view
+/// parameter.
+///
+/// @version 3.2
+struct ColorSpaceInfoOptions {
+    /// OCIO context-variable overrides, scoped to the one call. The fields
+    /// the cheap getter reports are context-independent, so these
+    /// overrides do not currently alter its answer; they will apply as
+    /// context-sensitive property queries deepen behind this signature.
+    std::map<std::string, std::string> context;
+    /// Reserved: the name of a color metadata policy profile to answer
+    /// under. Accepted and currently ignored; it will be honored when the
+    /// policy layer lands. Empty selects the baseline profile.
+    string_view profile;
+    /// Reserved: comma-separated policy directives ("key=value") to answer
+    /// under. Accepted and currently ignored; it will be honored when the
+    /// policy layer lands.
+    string_view policies;
+};
+
+
+/// Immutable snapshot of the color-space property information for one
+/// resolved color space, as returned by ColorConfig::get_color_space_info().
+/// Accessor views remain valid until the snapshot they were read from is
+/// destroyed or assigned over (assignment releases the previous state).
+/// Copies are cheap (shared immutable state). A later, more complete query
+/// updates the information seen by future queries; it never mutates a
+/// snapshot already held by a caller.
+///
+/// Each field carries per-field cost visibility: `computed(field)` reports
+/// whether determination of the field has been attempted at all,
+/// `available(field)` whether the attempt produced a usable value, and
+/// `derived(field)` whether that value required behavioral derivation
+/// (comparing what transforms do) rather than direct config inspection. A
+/// computed-but-unavailable field is a stable negative result, not an error.
+///
+/// @version 3.2
+class OIIO_API ColorSpaceInfo {
+public:
+    ColorSpaceInfo();
+    ~ColorSpaceInfo();
+    ColorSpaceInfo(const ColorSpaceInfo&);
+    ColorSpaceInfo(ColorSpaceInfo&&) noexcept;
+    ColorSpaceInfo& operator=(const ColorSpaceInfo&);
+    ColorSpaceInfo& operator=(ColorSpaceInfo&&) noexcept;
+
+    /// False only for the default object or a failed/unknown query.
+    OIIO_NODISCARD bool valid() const noexcept;
+
+    /// Canonical local color-space name. Empty when !valid().
+    OIIO_NODISCARD string_view name() const noexcept;
+
+    /// Mathematical identity determined by transform-comparison
+    /// equivalence. It deliberately ignores authored interop IDs and name
+    /// coincidence.
+    OIIO_NODISCARD string_view equality_id() const noexcept;
+
+    /// Authoritative/write Color Interop ID. Declaration-first semantics.
+    OIIO_NODISCARD string_view color_interop_id() const noexcept;
+
+    /// Effective encoding (the authored attribute, when present).
+    OIIO_NODISCARD string_view encoding() const noexcept;
+
+    /// "scene" or "display"; empty when undetermined.
+    OIIO_NODISCARD string_view image_state() const noexcept;
+
+    /// "full" or "narrow"; empty when not intrinsic/determinable. Range
+    /// describes pixel state and is never guessed from a color-space name.
+    OIIO_NODISCARD string_view range() const noexcept;
+
+    /// Eight floats in Rx,Ry,Gx,Gy,Bx,By,Wx,Wy order, or an empty span.
+    OIIO_NODISCARD cspan<float> chromaticities() const noexcept;
+
+    OIIO_NODISCARD ColorTransferFunctionKind
+    transfer_function_kind() const noexcept;
+
+    /// Normalized family such as "srgb" or "g24"; empty for an
+    /// undetermined or sampled-but-unnamed transfer function.
+    OIIO_NODISCARD string_view transfer_function() const noexcept;
+
+    /// Whether determination of this field has been attempted.
+    OIIO_NODISCARD bool computed(ColorSpaceInfoField field) const noexcept;
+
+    /// Whether the attempted field has a usable value.
+    OIIO_NODISCARD bool available(ColorSpaceInfoField field) const noexcept;
+
+    /// Whether the published value required behavioral derivation rather
+    /// than direct config inspection.
+    OIIO_NODISCARD bool derived(ColorSpaceInfoField field) const noexcept;
+
+private:
+    class Impl;
+    std::shared_ptr<const Impl> m_impl;
+
+    explicit ColorSpaceInfo(std::shared_ptr<const Impl>);
+    friend class ColorConfig;
+};
 
 
 
@@ -434,6 +569,44 @@ public:
     ///
     /// @version 3.1
     OIIO_NODISCARD string_view get_color_interop_id(const int cicp[4]) const;
+
+    /// Retrieve the color-space property information OIIO can supply
+    /// CHEAPLY for the named color space (which may be a name, role, or
+    /// alias): the canonical local name, the image state, the cheap Color
+    /// Interop ID subset (declared attribute or built-in table match,
+    /// exactly what get_color_interop_id() returns), the authored encoding,
+    /// and the intrinsic range when explicitly known. This method performs
+    /// only direct config inspection -- it never probes transforms, builds
+    /// a processor, or silently derives a missing field. Fields that would
+    /// require behavioral derivation (the equality ID, chromaticities, the
+    /// transfer function) simply report `computed(field) == false`.
+    ///
+    /// For an unknown or unresolvable name, the returned object has
+    /// `valid() == false` and an error is reported through the usual
+    /// has_error()/geterror() convention. This method does not throw.
+    ///
+    /// @version 3.2
+    OIIO_NODISCARD ColorSpaceInfo
+    get_color_space_info(string_view color_space,
+                         const ColorSpaceInfoOptions& options = {}) const;
+
+    /// Batch version of get_color_space_info(): one record per requested
+    /// name, in input order (duplicates included). Every requested name is
+    /// validated before any record is built; if any input is invalid, one
+    /// indexed error (e.g. `get_color_space_infos[3]: unknown color space
+    /// "..."`) is reported through has_error()/geterror() and an empty
+    /// vector is returned. An empty input span is an empty batch, not "all
+    /// spaces". This method does not throw.
+    ///
+    /// The batch spelling is deliberately distinct (plural, matching the
+    /// Python binding) rather than an overload: span's one-element
+    /// converting constructor would otherwise make a `std::string` lvalue
+    /// argument ambiguous between the scalar and batch forms.
+    ///
+    /// @version 3.2
+    OIIO_NODISCARD std::vector<ColorSpaceInfo>
+    get_color_space_infos(cspan<std::string> color_spaces,
+                          const ColorSpaceInfoOptions& options = {}) const;
 
     /// Return a filename or other identifier for the config we're using.
     OIIO_NODISCARD std::string configname() const;

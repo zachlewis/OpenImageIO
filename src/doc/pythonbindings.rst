@@ -4048,6 +4048,83 @@ is provided for minimal color support.
     This function was added in OpenImageIO 3.1.
 
 
+.. py:method:: get_color_space_info (name, context_vars={}, profile="", policies="")
+
+    Return a :py:class:`ColorSpaceInfo` snapshot of the color-space
+    property information the config can supply *cheaply* for the named
+    color space (which may be a name, role, or alias): the canonical name,
+    image state, the cheap color interop ID subset (exactly what
+    :py:meth:`get_color_interop_id` returns), the authored encoding, and
+    the intrinsic range when explicitly known. This method never probes
+    transforms or derives missing fields. For an unknown or unresolvable
+    name it returns ``None`` and leaves the error on the config
+    (``geterror()``). ``context_vars`` applies OCIO context-variable
+    overrides scoped to the one call; the fields this cheap getter reports
+    are context-independent, so the overrides do not currently alter its
+    answer. ``profile`` and ``policies`` are reserved: they are accepted
+    and currently ignored, and will be honored when configurable color
+    metadata policies land.
+
+    Example:
+
+    .. code-block:: python
+
+        colorconfig = oiio.ColorConfig()
+        info = colorconfig.get_color_space_info("srgb_tx")
+        if info is not None:
+            print(info.name, info.image_state, info.color_interop_id)
+
+    This function was added in OpenImageIO 3.2.
+
+
+.. py:method:: get_color_space_infos (names, context_vars={}, profile="", policies="")
+
+    Batch version of :py:meth:`get_color_space_info`: return a list with one
+    :py:class:`ColorSpaceInfo` per requested name, in input order (duplicates
+    included). If any input is invalid, an empty list is returned and one
+    indexed error is left on the config (``geterror()``).
+
+    This function was added in OpenImageIO 3.2.
+
+
+.. py:class:: ColorSpaceInfo
+
+    An immutable snapshot of the color-space property information for one
+    resolved color space, as returned by
+    :py:meth:`ColorConfig.get_color_space_info`. The read-only properties
+    ``name``, ``equality_id``, ``color_interop_id``, ``encoding``,
+    ``image_state``, ``range``, ``chromaticities`` (an 8-tuple of RGBW xy
+    floats), ``transfer_function_kind`` (a
+    :py:class:`ColorTransferFunctionKind`), and ``transfer_function`` report
+    the field values; every unavailable value is ``None`` (never an empty
+    string). The methods ``computed(field)``, ``available(field)``, and
+    ``derived(field)`` -- each taking a :py:class:`ColorSpaceInfoField` --
+    report per-field cost visibility: whether determination was attempted,
+    whether it produced a usable value, and whether that value required
+    behavioral derivation. A computed-but-unavailable field is a stable
+    negative result, not an error.
+
+    This class was added in OpenImageIO 3.2.
+
+
+.. py:class:: ColorSpaceInfoField
+
+    Enum of the individually queryable fields of a
+    :py:class:`ColorSpaceInfo` record: ``EqualityID``, ``ColorInteropID``,
+    ``Encoding``, ``ImageState``, ``Range``, ``Chromaticities``,
+    ``TransferFunction``.
+
+    This class was added in OpenImageIO 3.2.
+
+
+.. py:class:: ColorTransferFunctionKind
+
+    Enum of the semantic classification of a color space's transfer
+    function: ``Undetermined``, ``Linear``, ``Named``, ``Sampled``.
+
+    This class was added in OpenImageIO 3.2.
+
+
 .. _sec-pythonmiscapi:
 
 Miscellaneous Utilities

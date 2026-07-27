@@ -11,6 +11,8 @@
 #    error "oiioversion.h must always be included before nsversions.h"
 #endif
 
+#include <cstdint>  // fixed-width underlying types of forward-declared enums
+
 
 // Establish the namespaces.
 //
@@ -163,6 +165,10 @@ OIIO_NAMESPACE_3_1_BEGIN
 class ArgParse;
 class ColorConfig;
 class ColorProcessor;
+class ColorSpaceInfo;
+struct ColorSpaceInfoOptions;
+enum class ColorSpaceInfoField : uint32_t;
+enum class ColorTransferFunctionKind : uint8_t;
 class ErrorHandler;
 class Filter1D;
 class Filter2D;
@@ -209,6 +215,10 @@ OIIO_NAMESPACE_BEGIN
 using v3_1::ArgParse;
 using v3_1::ColorConfig;
 using v3_1::ColorProcessor;
+using v3_1::ColorSpaceInfo;
+using v3_1::ColorSpaceInfoOptions;
+using v3_1::ColorSpaceInfoField;
+using v3_1::ColorTransferFunctionKind;
 using v3_1::ErrorHandler;
 using v3_1::Filter1D;
 using v3_1::Filter2D;

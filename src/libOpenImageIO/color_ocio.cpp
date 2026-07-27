@@ -2340,7 +2340,12 @@ ColorConfig::get_color_interop_id(string_view colorspace) const
         } catch (...) {
             interop_id = nullptr;
         }
-        if (interop_id) {
+        // A non-empty declared interop_id attribute is authoritative. An
+        // UNSET attribute comes back as an empty string (not null), and
+        // must fall through to the table below rather than short-circuit
+        // to "not found" -- otherwise the answer for the same config
+        // differs between OCIO >= 2.5 and older versions.
+        if (interop_id && interop_id[0]) {
             return interop_id;
         }
     }
@@ -2377,6 +2382,267 @@ ColorConfig::get_cicp(string_view colorspace) const
         }
     }
     return cspan<int>();
+}
+
+
+
+//////////////////////////////////////////////////////////////////////////
+//
+// ColorSpaceInfo: the public opaque immutable record of the color-space
+// properties a config can supply cheaply, and the ColorConfig entry points
+// that build it (get_color_space_info, scalar and batch). Everything out of
+// line; no inline function dereferences the PIMPL.
+
+
+class ColorSpaceInfo::Impl {
+public:
+    std::string name;
+    std::string equality_id;
+    std::string color_interop_id;
+    std::string encoding;
+    std::string image_state;
+    std::string range;
+    std::vector<float> chromaticities;
+    std::string transfer_function;
+    ColorTransferFunctionKind transfer_kind
+        = ColorTransferFunctionKind::Undetermined;
+    // Per-field tri-state, one bit per ColorSpaceInfoField (bit for field
+    // `f` is 1 << int(f), matching the public enumerator order).
+    uint32_t computed_mask  = 0;
+    uint32_t available_mask = 0;
+    uint32_t derived_mask   = 0;
+
+    bool valid() const { return !name.empty(); }
+
+    // Set field `f`'s tri-state: attempted always; usable and derivation
+    // provenance as reported.
+    void mark(ColorSpaceInfoField f, bool is_available, bool is_derived = false)
+    {
+        const uint32_t bit = uint32_t(1) << uint32_t(f);
+        computed_mask |= bit;
+        if (is_available)
+            available_mask |= bit;
+        if (is_derived)
+            derived_mask |= bit;
+    }
+
+    // Build the record of the facts `config` can supply cheaply for
+    // `color_space` -- direct inspection only: no processors, no transform
+    // probes, no silent derivation. Return nullptr for an unresolvable
+    // name.
+    static std::shared_ptr<const Impl>
+    build_cheap(const ColorConfig& config,
+                const OCIO::ConstConfigRcPtr& ocio_config,
+                string_view color_space)
+    {
+        if (!ocio_config || color_space.empty())
+            return nullptr;
+        std::string resolved(config.resolve(color_space));
+        OCIO::ConstColorSpaceRcPtr cs;
+        try {
+            cs = ocio_config->getColorSpace(resolved.c_str());
+        } catch (...) {
+            cs = nullptr;
+        }
+        if (!cs)
+            return nullptr;
+
+        auto rec  = std::make_shared<Impl>();
+        rec->name = cs->getName() ? cs->getName() : resolved;
+
+        const bool is_data = cs->isData();
+
+        // Image state: the OCIO reference-space kind. A data space's
+        // reference kind is arbitrary, so its state is honestly
+        // undetermined.
+        if (!is_data)
+            rec->image_state = cs->getReferenceSpaceType()
+                                       == OCIO::REFERENCE_SPACE_DISPLAY
+                                   ? "display"
+                                   : "scene";
+        rec->mark(ColorSpaceInfoField::ImageState, !rec->image_state.empty());
+
+        // Color Interop ID: the existing cheap declared/table subset.
+        rec->color_interop_id = std::string(
+            config.get_color_interop_id(resolved));
+        rec->mark(ColorSpaceInfoField::ColorInteropID,
+                  !rec->color_interop_id.empty());
+
+        // Encoding: the authored attribute only.
+        if (cs->getEncoding() && cs->getEncoding()[0])
+            rec->encoding = cs->getEncoding();
+        rec->mark(ColorSpaceInfoField::Encoding, !rec->encoding.empty());
+
+        // Range: supplied only when intrinsic to a registered identity or
+        // otherwise explicitly known -- nothing registers one today, so the
+        // attempt is a stable negative. Never guessed from a name.
+        rec->mark(ColorSpaceInfoField::Range, false);
+
+        // The remaining fields (equality ID, chromaticities, transfer
+        // function) require behavioral derivation, which this cheap path
+        // never performs: they honestly report computed() == false.
+        return rec;
+    }
+};
+
+
+ColorSpaceInfo::ColorSpaceInfo()                          = default;
+ColorSpaceInfo::~ColorSpaceInfo()                         = default;
+ColorSpaceInfo::ColorSpaceInfo(const ColorSpaceInfo&)     = default;
+ColorSpaceInfo::ColorSpaceInfo(ColorSpaceInfo&&) noexcept = default;
+ColorSpaceInfo&
+ColorSpaceInfo::operator=(const ColorSpaceInfo&)
+    = default;
+ColorSpaceInfo&
+ColorSpaceInfo::operator=(ColorSpaceInfo&&) noexcept
+    = default;
+
+ColorSpaceInfo::ColorSpaceInfo(std::shared_ptr<const Impl> impl)
+    : m_impl(std::move(impl))
+{
+}
+
+bool
+ColorSpaceInfo::valid() const noexcept
+{
+    return m_impl && m_impl->valid();
+}
+
+string_view
+ColorSpaceInfo::name() const noexcept
+{
+    return m_impl ? string_view(m_impl->name) : string_view();
+}
+
+string_view
+ColorSpaceInfo::equality_id() const noexcept
+{
+    return m_impl ? string_view(m_impl->equality_id) : string_view();
+}
+
+string_view
+ColorSpaceInfo::color_interop_id() const noexcept
+{
+    return m_impl ? string_view(m_impl->color_interop_id) : string_view();
+}
+
+string_view
+ColorSpaceInfo::encoding() const noexcept
+{
+    return m_impl ? string_view(m_impl->encoding) : string_view();
+}
+
+string_view
+ColorSpaceInfo::image_state() const noexcept
+{
+    return m_impl ? string_view(m_impl->image_state) : string_view();
+}
+
+string_view
+ColorSpaceInfo::range() const noexcept
+{
+    return m_impl ? string_view(m_impl->range) : string_view();
+}
+
+cspan<float>
+ColorSpaceInfo::chromaticities() const noexcept
+{
+    return m_impl ? cspan<float>(m_impl->chromaticities) : cspan<float>();
+}
+
+ColorTransferFunctionKind
+ColorSpaceInfo::transfer_function_kind() const noexcept
+{
+    return m_impl ? m_impl->transfer_kind
+                  : ColorTransferFunctionKind::Undetermined;
+}
+
+string_view
+ColorSpaceInfo::transfer_function() const noexcept
+{
+    return m_impl ? string_view(m_impl->transfer_function) : string_view();
+}
+
+bool
+ColorSpaceInfo::computed(ColorSpaceInfoField field) const noexcept
+{
+    return m_impl
+           && (m_impl->computed_mask & (uint32_t(1) << uint32_t(field))) != 0;
+}
+
+bool
+ColorSpaceInfo::available(ColorSpaceInfoField field) const noexcept
+{
+    return m_impl
+           && (m_impl->available_mask & (uint32_t(1) << uint32_t(field))) != 0;
+}
+
+bool
+ColorSpaceInfo::derived(ColorSpaceInfoField field) const noexcept
+{
+    return m_impl
+           && (m_impl->derived_mask & (uint32_t(1) << uint32_t(field))) != 0;
+}
+
+
+
+ColorSpaceInfo
+ColorConfig::get_color_space_info(string_view color_space,
+                                  const ColorSpaceInfoOptions& options) const
+{
+    // The cheap facts are context-independent, and options.profile /
+    // options.policies are reserved (accepted and currently ignored), so
+    // the options do not yet affect the answer.
+    (void)options;
+    try {
+        std::shared_ptr<const ColorSpaceInfo::Impl> rec;
+        if (!disable_ocio)
+            rec = ColorSpaceInfo::Impl::build_cheap(*this, getImpl()->config_,
+                                                    color_space);
+        if (!rec) {
+            getImpl()->error("get_color_space_info: unknown color space \"{}\"",
+                             color_space);
+            return {};
+        }
+        return ColorSpaceInfo(std::move(rec));
+    } catch (const std::exception& e) {
+        getImpl()->error("get_color_space_info: {}", e.what());
+        return {};
+    }
+}
+
+
+
+std::vector<ColorSpaceInfo>
+ColorConfig::get_color_space_infos(cspan<std::string> color_spaces,
+                                   const ColorSpaceInfoOptions& options) const
+{
+    (void)options;
+    try {
+        std::vector<ColorSpaceInfo> results;
+        results.reserve(color_spaces.size());
+        // Every input is validated before any record is returned: one
+        // invalid name fails the whole batch with an indexed error. Batch
+        // order and duplicates are preserved.
+        for (size_t i = 0; i < size_t(color_spaces.size()); ++i) {
+            std::shared_ptr<const ColorSpaceInfo::Impl> rec;
+            if (!disable_ocio)
+                rec = ColorSpaceInfo::Impl::build_cheap(*this,
+                                                        getImpl()->config_,
+                                                        color_spaces[i]);
+            if (!rec) {
+                getImpl()->error(
+                    "get_color_space_infos[{}]: unknown color space \"{}\"", i,
+                    color_spaces[i]);
+                return {};
+            }
+            results.push_back(ColorSpaceInfo(std::move(rec)));
+        }
+        return results;
+    } catch (const std::exception& e) {
+        getImpl()->error("get_color_space_infos: {}", e.what());
+        return {};
+    }
 }
 
 

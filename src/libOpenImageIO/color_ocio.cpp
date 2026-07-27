@@ -19,6 +19,7 @@
 #include <OpenImageIO/strutil.h>
 #include <OpenImageIO/sysutil.h>
 
+#include "color_pvt.h"
 #include "imageio_pvt.h"
 
 #define MAKE_OCIO_VERSION_HEX(maj, min, patch) \
@@ -304,6 +305,12 @@ public:
     }
 
     string_view resolve(string_view name) const;
+    // The tiers of resolve(): tier 1a is the direct OCIO name/role/alias
+    // lookup plus OIIO's informal aliases; resolve_syntactic() layers the
+    // purely syntactic color-interop-ID tiers on top of it. See resolve()
+    // for the tier order.
+    string_view resolve_name_tier1a(string_view name) const;
+    string_view resolve_syntactic(string_view name) const;
 
     // Note: Uses std::format syntax
     template<typename... Args>
@@ -1510,8 +1517,260 @@ ColorConfig::resolve(string_view name) const
 
 
 
+namespace {
+
+// Helpers for the interop-ID resolution tiers layered onto resolve(). They
+// only read the OCIO config and the pure grammar/sanitization functions from
+// color_pvt.h. Every string_view they return is backed by an OCIO-owned
+// color space name (stable for the life of the config), never a temporary.
+
+// The UNIQUE owner of a sanitized base token among the config's color space
+// names and aliases (across all reference types and visibilities): the owning
+// space's name when exactly one space claims `token`, empty when none or more
+// than one do. The sanitizer is many-to-one ("Foo Bar" and "foo_bar" both map
+// to "foo_bar"), so this is the shared ambiguity guard for the config-local
+// id form: resolution refuses to guess among colliding spaces (the
+// never-guess rule). Linear scan per query; cache an inverted map if this
+// ever shows up hot.
 string_view
-ColorConfig::Impl::resolve(string_view name) const
+unique_space_for_sanitized_token(const OCIO::ConstConfigRcPtr& config,
+                                 const std::string& token)
+{
+    int n = 0;
+    try {
+        n = config->getNumColorSpaces(OCIO::SEARCH_REFERENCE_SPACE_ALL,
+                                      OCIO::COLORSPACE_ALL);
+    } catch (...) {
+        return {};
+    }
+    string_view found;
+    for (int i = 0; i < n; ++i) {
+        const char* nm
+            = config->getColorSpaceNameByIndex(OCIO::SEARCH_REFERENCE_SPACE_ALL,
+                                               OCIO::COLORSPACE_ALL, i);
+        if (!nm || !*nm)
+            continue;
+        OCIO::ConstColorSpaceRcPtr cs;
+        try {
+            cs = config->getColorSpace(nm);
+        } catch (...) {
+            continue;
+        }
+        if (!cs)
+            continue;
+        bool claims = OIIO::pvt::sanitize_id_token(cs->getName()) == token;
+        for (int a = 0, ae = cs->getNumAliases(); !claims && a < ae; ++a)
+            claims = OIIO::pvt::sanitize_id_token(cs->getAlias(a)) == token;
+        if (!claims)
+            continue;
+        if (!found.empty())
+            return {};  // a second owner: the token is ambiguous
+        found = cs->getName();
+    }
+    return found;
+}
+
+// Tier 1a'' -- the config-local form "<config>:local:<base>". Resolves only
+// when the id parses as outer:local:base and `outer` sanitizes to this config's
+// own name; then it matches `base` against every color space's sanitized name
+// or alias (across all reference types and visibilities), refusing an
+// ambiguous token via the unique-owner guard above. Deliberately never
+// consults a color space's interop_id attribute -- that is tier 1c's job.
+string_view
+resolve_local_namespace(const OCIO::ConstConfigRcPtr& config, string_view name)
+{
+    OIIO::pvt::InteropIdParts parts = OIIO::pvt::parse_interop_id(
+        std::string(name));
+    if (parts.form != OIIO::pvt::InteropIdForm::OUTER_INNER_BASE
+        || parts.inner != "local")
+        return {};
+    const char* cfgname = config->getName();
+    if (!cfgname || !*cfgname)
+        return {};
+    if (OIIO::pvt::sanitize_id_token(cfgname) != parts.outer)
+        return {};
+    return unique_space_for_sanitized_token(config, parts.base);
+}
+
+// Tier 1c -- match `name` against a color space's explicit interop_id attribute
+// (OCIO 2.5+). A match requires the attribute to equal the query exactly, or to
+// match with exactly ONE side's leftmost namespace stripped (never both -- so
+// "oiio:x" does not false-match a query for "ocio:x" just because both strip to
+// "x"). Utility tokens (data/unknown/bypass) are excluded from this lookup
+// entirely: declaring interop_id: bypass must not make a space reachable by
+// querying "bypass". Attributes in the reserved `local` namespace are
+// likewise excluded (see below).
+string_view
+resolve_explicit_interop_id(const OCIO::ConstConfigRcPtr& config,
+                            string_view name)
+{
+#if OCIO_VERSION_HEX >= MAKE_OCIO_VERSION_HEX(2, 5, 0)
+    std::string id(name);
+    std::string id_stripped = OIIO::pvt::strip_leftmost_namespace(id);
+    // Linear scan over the catalog. This tier only fires when the
+    // direct/stripped/local tiers all miss (a rare path), so a per-query
+    // scan is cheaper than maintaining a cache. Build an inverted map if
+    // this ever shows up hot.
+    int n = 0;
+    try {
+        n = config->getNumColorSpaces(OCIO::SEARCH_REFERENCE_SPACE_ALL,
+                                      OCIO::COLORSPACE_ALL);
+    } catch (...) {
+        return {};
+    }
+    for (int i = 0; i < n; ++i) {
+        const char* nm
+            = config->getColorSpaceNameByIndex(OCIO::SEARCH_REFERENCE_SPACE_ALL,
+                                               OCIO::COLORSPACE_ALL, i);
+        if (!nm || !*nm)
+            continue;
+        OCIO::ConstColorSpaceRcPtr cs;
+        try {
+            cs = config->getColorSpace(nm);
+        } catch (...) {
+            continue;
+        }
+        if (!cs)
+            continue;
+        const char* iid = cs->getInteropID();
+        if (!iid || !*iid)
+            continue;
+        std::string attr(iid);
+        if (OIIO::pvt::is_utility_interop_id(attr))
+            continue;
+        // A declared attribute that is not itself a valid interop id
+        // matches nothing -- otherwise a malformed declaration could still
+        // be reached by an exact-match query.
+        if (!OIIO::pvt::is_valid_interop_id(attr))
+            continue;
+        // The `local` namespace is reserved end-to-end for the config-local
+        // "<config>:local:<base>" form. A declared attribute whose leftmost
+        // OR inner namespace is `local` must never satisfy this tier:
+        // honoring a grammar-legal "local:x" here would let one config poach
+        // another config's private local IDs through the stripped-attribute
+        // match below ("othercfg:local:x" strips to "local:x"), and a
+        // declared "othercfg:local:x" would impersonate another config's
+        // private id outright via the exact match. (OCIO's own loader
+        // rejects interop_id values with more than one colon, so the
+        // ":local:" arm is defense-in-depth for configs constructed
+        // programmatically, where that validation may not have run.)
+        if (attr == "local" || Strutil::starts_with(attr, "local:")
+            || attr.find(":local:") != std::string::npos)
+            continue;
+        if (attr == id || attr == id_stripped
+            || OIIO::pvt::strip_leftmost_namespace(attr) == id)
+            return cs->getName();
+    }
+#else
+    (void)config;
+    (void)name;
+#endif
+    return {};
+}
+
+// The color space name that `token` (a name, alias, or role) resolves to in
+// `config`, or empty if it resolves to nothing.
+std::string
+resolve_token_colorspace_name(const OCIO::ConstConfigRcPtr& config,
+                              const char* token)
+{
+    try {
+        OCIO::ConstColorSpaceRcPtr c = config->getColorSpace(token);
+        return c ? std::string(c->getName()) : std::string();
+    } catch (...) {
+        return std::string();
+    }
+}
+
+// Whether a data color space `cs` (name `nm`) identifies as `token` -- either
+// via its explicit interop_id attribute (OCIO 2.5+), or because `token`'s
+// name/alias/role resolution (precomputed as `token_target`) lands on it.
+bool
+data_space_identifies_as(const OCIO::ConstColorSpaceRcPtr& cs, const char* nm,
+                         string_view token, const std::string& token_target)
+{
+#if OCIO_VERSION_HEX >= MAKE_OCIO_VERSION_HEX(2, 5, 0)
+    const char* iid = cs->getInteropID();
+    if (iid && *iid && token == string_view(iid))
+        return true;
+#endif
+    return !token_target.empty() && token_target == nm;
+}
+
+// Utility-token preference for the literal queries "data" and "bypass": rank
+// every data color space and return the lowest-ranked one. rank 0 = identifies
+// as the requested token, rank 1 = plain data space (no identity), rank 2 =
+// identifies as the other token (data<->bypass), rank 3 = identifies as
+// "unknown"; lowest rank wins and a rank-0 hit short-circuits. ("unknown" is
+// intentionally not routed here -- it only ever resolves as a literal
+// name/alias, handled by tier 1a.)
+string_view
+resolve_data_utility(const OCIO::ConstConfigRcPtr& config,
+                     string_view requested)
+{
+    const char* req          = requested == "data" ? "data" : "bypass";
+    const char* other        = requested == "data" ? "bypass" : "data";
+    std::string req_target   = resolve_token_colorspace_name(config, req);
+    std::string other_target = resolve_token_colorspace_name(config, other);
+    std::string unk_target   = resolve_token_colorspace_name(config, "unknown");
+
+    const char* best = nullptr;
+    int best_rank    = 4;  // worse than any real rank (0..3)
+    int n            = 0;
+    try {
+        n = config->getNumColorSpaces(OCIO::SEARCH_REFERENCE_SPACE_ALL,
+                                      OCIO::COLORSPACE_ALL);
+    } catch (...) {
+        return {};
+    }
+    for (int i = 0; i < n; ++i) {
+        const char* nm
+            = config->getColorSpaceNameByIndex(OCIO::SEARCH_REFERENCE_SPACE_ALL,
+                                               OCIO::COLORSPACE_ALL, i);
+        if (!nm || !*nm)
+            continue;
+        OCIO::ConstColorSpaceRcPtr cs;
+        try {
+            cs = config->getColorSpace(nm);
+        } catch (...) {
+            continue;
+        }
+        if (!cs || !cs->isData())
+            continue;
+        // A one-space OCIO::Config::CreateRaw() config is nothing but a
+        // synthetic data space named "raw". Skip that space so an empty/raw
+        // config does not spuriously resolve "data"/"bypass" to it -- but key
+        // the skip on the config's single-colorspace shape (n == 1), not the
+        // name alone: a real config may legitimately hold a data space named
+        // "Raw" alongside others, and that one is a valid target. A role
+        // explicitly naming the requested token still wins.
+        if (n == 1 && Strutil::iequals(nm, "raw") && req_target != nm)
+            continue;
+        int rank;
+        if (data_space_identifies_as(cs, nm, req, req_target))
+            rank = 0;
+        else if (data_space_identifies_as(cs, nm, other, other_target))
+            rank = 2;
+        else if (data_space_identifies_as(cs, nm, "unknown", unk_target))
+            rank = 3;
+        else
+            rank = 1;  // plain data space, no identity
+        if (rank < best_rank) {
+            best_rank = rank;
+            best      = cs->getName();
+            if (rank == 0)
+                break;
+        }
+    }
+    return best ? string_view(best) : string_view();
+}
+
+}  // namespace
+
+
+
+string_view
+ColorConfig::Impl::resolve_name_tier1a(string_view name) const
 {
     OCIO::ConstConfigRcPtr config = config_;
     if (config && !disable_ocio) {
@@ -1547,6 +1806,92 @@ ColorConfig::Impl::resolve(string_view name) const
     if (Strutil::iequals(name, "Rec709") && Rec709_alias.size())
         return Rec709_alias;
 
+    return {};
+}
+
+
+
+string_view
+ColorConfig::Impl::resolve_syntactic(string_view name) const
+{
+    // Tier 1a: direct OCIO color space / role / alias, then informal aliases.
+    // Deliberately NOT gated on interop-id validity: this is the legacy
+    // lookup, and every name that resolves today must keep resolving
+    // byte-identically.
+    if (string_view r = resolve_name_tier1a(name); !r.empty())
+        return r;
+
+    // Everything below implements interop-ID syntax. An input that is not a
+    // valid Annex-B id (":foo", "a:b:c:d", "foo:", ...) never reaches the
+    // new tiers -- it keeps the legacy total-miss behavior (resolve()
+    // returns it unchanged).
+    OIIO::pvt::InteropIdParts parts = OIIO::pvt::parse_interop_id(
+        std::string(name));
+    if (parts.form == OIIO::pvt::InteropIdForm::INVALID)
+        return {};
+
+    // The reserved `local` inner namespace: a query in outer:local:base form
+    // resolves via the config-local tier (1a'' below) or not at all among
+    // the syntactic tiers. In particular its stripped form ("local:base")
+    // must never be fed to the ordinary name/role/alias search, where a
+    // literal alias named "local:base" could poach another config's
+    // private id.
+    const bool reserved_local
+        = parts.form == OIIO::pvt::InteropIdForm::OUTER_INNER_BASE
+          && parts.inner == "local";
+
+    // Tier 1a': stripped-namespace retry. Only meaningful when the name carries
+    // a namespace to strip. strip_leftmost_namespace() consumes exactly one
+    // leading "<ns>:"; note "my-studio::srgb" strips to ":srgb" (the blank inner
+    // colon survives), which deliberately will NOT match "srgb".
+    if (!reserved_local && name.find(':') != string_view::npos) {
+        std::string stripped = OIIO::pvt::strip_leftmost_namespace(
+            std::string(name));
+        if (string_view r = resolve_name_tier1a(stripped); !r.empty())
+            return r;
+    }
+
+    // The remaining tiers all consult the OCIO config directly.
+    if (config_ && !disable_ocio) {
+        // Tier 1a'': config-local form "<config>:local:<space>".
+        if (string_view r = resolve_local_namespace(config_, name); !r.empty())
+            return r;
+
+        // The config-local tier is the ONLY syntactic route for a
+        // reserved-local query; a miss there is a total miss.
+        if (reserved_local)
+            return {};
+
+        // Tier 1c: a color space's explicit interop_id attribute (OCIO 2.5+).
+        if (string_view r = resolve_explicit_interop_id(config_, name);
+            !r.empty())
+            return r;
+
+        // Utility tokens: "data"/"bypass" resolve to a ranked data color space.
+        // "unknown" is intentionally not ranked -- it only ever resolves via the
+        // literal name/alias match already attempted in tier 1a.
+        if (name == "data" || name == "bypass")
+            if (string_view r = resolve_data_utility(config_, name); !r.empty())
+                return r;
+    }
+
+    return {};
+}
+
+
+
+string_view
+ColorConfig::Impl::resolve(string_view name) const
+{
+    // Every syntactic tier in order. (This is also the seam where a lookup
+    // against OIIO's built-in interop identities will slot in, in a
+    // following PR; today an id that names nothing in THIS config simply
+    // finds nothing here.)
+    if (string_view r = resolve_syntactic(name); !r.empty())
+        return r;
+
+    // Total miss: preserve OIIO's historical passthrough -- return the input
+    // name unchanged so callers that assumed identity resolution keep working.
     return name;
 }
 

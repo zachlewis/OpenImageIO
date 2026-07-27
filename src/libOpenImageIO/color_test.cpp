@@ -17,6 +17,8 @@
 #include <OpenImageIO/typedesc.h>
 #include <OpenImageIO/unittest.h>
 
+#include "imageio_pvt.h"
+
 
 using namespace OIIO;
 using namespace simd;
@@ -120,6 +122,22 @@ test_Rec709_conversion()
 
 
 
+// Regression guard: OIIO's internal OCIO config-copy helper must preserve a
+// config's explicit default view transform name across an editable copy.
+// OCIO < 2.3.1's createEditableCopy() drops it; without the restore, display
+// conversions against a copied config can silently use the wrong view
+// transform. The pvt probe runs the real helper on a two-view-transform
+// config whose explicit default is the non-first one (so a dropped default
+// is observable, not masked by OCIO's first-VT implicit default). Passes on
+// all OCIO versions -- natively on >= 2.3.1, via the workaround below that.
+static void
+test_copy_config_default_view_transform()
+{
+    OIIO_CHECK_ASSERT(pvt::copy_config_preserves_default_view_transform());
+}
+
+
+
 int
 main(int argc, char* argv[])
 {
@@ -135,6 +153,7 @@ main(int argc, char* argv[])
 
     test_sRGB_conversion();
     test_Rec709_conversion();
+    test_copy_config_default_view_transform();
 
     return unit_test_failures != 0;
 }

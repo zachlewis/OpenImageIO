@@ -63,6 +63,7 @@ Release 3.2 (target: Sept 2026?) -- compared to 3.1
   - *perf*: Reduce redundant file re-opening attempts when a file fails to open. [#5267](https://github.com/AcademySoftwareFoundation/OpenImageIO/pull/5267) (3.2.0.3)
 
 ### 🐛  Fixes and feature enhancements
+  - *color mgmt*: Preserve a config's default view transform name when making an editable copy of an OCIO config, working around an OpenColorIO bug (fixed in OCIO 2.3.1) where `Config::createEditableCopy()` drops it. [#XXXX](https://github.com/AcademySoftwareFoundation/OpenImageIO/pull/XXXX) (3.2.0.3)
   - *texture*: Fix texture overblur with st-blur parameters [#5071](https://github.com/AcademySoftwareFoundation/OpenImageIO/pull/5071) [#5080](https://github.com/AcademySoftwareFoundation/OpenImageIO/pull/5080) (by Pascal Lecocq) (3.2.0.1, 3.1.12.0, 3.0.17.0)
   - *ImageInput*: check_open fixes and new checks [#5087](https://github.com/AcademySoftwareFoundation/OpenImageIO/pull/5087) (3.2.0.1, 3.1.12.0, 3.0.17.0)
   - *ImageSpec*: metadata_val improved safety [#5096](https://github.com/AcademySoftwareFoundation/OpenImageIO/pull/5096) (3.2.0.1, 3.1.12.0, 3.0.17.0)

@@ -36,7 +36,66 @@ namespace {
 static const int n_test_colors = 5;
 static const Imath::C3f test_colors[n_test_colors]
     = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 1, 1, 1 }, { 0.5, 0.5, 0.5 } };
+
+
+// Make an editable copy of `config`, working around an OCIO bug (fixed in
+// OCIO 2.3.1) where createEditableCopy() drops the config's explicit default
+// view transform name.
+static OCIO::ConfigRcPtr
+copy_config(const OCIO::ConstConfigRcPtr& config)
+{
+    auto copy = config->createEditableCopy();
+#if OCIO_VERSION_HEX < MAKE_OCIO_VERSION_HEX(2, 3, 1)
+    // OCIO before 2.3.1 loses the default view transform name when copying a
+    // config; restore it.
+    std::string default_vt = config->getDefaultViewTransformName();
+    if (!default_vt.empty()
+        && default_vt != copy->getDefaultViewTransformName())
+        copy->setDefaultViewTransformName(default_vt.c_str());
+#endif
+    return copy;
+}
 }  // namespace
+
+
+
+// Test probe backing pvt::copy_config_preserves_default_view_transform()
+// (declared in imageio_pvt.h). Builds a config with TWO view transforms whose
+// explicit default is the NON-first one, runs the real copy_config(), and
+// reports whether the copy kept that explicit default. The two-VT shape
+// matters: OCIO reports the first view transform as the implicit default when
+// none is set, so a single-VT probe would pass even if createEditableCopy()
+// silently dropped the explicit default. Returns true on preservation --
+// native on OCIO >= 2.3.1, workaround-restored below that -- and vacuously
+// true when OCIO is disabled at runtime (OIIO_DISABLE_OCIO).
+bool
+pvt::copy_config_preserves_default_view_transform()
+{
+    if (!ColorConfig::supportsOpenColorIO())
+        return true;
+    try {
+        OCIO::ConfigRcPtr cfg = OCIO::Config::CreateRaw()->createEditableCopy();
+        for (const char* name : { "probe_vt_a", "probe_vt_b" }) {
+            auto vt = OCIO::ViewTransform::Create(OCIO::REFERENCE_SPACE_SCENE);
+            vt->setName(name);
+            vt->setTransform(OCIO::MatrixTransform::Create(),
+                             OCIO::VIEWTRANSFORM_DIR_FROM_REFERENCE);
+            cfg->addViewTransform(vt);
+        }
+        // Explicit default is the SECOND view transform, not OCIO's implicit
+        // first-VT default -- so a dropped default is observable.
+        cfg->setDefaultViewTransformName("probe_vt_b");
+
+        OCIO::ConstConfigRcPtr src = cfg;
+        OCIO::ConfigRcPtr copy     = copy_config(src);
+        const char* copied_default = copy->getDefaultViewTransformName();
+        return copied_default && std::string(copied_default) == "probe_vt_b";
+    } catch (const OCIO::Exception&) {
+        // OIIO requires OCIO >= 2.3, so the view-transform API is always
+        // present; any exception here is a real probe failure.
+        return false;
+    }
+}
 
 
 #if 1 || !defined(NDEBUG) /* allow color configuration debugging */
@@ -874,7 +933,7 @@ ColorConfig::Impl::init(string_view filename)
     try {
         auto cfg = OCIO::Config::CreateFromFile("ocio://default");
         OIIO_CONTRACT_ASSERT(cfg);
-        builtinconfig_ = cfg->createEditableCopy();
+        builtinconfig_ = copy_config(cfg);
         fix_config_file_rules(builtinconfig_);
     } catch (OCIO::Exception& e) {
         error("Error making OCIO built-in config: {}", e.what());
@@ -895,7 +954,7 @@ ColorConfig::Impl::init(string_view filename)
             auto cfg = OCIO::Config::CreateFromFile(
                 std::string(filename).c_str());
             if (cfg)
-                config_ = cfg->createEditableCopy();
+                config_ = copy_config(cfg);
             if (config_ && Strutil::istarts_with(filename, "ocio://"))
                 fix_config_file_rules(config_);
         } catch (OCIO::Exception& e) {

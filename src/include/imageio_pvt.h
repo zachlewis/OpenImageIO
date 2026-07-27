@@ -304,11 +304,22 @@ test_read_image(ImageInput& inp, int subimage, int miplevel,
 /// Read all subimage and MIP levels of the open file.
 OIIO_API bool
 test_read_all_images(ImageInput& inp, TypeDesc format = TypeUInt8);
+
+/// True if OIIO's internal OCIO config-copy helper preserves a config's
+/// explicit default view transform name across an editable copy. OCIO
+/// < 2.3.1's createEditableCopy() drops it; the helper restores it. The probe
+/// builds a config with two view transforms whose explicit default is the
+/// non-first one (OCIO's implicit default is the first), copies it, and
+/// checks the name survived. Vacuously true when OCIO is disabled at runtime.
+/// For internal/test use only.
+OIIO_API bool
+copy_config_preserves_default_view_transform();
 }  // namespace pvt
 OIIO_NAMESPACE_3_1_END
 
 OIIO_NAMESPACE_BEGIN
 namespace pvt {
+using v3_1::pvt::copy_config_preserves_default_view_transform;
 using v3_1::pvt::test_read_all_images;
 using v3_1::pvt::test_read_image;
 }  // namespace pvt

@@ -2267,8 +2267,9 @@ struct ColorInteropID {
 // recommendations.
 constexpr ColorInteropID color_interop_ids[] = {
     // Scene referred interop IDs first so they are the default in automatic
-    // conversion from CICP to interop ID. Some are not display color spaces
-    // at all, but can be represented by CICP anyway.
+    // conversion from CICP to interop ID (srgb_rec709_display below is the
+    // one deliberate exception). Some are not display color spaces at all,
+    // but can be represented by CICP anyway.
     { "lin_ap1_scene" },
     { "lin_ap0_scene" },
     { "lin_rec709_scene", CICPPrimaries::Rec709, CICPTransfer::Linear,
@@ -2280,6 +2281,14 @@ constexpr ColorInteropID color_interop_ids[] = {
     { "lin_adobergb_scene" },
     { "lin_ciexyzd65_scene", CICPPrimaries::XYZD65, CICPTransfer::Linear,
       CICPMatrix::Unspecified },
+    // Deliberate exception to the scene-referred-first ordering: per the
+    // convergence in issue #4787, general-purpose software treats content
+    // tagged Rec.709 primaries + sRGB transfer (H.273 transfer
+    // characteristic 13) as directly viewable, i.e. display-referred sRGB.
+    // Listed here, ahead of srgb_rec709_scene, so it wins the first-match
+    // lookup in get_color_interop_id(const int cicp[4]).
+    { "srgb_rec709_display", CICPPrimaries::Rec709, CICPTransfer::sRGB,
+      CICPMatrix::BT709 },
     { "srgb_rec709_scene", CICPPrimaries::Rec709, CICPTransfer::sRGB,
       CICPMatrix::BT709 },
     { "g22_rec709_scene", CICPPrimaries::Rec709, CICPTransfer::Gamma22,
@@ -2293,9 +2302,8 @@ constexpr ColorInteropID color_interop_ids[] = {
     { "data" },
     { "unknown" },
 
-    // Display referred interop IDs.
-    { "srgb_rec709_display", CICPPrimaries::Rec709, CICPTransfer::sRGB,
-      CICPMatrix::BT709 },
+    // Display referred interop IDs. (srgb_rec709_display is listed above,
+    // ahead of srgb_rec709_scene, so it resolves first on read.)
     { "g24_rec709_display", CICPPrimaries::Rec709, CICPTransfer::BT709,
       CICPMatrix::BT709 },
     { "srgb_p3d65_display", CICPPrimaries::P3D65, CICPTransfer::sRGB,

@@ -310,6 +310,16 @@ public:
 
     string_view resolve(string_view name) const;
 
+    // The comparison half of ColorConfig::equivalent(), with the first color
+    // space's resolved name and CSInfo passed in rather than recomputed.
+    // A caller that compares one name against a whole table of candidates can
+    // then pay for that resolve() and find() once instead of once per
+    // candidate. `orig1` is the caller's unresolved spelling, needed for the
+    // cheap name-equality early out.
+    bool equivalent_resolved(string_view orig1, string_view resolved1,
+                             const CSInfo* csi1,
+                             string_view color_space2) const;
+
     // Note: Uses std::format syntax
     template<typename... Args>
     void error(const char* fmt, const Args&... args) const
@@ -1623,23 +1633,23 @@ ColorConfig::Impl::resolve(string_view name) const
 
 
 bool
-ColorConfig::equivalent(string_view color_space1,
-                        string_view color_space2) const
+ColorConfig::Impl::equivalent_resolved(string_view orig1, string_view resolved1,
+                                       const CSInfo* csi1,
+                                       string_view color_space2) const
 {
     // Empty color spaces never match
-    if (color_space1.empty() || color_space2.empty())
+    if (color_space2.empty())
         return false;
     // Easy case: matching names are the same!
-    if (Strutil::iequals(color_space1, color_space2))
+    if (Strutil::iequals(orig1, color_space2))
         return true;
 
     // If "resolved" names (after converting aliases and roles to color
     // spaces) match, they are equivalent.
-    color_space1 = resolve(color_space1);
-    color_space2 = resolve(color_space2);
-    if (color_space1.empty() || color_space2.empty())
+    string_view resolved2 = resolve(color_space2);
+    if (resolved1.empty() || resolved2.empty())
         return false;
-    if (Strutil::iequals(color_space1, color_space2))
+    if (Strutil::iequals(resolved1, resolved2))
         return true;
 
     // If the color spaces' flags (when masking only the bits that refer to
@@ -1647,8 +1657,7 @@ ColorConfig::equivalent(string_view color_space1,
     const int mask     = CSInfo::is_srgb_display | CSInfo::is_srgb_scene
                          | CSInfo::is_lin_srgb | CSInfo::is_ACEScg
                          | CSInfo::is_Rec709;
-    const CSInfo* csi1 = getImpl()->find(color_space1);
-    const CSInfo* csi2 = getImpl()->find(color_space2);
+    const CSInfo* csi2 = find(resolved2);
     if (csi1 && csi2) {
         int flags1 = csi1->flags() & mask;
         int flags2 = csi2->flags() & mask;
@@ -1660,6 +1669,25 @@ ColorConfig::equivalent(string_view color_space1,
     }
 
     return false;
+}
+
+
+
+bool
+ColorConfig::equivalent(string_view color_space1,
+                        string_view color_space2) const
+{
+    // Empty color spaces never match
+    if (color_space1.empty() || color_space2.empty())
+        return false;
+    // Easy case: matching names are the same!
+    if (Strutil::iequals(color_space1, color_space2))
+        return true;
+
+    string_view resolved1 = getImpl()->resolve(color_space1);
+    return getImpl()->equivalent_resolved(color_space1, resolved1,
+                                          getImpl()->find(resolved1),
+                                          color_space2);
 }
 
 
@@ -2432,10 +2460,18 @@ ColorConfig::get_color_interop_id(string_view colorspace) const
         }
     }
 #endif
+    // Resolve the queried name and look up its CSInfo once. Calling
+    // equivalent() inside the loop would repeat both for every table entry,
+    // and each resolve() is an OCIO getColorSpace() call while each find() is
+    // a linear scan of the config's color spaces.
+    string_view resolved = getImpl()->resolve(colorspace);
+    const CSInfo* csi    = getImpl()->find(resolved);
     for (const ColorInteropID& interop : color_interop_ids) {
-        if (equivalent(colorspace, interop.interop_id)
+        if (getImpl()->equivalent_resolved(colorspace, resolved, csi,
+                                           interop.interop_id)
             || (interop.legacy_alias
-                && equivalent(colorspace, interop.legacy_alias))) {
+                && getImpl()->equivalent_resolved(colorspace, resolved, csi,
+                                                  interop.legacy_alias))) {
             return interop.interop_id;
         }
     }

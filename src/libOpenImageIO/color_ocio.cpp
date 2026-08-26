@@ -6,6 +6,7 @@
 #include <cmath>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <tsl/robin_map.h>
@@ -217,6 +218,14 @@ private:
     std::string ACEScg_alias;
     std::string Rec709_alias;
     mutable spin_rw_mutex m_mutex;
+    // Memoized results of get_color_interop_id(string_view), including the
+    // negative ones. Resolving a name against the interop table is expensive
+    // for configs that predate OCIO 2.5 (they have no native interop ID to
+    // answer from, so every lookup walks the whole table), and the answer
+    // cannot change for the life of this Impl. Node-based, so the string_view
+    // handed back stays valid as the map grows. Discarded wholesale by
+    // ColorConfig::reset(), which replaces the entire Impl.
+    mutable std::unordered_map<std::string, std::string> interop_id_memo;
     mutable std::string m_error;
     ColorProcessorMap colorprocmap;  // cache of ColorProcessors
     atomic_int colorprocs_requested;
@@ -319,6 +328,12 @@ public:
     bool equivalent_resolved(string_view orig1, string_view resolved1,
                              const CSInfo* csi1,
                              string_view color_space2) const;
+
+    // The uncached body of ColorConfig::get_color_interop_id(string_view).
+    string_view compute_color_interop_id(string_view colorspace) const;
+
+    // compute_color_interop_id(), memoized in interop_id_memo.
+    string_view get_color_interop_id(string_view colorspace) const;
 
     // Note: Uses std::format syntax
     template<typename... Args>
@@ -2441,16 +2456,50 @@ ColorConfig::get_color_interop_id(string_view colorspace) const
 {
     if (colorspace.empty())
         return "";
+
+    return getImpl()->get_color_interop_id(colorspace);
+}
+
+
+
+string_view
+ColorConfig::Impl::get_color_interop_id(string_view colorspace) const
+{
+    const std::string key(colorspace);
+    {
+        spin_rw_read_lock lock(m_mutex);
+        auto found = interop_id_memo.find(key);
+        if (found != interop_id_memo.end())
+            return found->second;
+    }
+
+    string_view result = compute_color_interop_id(colorspace);
+
+    // emplace() leaves an existing entry alone, so each stored string is
+    // written exactly once and the string_view returned here stays valid
+    // even if another thread raced us to the same key.
+    spin_rw_write_lock lock(m_mutex);
+    auto it = interop_id_memo
+                  .emplace(key, std::string(result.data(), result.size()))
+                  .first;
+    return it->second;
+}
+
+
+
+string_view
+ColorConfig::Impl::compute_color_interop_id(string_view colorspace) const
+{
 #if OCIO_VERSION_HEX >= MAKE_OCIO_VERSION_HEX(2, 5, 0)
-    if (getImpl()->config_ && !disable_ocio) {
+    if (config_ && !disable_ocio) {
         const char* interop_id = nullptr;
         try {
-            OCIO::ConstColorSpaceRcPtr c = getImpl()->config_->getColorSpace(
+            OCIO::ConstColorSpaceRcPtr c = config_->getColorSpace(
                 std::string(resolve(colorspace)).c_str());
             if (c)
                 interop_id = c->getInteropID();
         } catch (std::exception& e) {
-            getImpl()->error("Exception from OCIO: {}", e.what());
+            error("Exception from OCIO: {}", e.what());
             interop_id = nullptr;
         } catch (...) {
             interop_id = nullptr;
@@ -2464,14 +2513,13 @@ ColorConfig::get_color_interop_id(string_view colorspace) const
     // equivalent() inside the loop would repeat both for every table entry,
     // and each resolve() is an OCIO getColorSpace() call while each find() is
     // a linear scan of the config's color spaces.
-    string_view resolved = getImpl()->resolve(colorspace);
-    const CSInfo* csi    = getImpl()->find(resolved);
+    string_view resolved = resolve(colorspace);
+    const CSInfo* csi    = find(resolved);
     for (const ColorInteropID& interop : color_interop_ids) {
-        if (getImpl()->equivalent_resolved(colorspace, resolved, csi,
-                                           interop.interop_id)
+        if (equivalent_resolved(colorspace, resolved, csi, interop.interop_id)
             || (interop.legacy_alias
-                && getImpl()->equivalent_resolved(colorspace, resolved, csi,
-                                                  interop.legacy_alias))) {
+                && equivalent_resolved(colorspace, resolved, csi,
+                                       interop.legacy_alias))) {
             return interop.interop_id;
         }
     }

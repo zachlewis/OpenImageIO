@@ -2041,7 +2041,7 @@ ColorConfig::createDisplayTransform(ustring display, ustring view,
             p = legacy_viewing_pipeline->getProcessor(config, context);
             getImpl()->clear_error();
             handle = ColorProcessorHandle(new ColorProcessor_OCIO(p));
-        } catch (OCIO::Exception& e) {
+        } catch (std::exception& e) {
             getImpl()->error("Exception from OCIO: {}", e.what());
         } catch (...) {
             getImpl()->error(
@@ -2099,7 +2099,7 @@ ColorConfig::createFileTransform(ustring name, bool inverse) const
             getImpl()->clear_error();
             handle = ColorProcessorHandle(new ColorProcessor_OCIO(p));
         } catch (std::exception& e) {
-            getImpl()->error(e.what());
+            getImpl()->error("Exception from OCIO: {}", e.what());
         } catch (...) {
             getImpl()->error(
                 "An unknown error occurred in OpenColorIO, getProcessor");
@@ -2162,7 +2162,7 @@ ColorConfig::createNamedTransform(ustring name, bool inverse,
             getImpl()->clear_error();
             handle = ColorProcessorHandle(new ColorProcessor_OCIO(p));
         } catch (std::exception& e) {
-            getImpl()->error(e.what());
+            getImpl()->error("Exception from OCIO: {}", e.what());
         } catch (...) {
             getImpl()->error(
                 "An unknown error occurred in OpenColorIO, getProcessor");

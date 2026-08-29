@@ -120,6 +120,38 @@ test_Rec709_conversion()
 
 
 
+// A LUT path containing '{' or '}' used to abort the process. The OCIO
+// exception message was handed to error() as the *runtime format string*,
+// with no arguments, so fmt threw format_error straight out of the catch
+// handler that existed to contain the failure. Any user-supplied path
+// reaches this, because OCIO embeds the path verbatim in its message.
+static void
+test_ocio_error_message_with_braces()
+{
+    ColorConfig config;
+    const char* names[] = { "/nonexistent/nosuch.cube",
+                            "/nonexistent/no{such.cube",
+                            "/nonexistent/no}such.cube",
+                            "/nonexistent/{0}.cube" };
+    for (const char* name : names) {
+        bool threw = false;
+        try {
+            // Expected to fail -- the point is HOW it fails.
+            auto handle = config.createFileTransform(ustring(name));
+            OIIO_CHECK_ASSERT(!handle);
+        } catch (const std::exception& e) {
+            threw = true;
+            std::cout << "  unexpected exception for " << name << ": "
+                      << e.what() << "\n";
+        }
+        OIIO_CHECK_ASSERT(!threw);
+        // The failure must still be reported, not swallowed.
+        OIIO_CHECK_ASSERT(!config.geterror().empty());
+    }
+}
+
+
+
 int
 main(int argc, char* argv[])
 {
@@ -135,6 +167,7 @@ main(int argc, char* argv[])
 
     test_sRGB_conversion();
     test_Rec709_conversion();
+    test_ocio_error_message_with_braces();
 
     return unit_test_failures != 0;
 }

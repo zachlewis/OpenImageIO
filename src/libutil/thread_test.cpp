@@ -59,6 +59,77 @@ do_nothing(int /*thread_id*/)
 
 
 
+// Exercise the spin locks under real contention.
+//
+// This serves two purposes. It checks that the locks actually serialize --
+// the counter has to land exactly on its expected value, and it does not if
+// the lock is removed. And it gives ThreadSanitizer something to analyze:
+// the spin locks are built out of atomics rather than a mutex tsan
+// recognizes, so without the __tsan_mutex_* annotations in thread.h, tsan
+// reports the lock's own internal state as a data race. A tsan build of this
+// test is what catches it if those annotations ever regress.
+//
+// The DoNotOptimize() calls matter: at -O3 the compiler otherwise hoists the
+// whole loop into a single `counter += per_thread`, and then even an
+// unlocked version passes, because one add per thread rarely collides.
+static void
+test_spin_lock_contention()
+{
+    const int nt         = std::min(numthreads, 8);
+    const int per_thread = 100000;
+
+    {
+        // spin_mutex: every increment is exclusive, so no count can be lost.
+        spin_mutex mutex;
+        long long counter = 0;
+        thread_group g;
+        for (int i = 0; i < nt; ++i)
+            g.create_thread([&]() {
+                for (int j = 0; j < per_thread; ++j) {
+                    spin_lock lock(mutex);
+                    ++counter;
+                    DoNotOptimize(counter);
+                }
+            });
+        g.join_all();
+        OIIO_CHECK_EQUAL(counter, (long long)nt * per_thread);
+    }
+
+    {
+        // spin_rw_mutex: writers exclusive, readers shared and concurrent
+        // with each other. Readers observe the counter under a read lock,
+        // which is only race-free if the lock really does exclude writers.
+        spin_rw_mutex mutex;
+        long long counter = 0;
+        int nwriters      = std::max(1, nt / 2);
+        int nreaders      = std::max(1, nt - nwriters);
+        thread_group g;
+        for (int i = 0; i < nwriters; ++i)
+            g.create_thread([&]() {
+                for (int j = 0; j < per_thread; ++j) {
+                    spin_rw_write_lock lock(mutex);
+                    ++counter;
+                    DoNotOptimize(counter);
+                }
+            });
+        for (int i = 0; i < nreaders; ++i)
+            g.create_thread([&]() {
+                for (int j = 0; j < per_thread; ++j) {
+                    spin_rw_read_lock lock(mutex);
+                    // Read under the shared lock. Deliberately kept
+                    // thread-local: writing a shared result here would be an
+                    // unsynchronized write, i.e. a real race in the test
+                    // itself rather than in what it is testing.
+                    DoNotOptimize(counter);
+                }
+            });
+        g.join_all();
+        OIIO_CHECK_EQUAL(counter, (long long)nwriters * per_thread);
+    }
+}
+
+
+
 void
 time_thread_group()
 {
@@ -149,6 +220,8 @@ main(int argc, char** argv)
     getargs(argc, argv);
 
     std::cout << "hw threads = " << Sysutil::hardware_concurrency() << "\n";
+
+    test_spin_lock_contention();
 
     time_thread_group();
     time_thread_pool();

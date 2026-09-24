@@ -43,4 +43,18 @@ command += oiiotool ("-echo removed_cicp: test16.png --eraseattrib Software --ci
 # Test that "set_colorspace" removes CICP metadata
 command += oiiotool ("-echo remove_cicp_via_set_colorspace: test16.png --eraseattrib Software --cicp 1,13 --iscolorspace g22_rec709_display --printinfo")
 
+# Linear encodings with other primaries keep their CICP, and Rec.709 ones
+# need none. The display spellings too, which the config does not define.
+for cs in [ "lin_rec2020_scene", "lin_p3d65_scene", "lin_rec709_scene",
+            "lin_rec2020_display", "lin_p3d65_display" ] :
+    command += oiiotool ("--create 4x4 3 -d uint16 --iscolorspace " + cs + " -o " + cs + ".png")
+    command += oiiotool ("-echo " + cs + ": " + cs + ".png --eraseattrib Software --printinfo")
+
+# What the writer records for a color space with no CICP code point: cHRM and
+# gAMA where they can carry it, gAMA alone or nothing and a warning where they
+# cannot
+command += run_app (pythonbin + ' src/test-png-primaries.py "'
+                    + oiio_app("oiiotool").strip() + '" "'
+                    + OIIO_TESTSUITE_ROOT + '/jxl/ref/test-jxl.icc"')
+
 outputs = [ "test16.png", "out.txt" ]

@@ -137,6 +137,15 @@ Cineon is an image file format developed by Kodak that is commonly
 used for scanned motion picture film and digital intermediates.
 Cineon files use the file extension {file}`.cin`.
 
+Cineon headers do not reliably identify a color space, so OpenImageIO makes no
+assumption from them. The reader states that it cannot identify the pixels --
+`"colorInteropID"` is `unknown` and `"oiio:ColorSpace"` is left unset -- and
+the header fields remain available as `cineon:` attributes. A later color
+conversion (see Section {ref}`sec-metadata-color`) therefore resolves the
+source from an OCIO FileRule matching the filename, or from a color space name
+embedded in it, and concludes `unknown` when neither answers. Previous
+releases tagged every Cineon file `KodakLog`.
+
 (sec-bundledplugins-dds)=
 
 ## DDS
@@ -259,6 +268,36 @@ DPX files use the file extension {file}`.dpx`.
 
 Full specs can be found at <https://pub.smpte.org/doc/268/>
 
+**Color**
+
+DPX headers do not reliably identify a color space, so OpenImageIO makes no
+assumption from the transfer, colorimetric or gamma fields. The reader states
+that it cannot identify the pixels -- `"colorInteropID"` is `unknown` and
+`"oiio:ColorSpace"` is left unset -- and the codes remain available as
+`"dpx:Transfer"` and `"dpx:Colorimetric"`. Previous releases tagged *Linear* as
+`lin_rec709_scene`, *Logarithmic* as `KodakLog`, *ITU-R 709-4* as
+`srgb_rec709_scene`, and *User defined* with a gamma value as a Rec.709 gamma
+encoding. A later color conversion (see Section {ref}`sec-metadata-color`)
+therefore resolves the source from an OCIO FileRule matching the filename, or
+from a color space name embedded in it, so a configuration can assign DPX
+files their color space; when neither answers, the image is `unknown`.
+
+When writing with no color space, or `unknown`, `"dpx:Transfer"` and
+`"dpx:Colorimetric"` are written as given, so a DPX copy keeps its codes; a
+`"CICP"` attribute does not override them, because nothing has established
+what such an image encodes. Otherwise a color space that signals CICP
+primaries 1 with transfer 1 -- `g24_rec709_display`, for instance -- or a
+`"CICP"` attribute saying the same, writes *ITU-R 709-4* transfer and
+colorimetric codes. Any other color space writes an *Undefined* colorimetric
+code, even with Rec.709 primaries, and a *Linear* transfer for a linear
+encoding, which a deprecated `Gamma 1.0` color space name or an
+`"oiio:Gamma"` of 1.0 also establishes, *Logarithmic* for a `log` encoding,
+and *Undefined* otherwise. No other gamma is written, Rec.709 or not: the
+writer writes neither a *User defined* transfer nor a gamma value.
+`set_colorspace()`, and so `oiiotool --iscolorspace`, leaves `"dpx:Transfer"`
+and `"dpx:Colorimetric"` alone: `unknown` keeps them for a copy, and any other
+color space decides the codes written in their place.
+
 **Configuration settings for DPX input**
 
 When opening a DPX ImageInput with a *configuration* (see
@@ -317,12 +356,6 @@ control aspects of the writing itself:
      - Pointer to a ``Filesystem::IOProxy`` that will handle the I/O, for
        example by writing to memory rather than the file system.
 ```
-
-The writer does not infer a non-linear gamma for a non-Rec.709 color space
-from `oiio:ColorSpace`, or take one from an `oiio:Gamma` beside
-`chromaticities` other than Rec.709's. This output path does not also derive and write that
-color space's matching primaries, so a gamma by itself would make a false
-Rec.709 claim.
 
 **Custom I/O Overrides**
 

@@ -6206,9 +6206,21 @@ output_file(Oiiotool& ot, cspan<const char*> argv)
                 || Strutil::iends_with(filename, ".webp")))
             outcolorspace = string_view("srgb_rec709_scene");
         if (outcolorspace.empty()
-            && (Strutil::iends_with(filename, ".ppm")
-                || Strutil::iends_with(filename, ".pnm")))
-            outcolorspace = string_view("Rec709");
+            && Strutil::iequals(out->format_name(), "pnm")) {
+            // Match what the PNM reader will tag this file: the writer picks
+            // PFM, tagged linear, for float data whatever the extension.
+            ImageSpec outspec = *ir->spec();
+            adjust_output_options(filename, outspec, ir->nativespec(0), ot, 0,
+                                  ir->subimages(), supports_tiles, fileoptions,
+                                  (*ir)[0].was_direct_read());
+            int bits = outspec.get_int_attribute("oiio:BitsPerSample");
+            ot.output_dataformat    = outspec.format;
+            ot.output_bitspersample = bits;
+            outcolorspace = (bits == 32
+                             || (!bits && outspec.format.is_floating_point()))
+                                ? string_view("lin_rec709_scene")
+                                : string_view("ocio:itu709_rec709_scene");
+        }
         if (outcolorspace.size() && currentspace != outcolorspace) {
             if (ot.debug)
                 std::cout << "  Converting from " << currentspace << " to "
@@ -6700,7 +6712,6 @@ print_ocio_info(Oiiotool& ot, std::ostream& out)
         out << "No OpenColorIO";
     out << "\nColor config: " << colorconfig.configname() << "\n";
     out << "Known color spaces: \n";
-    const char* linear       = colorconfig.getColorSpaceNameByRole("linear");
     const char* scene_linear = colorconfig.getColorSpaceNameByRole(
         "scene_linear");
     for (int i = 0, e = colorconfig.getNumColorSpaces(); i < e; ++i) {
@@ -6708,8 +6719,6 @@ print_ocio_info(Oiiotool& ot, std::ostream& out)
         out << "    - " << quote_if_spaces(n);
         if ((scene_linear && !colorconfig.equivalent(n, "scene_linear")
              && colorconfig.equivalent(n, scene_linear))
-            || (linear && !colorconfig.equivalent(n, "linear")
-                && colorconfig.equivalent(n, linear))
             || colorconfig.isColorSpaceLinear(n))
             out << " (linear)";
         if (!colorconfig.isColorSpaceActive(n))

@@ -28,3 +28,18 @@ for f in files:
 # The compression-ratio guard must reject it before the caller allocates the
 # full pixel buffer.
 command += info_command ("src/bomb-65000.pgm", failureok=True, safematch=True)
+
+# Distinguish unchanged float PFM samples from integer BT.709 PNM samples.
+import struct
+with open("normalization.pfm", "wb") as f:
+    f.write(b"PF\n1 1\n-1.0\n" + struct.pack("<fff", 0.25, 0.5, 1.0))
+with open("normalization.ppm", "wb") as f:
+    f.write(b"P6\n1 1\n255\n" + bytes((0, 255, 0)))
+outputs += ["normalization.txt"]
+for i, filename in enumerate(("normalization.pfm", "normalization.ppm")):
+    command += run_app(
+        oiio_app("oiiotool") + " " + filename
+        + ' --echo "{TOP.\'oiio:ColorSpace\'} {TOP.AVGCOLOR}"'
+        + (" > " if i == 0 else " >> ") + "normalization.txt 2>&1",
+        silent=True,
+    )

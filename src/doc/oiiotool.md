@@ -757,22 +757,19 @@ This command linearizes a JPEG assumed to be in sRGB, saving as an HDRI
 OpenEXR file in ACEScg color space:
 
 ```
-oiiotool photo.jpg --colorconvert srgb acescg -o output.exr
+oiiotool photo.jpg --colorconvert srgb_rec709_scene lin_ap1_scene -o output.exr
 ```
 
 And the other direction:
 
 ```
-oiiotool render.exr --colorconvert acescg srgb -o fortheweb.png
-```
-
-Above, we're using the short aliases "srgb" and "acescg", but it's also fine
-to use the canonical Color Interop Forum names:
-
-```
-oiiotool photo.jpg --colorconvert srgb_rec709_scene lin_ap1_scene -o output.exr
 oiiotool render.exr --colorconvert lin_ap1_scene srgb_rec709_scene -o fortheweb.png
 ```
+
+Above, we're using the canonical Color Interop Forum names. Short aliases
+such as "acescg" also work when your OCIO configuration defines them. OIIO's
+fallbacks for the generic names "sRGB", "Rec709" and "linear" are deprecated
+(see `oiio:ColorSpace` in Section {ref}`sec-metadata-color`).
 
 This converts between two named color spaces (presumably defined by your
 facility's OpenColorIO configuration):
@@ -1459,8 +1456,8 @@ These are all non-positional flags that affect how all images are read in the
         in the `vd16` color space, you could specify the conversions
         explicitly::
 
-            oiiotool in_lg10.dpx --colorconvert lg10 linear \
-                                 --mulc 1.1,1.1,1.1,1.0 -colorconvert linear vd16 \
+            oiiotool in_lg10.dpx --colorconvert lg10 scene_linear \
+                                 --mulc 1.1,1.1,1.1,1.0 -colorconvert scene_linear vd16 \
                                  -d uint16 -o out_vd16.tif
 
         or rely on the naming convention matching the OCIO color space
@@ -5004,20 +5001,13 @@ to 8 bits, yet the stretch recovers both, in two different colors.
     drawn 16 pixels high in opaque white in all channels (1,1,1,...), and
     using a default font (which may be system dependent).
 
-    Examples::
+    Examples, as ``makefigures.bash`` runs them to make the figures below
+    (``OIIOTOOL`` defaults to ``oiiotool``):
 
-        oiiotool --create 320x240 3 --text:x=10:y=400:size=40 "Hello world" \
-            --text:x=100:y=200:font="Arial Bold":color=1,0,0:size=60 "Go Big Red!" \
-            --tocolorspace sRGB -o text.jpg
-
-        oiiotool --create 320x240 3 --text:x=160:y=120:xalign=center "Centered" \
-            --tocolorspace sRGB -o textcentered.jpg
-
-        oiiotool tahoe-small.jpg \
-                --text:x=160:y=40:xalign=center:size=40:shadow=0 "shadow = 0" \
-                --text:x=160:y=80:xalign=center:size=40:shadow=1 "shadow = 1" \
-                --text:x=160:y=120:xalign=center:size=40:shadow=2 "shadow = 2" \
-                --tocolorspace sRGB -o textshadowed.jpg
+    .. literalinclude:: makefigures.bash
+       :language: bash
+       :start-after: BEGIN-oiiotool-text
+       :end-before: END-oiiotool-text
 
     .. |textimg1| image:: figures/text.jpg
        :width: 2.0 in

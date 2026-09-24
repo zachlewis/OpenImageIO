@@ -69,12 +69,14 @@ command += oiiotool ("--autocc " + "../common/tahoe-tiny.tif" +
 # Test basic color transformation / OCIO functionality
 #
 
-# colorconvert without unpremult
+# colorconvert without unpremult. The deprecated "sRGB" stays as compatibility
+# coverage; "-oiioattrib debug 0" keeps its deprecation warning, printed with
+# OPENIMAGEIO_DEBUG or in debug builds, out of out.txt.
 if float(ociover) >= 2.2 :
-    command += oiiotool ("greyalpha_lin_srgb.tif --colorconvert:unpremult=0 lin_srgb sRGB -o greyalpha_sRGB.tif")
-    command += oiiotool ("greyalpha_lin_srgb.tif --colorconvert:unpremult=1 lin_srgb sRGB -o greyalpha_sRGB_un.tif")
-    command += oiiotool ("grey_lin_srgb.tif --colorconvert:unpremult=0 lin_srgb sRGB -o grey_sRGB.tif")
-    command += oiiotool ("grey_lin_srgb.tif --colorconvert:unpremult=1 lin_srgb sRGB -o grey_sRGB_un.tif")
+    command += oiiotool ("-oiioattrib debug 0 greyalpha_lin_srgb.tif --colorconvert:unpremult=0 lin_srgb sRGB -o greyalpha_sRGB.tif")
+    command += oiiotool ("-oiioattrib debug 0 greyalpha_lin_srgb.tif --colorconvert:unpremult=1 lin_srgb sRGB -o greyalpha_sRGB_un.tif")
+    command += oiiotool ("-oiioattrib debug 0 grey_lin_srgb.tif --colorconvert:unpremult=0 lin_srgb sRGB -o grey_sRGB.tif")
+    command += oiiotool ("-oiioattrib debug 0 grey_lin_srgb.tif --colorconvert:unpremult=1 lin_srgb sRGB -o grey_sRGB_un.tif")
 else:
     command += oiiotool ("greyalpha_lin_srgb.tif --colorconvert:unpremult=0 linear sRGB -o greyalpha_sRGB.tif")
     command += oiiotool ("greyalpha_lin_srgb.tif --colorconvert:unpremult=0 linear Cineon -o greyalpha_Cineon.tif")

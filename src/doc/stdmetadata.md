@@ -197,22 +197,35 @@ OpenImageIO understands.
 
     - `"lin_rec709_scene"`,  :  Color pixel values are known to be linear
       scene-referred and using sRGB/Rec709 color primaries. Note that
-      `"lin_rec709"` is treated as a synonym.
+      `"lin_rec709"` and `"lin_srgb"` are treated as aliases.
     - `"lin_ap1_scene"`, `"ACEScg"` :  ACEScg color space encoding.
     - `"lin_ap0_scene"` :  ACES2065-1, the recommended ACES space for
       interchange and archiving.
     - `"srgb_rec709_display"` : Using standard (piecewise) sRGB response and
       primaries.
     - `"srgb_rec709_scene"` : Same response and primaries as
-      `"srgb_rec709_display"` but for scene referred images. The token `"sRGB"`
-      is treated as a synonym, but it is recommended to use the more specific
-      interop ID.
+      `"srgb_rec709_display"` but for scene referred images. The token
+      `"srgb_tx"` is treated as an alias.
     - `"g22_rec709_display"` : Rec709/sRGB primaries, but using a response curve
       corresponding to gamma 2.2.
 
     Additionally, `"scene_linear"` is a role that is appropriate for color
     pixel values are known to be scene-linear and using facility-default color
     primaries as defined by the OpenColorIO configuration.
+
+    DEPRECATED(3.3): when the OpenColorIO configuration does not define
+    them, the generic names `"sRGB"`, `"Rec709"` and `"linear"` are
+    deprecated, and will be removed no earlier than OpenImageIO 4.0. Until
+    then, `"sRGB"` still selects the configuration's scene sRGB space, and
+    `"linear"` selects the `"scene_linear"` role (it previously selected
+    linear Rec709). Use `"srgb_rec709_scene"`, `"ocio:itu709_rec709_scene"`
+    (Rec709 primaries with the BT.709 camera transfer function, as tagged by
+    integer PNM input) or `"scene_linear"` instead. A deprecated name prints
+    a warning only when debugging output is enabled (for example, with
+    `OPENIMAGEIO_DEBUG` set). Names, aliases and roles the configuration
+    defines, including a color space or role named `"linear"`, keep their
+    meaning and never warn. None of this applies, and nothing warns, when no
+    OpenColorIO configuration is in use.
 ```
 
 ```{eval-rst}

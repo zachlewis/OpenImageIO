@@ -369,6 +369,7 @@ colorspaces:
 
   - !<ColorSpace>
     name: lin_rec709_scene
+    aliases: [lin_srgb, lin_rec709]
     interop_id: lin_rec709_scene
     encoding: scene-linear
     to_scene_reference: !<MatrixTransform> {matrix: [0.439632981919491, 0.382988698151554, 0.177378319928955, 0, 0.0897764429588424, 0.813439428748981, 0.0967841282921771, 0, 0.0175411703831727, 0.111546553302387, 0.87091227631444, 0, 0, 0, 0, 1]}
@@ -629,6 +630,7 @@ colorspaces:
 
   - !<ColorSpace>
     name: srgb_rec709_scene
+    aliases: [srgb_tx]
     interop_id: srgb_rec709_scene
     encoding: sdr-video
     to_scene_reference: !<GroupTransform>

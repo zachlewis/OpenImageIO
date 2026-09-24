@@ -8446,6 +8446,15 @@ main(int argc, char* argv[])
                         Strutil::timeintervalformat(opentime, 2));
         }
         OIIO::print("\n{}\n", ot.imagecache->getstats(2));
+        // Only what this run actually built. Asking ot.colorconfig() would
+        // construct a color config for a run that never needed one, which is
+        // exactly the cost these statistics exist to make visible.
+        if (const ColorConfig* cc = ot.m_colorconfig.get()) {
+            OIIO::print("Color config cache statistics:\n");
+            for (const auto& stat : pvt::color_cache_stats(*cc))
+                OIIO::print("  {:<32} : {}\n", stat.name(), stat.get_string());
+            OIIO::print("\n");
+        }
     }
 
     // Release references of images that might hold onto a shared

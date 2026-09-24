@@ -1026,6 +1026,15 @@ oiiotool multi.exr -sisplit -o:all=1 "sub.{TOP.'oiio:subimagename'}.exr"
 
     Print timing and memory statistics about the work done by
     :program:`oiiotool`.
+
+    If :program:`oiiotool` built its own color config while running the
+    command sequence, this also prints statistics for OpenImageIO's color
+    caches: retained entry counts, cold-work counters, and the exact number of
+    ICC profile bytes those caches retain. :program:`oiiotool` builds its
+    color config for color commands and whenever it writes an output file (it
+    looks for a color space name in the file name), but never just to report,
+    so a command sequence that did neither, such as one that only prints
+    information, prints no color cache section.
 ```
 
 ```{eval-rst}

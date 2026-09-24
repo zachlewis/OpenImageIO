@@ -65,6 +65,21 @@ and the OpenColorIO version actually in use. This keeps recognition aligned with
 the definitions the running build can construct. Recognition provides facts;
 it does not add a color space to the active configuration or change pixels.
 
+## Parsed source reuse
+
+Each file-backed wrapper owns a separate working config. Ordinary files reuse a
+process-wide parsed source capture only after rereading the file and comparing
+its exact bytes, the native effective environment context, and the parse-time
+active display, view and inactive-space selectors. Changed or unset environment
+variables are recaptured from authored defaults, so a `LOAD_ALL` config forgets
+a variable that is no longer set. Same-size and timestamp-preserving rewrites
+are therefore observed, and a removed or invalid source never yields a
+successful stale capture. One revision is retained per source descriptor and
+lexical absolute working directory, which preserves relative LUT roots through
+symlinked paths; existing wrappers and snapshots keep their values when a source
+changes. Archives, URIs and nonregular sources keep the native loader. Reuse
+does not change external LUT freshness or which derived results are admitted.
+
 ## Names and roles
 
 `scene_linear` remains an actual OCIO role: it selects the facility working

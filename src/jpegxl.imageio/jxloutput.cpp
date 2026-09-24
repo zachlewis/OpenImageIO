@@ -3,9 +3,11 @@
 // https://github.com/AcademySoftwareFoundation/OpenImageIO
 
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <vector>
 
+#include <OpenImageIO/color.h>
 #include <OpenImageIO/filesystem.h>
 #include <OpenImageIO/fmath.h>
 #include <OpenImageIO/imageio.h>
@@ -15,6 +17,8 @@
 #include <jxl/encode.h>
 #include <jxl/encode_cxx.h>
 #include <jxl/resizable_parallel_runner_cxx.h>
+
+#include "imageio_pvt.h"
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
 
@@ -474,6 +478,36 @@ JxlOutput::save_metadata(ImageSpec& m_spec, JxlEncoderPtr& encoder)
 
 
 
+// Store eight RGBW xy chromaticities as custom primaries and white point.
+// Fails, storing nothing, for chromaticities libjxl rejects: it refuses a
+// zero or non-finite x or y in any value it reads (ACES2065-1's green x and
+// CIE XYZ-D65's blue are zero), and a rejected color encoding leaves the
+// encoder in an error state that fails the whole file.
+static bool
+set_custom_primaries(JxlColorEncoding& encoding, cspan<float> xy)
+{
+    if (xy.size() != 8)
+        return false;
+    // libjxl ignores the primaries of a grey encoding, but not its white point.
+    const bool grey = encoding.color_space == JXL_COLOR_SPACE_GRAY;
+    for (size_t i = grey ? 6 : 0; i < 8; ++i)
+        if (!std::isfinite(xy[i]) || xy[i] == 0.0f)
+            return false;
+    encoding.white_point           = JXL_WHITE_POINT_CUSTOM;
+    encoding.white_point_xy[0]     = xy[6];
+    encoding.white_point_xy[1]     = xy[7];
+    encoding.primaries             = JXL_PRIMARIES_CUSTOM;
+    encoding.primaries_red_xy[0]   = xy[0];
+    encoding.primaries_red_xy[1]   = xy[1];
+    encoding.primaries_green_xy[0] = xy[2];
+    encoding.primaries_green_xy[1] = xy[3];
+    encoding.primaries_blue_xy[0]  = xy[4];
+    encoding.primaries_blue_xy[1]  = xy[5];
+    return true;
+}
+
+
+
 bool
 JxlOutput::save_image(const void* data)
 {
@@ -552,12 +586,18 @@ JxlOutput::save_image(const void* data)
         }
     }
 
-    // Write CICP
-    cspan<int> cicp = get_colorspace_cicp(m_spec, !wrote_colorspace);
-    if (!cicp.empty()) {
-        // JXL only has a subset of CICP, only write if supported. Custom
-        // primaries and white point are not currently used but could help
-        // support more CICP codes.
+    // A supplied ICC or CICP profile takes precedence over the color space.
+    // JXL accepts only one call that sets the color encoding.
+    cspan<int> cicp          = get_colorspace_cicp(m_spec, false);
+    const bool explicit_cicp = !cicp.empty();
+    ColorSpaceInfo info;
+    if (!wrote_colorspace && !explicit_cicp) {
+        info = pvt::get_colorspace_info(m_spec, true);
+        cicp = get_colorspace_cicp(m_spec, true);
+    }
+
+    if (!wrote_colorspace && !cicp.empty()) {
+        // JXL only has a subset of CICP, only write if supported.
         JxlColorEncoding color_encoding {};
         color_encoding.primaries = JxlPrimaries(cicp[0]);
         // CICP primaries 11 and 12 both represent P3, but with different white points.
@@ -572,7 +612,9 @@ JxlOutput::save_image(const void* data)
             color_encoding.white_point = JXL_WHITE_POINT_D65;
         }
         color_encoding.transfer_function = JxlTransferFunction(cicp[1]);
-        color_encoding.color_space       = JXL_COLOR_SPACE_RGB;
+        color_encoding.color_space       = m_basic_info.num_color_channels == 1
+                                               ? JXL_COLOR_SPACE_GRAY
+                                               : JXL_COLOR_SPACE_RGB;
 
         bool supported_primaries = false;
         bool supported_transfer  = false;
@@ -591,17 +633,74 @@ JxlOutput::save_image(const void* data)
         case JXL_TRANSFER_FUNCTION_LINEAR:
         case JXL_TRANSFER_FUNCTION_SRGB:
         case JXL_TRANSFER_FUNCTION_PQ:
-        case JXL_TRANSFER_FUNCTION_DCI:
         case JXL_TRANSFER_FUNCTION_HLG: supported_transfer = true; break;
         case JXL_TRANSFER_FUNCTION_GAMMA:  // Not an actual CICP code
-            break;
+        // libjxl's DCI is a pure gamma 2.6, without CICP 17's white scaling.
+        case JXL_TRANSFER_FUNCTION_DCI: break;
         }
+
+        // A CICP JXL has no code for may still be representable as a custom
+        // encoding: H.273 transfers that share a JXL curve or are pure
+        // powers, and primaries of a known linear identity.
+        if (!supported_transfer) {
+            supported_transfer = true;
+            switch (cicp[1]) {
+            case 6:
+            case 14:
+            case 15:
+                color_encoding.transfer_function = JXL_TRANSFER_FUNCTION_709;
+                break;
+            case 4:
+                color_encoding.transfer_function = JXL_TRANSFER_FUNCTION_GAMMA;
+                color_encoding.gamma             = 1.0 / 2.2;
+                break;
+            case 5:
+                color_encoding.transfer_function = JXL_TRANSFER_FUNCTION_GAMMA;
+                color_encoding.gamma             = 1.0 / 2.8;
+                break;
+            default: supported_transfer = false; break;
+            }
+        }
+        float cicp_xy[8];
+        if (!supported_primaries
+            && pvt::get_cicp_primaries_chromaticities(cicp[0], cicp_xy))
+            supported_primaries = set_custom_primaries(color_encoding, cicp_xy);
 
         if (supported_primaries && supported_transfer) {
             if (JXL_ENC_SUCCESS
                 != JxlEncoderSetColorEncoding(m_encoder.get(),
                                               &color_encoding)) {
                 errorfmt("JxlEncoderSetColorEncoding failed\n");
+            } else {
+                wrote_colorspace = true;
+            }
+        } else if (explicit_cicp) {
+            debugfmt("OpenImageIO WARNING: JPEG XL cannot represent CICP "
+                     "{},{},{},{}; writing no color encoding\n",
+                     cicp[0], cicp[1], cicp[2], cicp[3]);
+        }
+    }
+
+    // Otherwise store known primaries and a pure-power transfer as a custom
+    // encoding. libjxl stores the encoding exponent, the reciprocal of OIIO's
+    // decoding exponent, in [1/8192, 1].
+    float gamma     = info.transfer_function_gamma();
+    cspan<float> xy = info.chromaticities();
+    if (!wrote_colorspace && !explicit_cicp && std::isfinite(gamma)
+        && gamma >= 1.0f && gamma <= 8192.0f) {
+        JxlColorEncoding color_encoding {};
+        color_encoding.color_space = m_basic_info.num_color_channels == 1
+                                         ? JXL_COLOR_SPACE_GRAY
+                                         : JXL_COLOR_SPACE_RGB;
+        if (set_custom_primaries(color_encoding, xy)) {
+            color_encoding.transfer_function = JXL_TRANSFER_FUNCTION_GAMMA;
+            color_encoding.gamma             = 1.0 / gamma;
+            if (JXL_ENC_SUCCESS
+                != JxlEncoderSetColorEncoding(m_encoder.get(),
+                                              &color_encoding)) {
+                errorfmt("JxlEncoderSetColorEncoding failed\n");
+            } else {
+                wrote_colorspace = true;
             }
         }
     }

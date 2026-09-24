@@ -34,16 +34,28 @@ command += oiiotool(OIIO_TESTSUITE_IMAGEDIR+"/dpx_nuke_16bits_rgba.dpx"
 command += info_command("grey.dpx", safematch=True)
 command += diff_command("grey.dpx", "ref/grey.tif")
 
-# DPX has no primaries field: a linear encoding writes a Linear transfer and
-# reads back as lin_rec709_scene, whatever its primaries were
+# DPX has no primaries field: a linear encoding writes a Linear transfer, and
+# the file reads back unclaimed, whatever its primaries were
 command += oiiotool("--create 4x4 3 -d uint16 --iscolorspace lin_ap0_scene -o lin_ap0.dpx")
-command += oiiotool("lin_ap0.dpx --echo \"lin_ap0.dpx: {TOP.'dpx:Transfer'} {TOP.'oiio:ColorSpace'}\"")
+command += oiiotool("lin_ap0.dpx --echo \"lin_ap0.dpx: {TOP.'dpx:Transfer'} {TOP.'colorInteropID'}\"")
+# A PNG copy claims no more than the DPX did: no color chunk, so it reads back
+# "unknown" with no label and no gamma, not as sRGB
+command += oiiotool("lin_ap0.dpx -d uint8 -o lin_ap0.png")
+command += oiiotool("lin_ap0.png --echo \"lin_ap0.png: <{TOP['oiio:ColorSpace']}> {TOP['colorInteropID']} <{TOP['oiio:Gamma']}> <{TOP['png:sRGB']}>\"")
 # A built-in identity the config does not define is described by the built-in
 # interop-identities config: a linear one writes Linear, gamma 2.2 does not
 for cs in [ "oiio:lin_p3dci_display", "g22_adobergb_display" ] :
     f = cs.replace(":", "-") + ".dpx"
     command += oiiotool("--create 4x4 3 -d uint16 --iscolorspace " + cs + " -o " + f)
     command += oiiotool(f + " --echo \"" + f + ": {TOP.'dpx:Transfer'}\"")
+
+# The reader identifies nothing, but that does not stop resolution: a color
+# space named in the filename still resolves the image under --autocc, which
+# converts it. With nothing to go on the answer is "unknown", whatever the
+# configuration's own default assignment says.
+command += oiiotool("lin_ap0.dpx -o plate_ACEScct_v01.dpx")
+command += oiiotool("--autocc plate_ACEScct_v01.dpx --echo \"plate_ACEScct_v01.dpx: {TOP.'oiio:ColorSpace'} {TOP.'colorInteropID'}\"")
+command += oiiotool("--autocc grey.dpx --echo \"grey.dpx: {TOP.'oiio:ColorSpace'} {TOP.'colorInteropID'}\"")
 
 # Regression tests
 command += oiiotool("src/crash-badusersize.dpx -o test.tif", failureok=True)
@@ -78,3 +90,64 @@ command += info_command("src/bomb-46341.dpx", safematch=True, failureok=True)
 # The bounds check now counts the offset and rejects the file up front.
 command += info_command("src/truncated-userdata.dpx", safematch=True,
                         failureok=True)
+
+# Color: the reader identifies no color space, so every reread states
+# "unknown". The writer writes the codes a color space establishes, and with
+# none (or "unknown") copies the codes it was given.
+outputs += ["color.txt"]
+def color_roundtrip(name, args, source="--pattern constant:color=0,1,0 1x1 3",
+                    redirect=">>"):
+    return run_app(
+        oiio_app("oiiotool") + f" {source} {args} -d uint16 -o {name}.dpx"
+        + f" --pop {name}.dpx"
+        + f' --echo "{name}: {{TOP[\'dpx:Transfer\']}}, {{TOP[\'dpx:Colorimetric\']}} [{{TOP[\'colorInteropID\']}}]"'
+        + f" {redirect} color.txt 2>&1", silent=True)
+command += color_roundtrip("video", "--attrib oiio:ColorSpace g24_rec709_display",
+                           redirect=">")
+command += color_roundtrip("srgb", "--attrib oiio:ColorSpace srgb_rec709_scene")
+# Nor does a Rec.709 gamma write User defined, or any transfer
+command += color_roundtrip("gamma22", "--attrib oiio:ColorSpace g22_rec709_scene")
+command += color_roundtrip("linear", "--attrib oiio:ColorSpace lin_rec709_scene")
+# A linear identity the config does not define is still linear
+command += color_roundtrip("linear_display",
+                           "--attrib oiio:ColorSpace lin_rec709_display")
+# The transfer comes from the same output-gamma lookup the other writers use,
+# so a deprecated "Gamma 1.0" name is still linear
+command += color_roundtrip("legacy_gamma", '--attrib oiio:ColorSpace "Gamma 1.0"')
+command += color_roundtrip("log", "--attrib oiio:ColorSpace ACEScct")
+command += color_roundtrip("density", '--attrib dpx:Transfer "Printing density"'
+                           + ' --attrib dpx:Colorimetric "Printing density"')
+# A claimed image whose CICP attribute carries Rec.709 primaries and transfer
+# writes ITU-R 709-4, whatever color space it is labeled with.
+command += color_roundtrip("cicp_709",
+                           "--attrib oiio:ColorSpace g24_rec709_scene"
+                           + " --cicp 1,1")
+# An unclaimed image still copies its codes even when it carries a CICP
+# attribute: nothing has established that the attribute describes these pixels.
+command += color_roundtrip("unknown_cicp",
+                           '--attrib oiio:ColorSpace unknown --cicp 1,1'
+                           + ' --attrib dpx:Transfer "Printing density"'
+                           + ' --attrib dpx:Colorimetric "Printing density"')
+# A DPX copy keeps its codes; a conversion does not carry them.
+command += color_roundtrip("copy", "", source="density.dpx")
+command += color_roundtrip("converted", "--colorconvert lin_rec709_scene ACEScct",
+                           source="density.dpx")
+# --iscolorspace on a DPX that identifies nothing: a color space it assigns
+# decides the codes written (a contradicting CICP attribute does not survive
+# it), and re-asserting "unknown" leaves the DPX codes for the copy (the CICP
+# attribute gives it color metadata to remove).
+command += color_roundtrip("assigned", "--cicp 1,1 --iscolorspace ACEScct",
+                           source="density.dpx")
+command += color_roundtrip("reasserted", "--cicp 1,1 --iscolorspace unknown",
+                           source="density.dpx")
+
+# A DPX part states "unknown", which a strict multi-part OpenEXR write treats
+# as a missing ID, so it is accepted after a known first part. Each part reads
+# back as it was written.
+command += oiiotool("--create 4x4 3 --iscolorspace lin_ap1_scene "
+                    "-sattrib openexr:ColorInteropIDPolicy strict lin_ap0.dpx "
+                    "--siappendall -d half -o dpx_parts.exr")
+for part in (0, 1):
+    command += oiiotool(f"dpx_parts.exr --subimage {part} --echo "
+                        f"\"dpx_parts.exr part {part}: "
+                        "{TOP['colorInteropID']} <{TOP['oiio:ColorSpace']}>\"")

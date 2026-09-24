@@ -3,6 +3,7 @@
 // https://github.com/AcademySoftwareFoundation/OpenImageIO
 
 #include <algorithm>
+#include <atomic>
 #include <ctime> /* time_t, struct tm, gmtime */
 #include <iostream>
 #include <memory>
@@ -287,6 +288,23 @@ libraw_xtrans_filter_to_str(char (&filters)[6][6])
             result[y * 7 - 1] = ' ';
     }
     return result;
+}
+
+// No color space names these pixels: LibRaw returned the sensor's own
+// values, or it decoded to an encoding that has no color interop ID. Say so,
+// rather than leaving nothing behind: it is evidence a file rule or a site
+// policy can still resolve, where silence would be resolved as the default.
+// Leave "oiio:ColorSpace" unset, because "unknown" is not an identity, and
+// drop the camera's "Exif:ColorSpace", which describes neither these pixels
+// nor the request, along with any description an earlier request left.
+void
+set_unnamed_color(ImageSpec& spec)
+{
+    spec.erase_attribute("oiio:ColorSpace");
+    spec.erase_attribute("Exif:ColorSpace");
+    spec.erase_attribute("chromaticities");
+    spec.erase_attribute("oiio:Gamma");
+    spec.attribute("colorInteropID", "unknown");
 }
 }  // namespace
 
@@ -628,82 +646,121 @@ RawInput::open_raw(bool unpack, bool process, const std::string& name,
     m_processor->imgdata.params.use_camera_matrix
         = config.get_int_attribute("raw:use_camera_matrix", 1);
 
-    // Check to see if the user has explicitly requested output colorspace
-    // primaries via a configuration hint "raw:ColorSpace". The default if
-    // there is no such hint is convert to sRGB, so that if somebody just
-    // naively reads a raw image and slaps it into a framebuffer for
-    // display, it will work just like a jpeg. More sophisticated users
-    // might request a particular color space, like "ACES". Note that a
-    // request for "sRGB-linear" will give you sRGB primaries with a linear
-    // response.
+    // Output color space, from the "raw:ColorSpace" configuration hint. The
+    // default is sRGB, so that if somebody just naively reads a raw image
+    // and slaps it into a framebuffer for display, it will work just like a
+    // jpeg. Each row is a name and its LibRaw decode (output_color, gamm[0],
+    // gamm[1]), whose curve toe LibRaw solves for. A color interop ID's row
+    // decodes to that ID. LibRaw's ProPhoto (and Wide) matrices are
+    // Bradford-adapted to D50, its XYZ is D65.
+    //
+    // The older decoder names are deprecated in 3.3, with removal no earlier
+    // than 4.0. They keep their decode, and are tagged with the ID whose
+    // curve is within 2.5e-4 of it, as LibRaw's BT.709 curve is of
+    // ocio:itu709_rec709_scene's. Adobe keeps its 2.2 exponent, 1.3e-4 from
+    // g22_adobergb_scene's 563/256. Wide Gamut RGB has no ID.
+    struct RawColorSpace {
+        const char* name;
+        int output_color;
+        double gamm0, gamm1;
+        const char* deprecated_id = nullptr;
+    };
+    static const RawColorSpace raw_colorspaces[] = {
+        { "raw", 0, 1.0, 1.0 },
+        { "srgb_rec709_scene", 1, 1.0 / 2.4, 12.92 },
+        { "srgb_texture", 1, 1.0 / 2.4, 12.92 },
+        { "lin_rec709_scene", 1, 1.0, 1.0 },
+        { "g24_rec709_scene", 1, 1.0 / 2.4, 0.0 },
+        { "g22_rec709_scene", 1, 1.0 / 2.2, 0.0 },
+        { "g18_rec709_scene", 1, 1.0 / 1.8, 0.0 },
+        { "ocio:itu709_rec709_scene", 1, 0.45, 4.5 },
+        { "lin_adobergb_scene", 2, 1.0, 1.0 },
+        { "g22_adobergb_scene", 2, 256.0 / 563.0, 0.0 },
+        { "oiio:lin_prophoto_scene", 4, 1.0, 1.0 },
+        { "oiio:g18_prophoto_scene", 4, 1.0 / 1.8, 0.0 },
+        { "lin_ciexyzd65_scene", 5, 1.0, 1.0 },
+        { "lin_ap0_scene", 6, 1.0, 1.0 },
+        { "lin_p3d65_scene", 7, 1.0, 1.0 },
+        { "srgb_p3d65_scene", 7, 1.0 / 2.4, 12.92 },
+        { "lin_rec2020_scene", 8, 1.0, 1.0 },
+        { "sRGB", 1, 1.0 / 2.4, 12.92, "srgb_rec709_scene" },
+        { "sRGB-linear", 1, 1.0, 1.0, "lin_rec709_scene" },
+        { "linear", 1, 1.0, 1.0, "lin_rec709_scene" },
+        { "lin_srgb", 1, 1.0, 1.0, "lin_rec709_scene" },
+        { "lin_rec709", 1, 1.0, 1.0, "lin_rec709_scene" },
+        { "Adobe", 2, 1.0 / 2.2, 0.0, "g22_adobergb_scene" },
+        { "Wide", 3, 1.0, 1.0, "" },
+        { "ProPhoto", 4, 1.0 / 1.8, 0.0, "oiio:g18_prophoto_scene" },
+        { "ProPhoto-linear", 4, 1.0, 1.0, "oiio:lin_prophoto_scene" },
+        { "XYZ", 5, 1.0, 1.0, "lin_ciexyzd65_scene" },
+        { "ACES", 6, 1.0, 1.0, "lin_ap0_scene" },
+        { "DCI-P3", 7, 1.0, 1.0, "lin_p3d65_scene" },
+        { "Rec2020", 8, 1.0, 1.0, "lin_rec2020_scene" },
+    };
+    static_assert(std::size(raw_colorspaces) <= 31,
+                  "the deprecation warning needs one int bit per row");
     std::string cs = config.get_string_attribute("raw:ColorSpace",
                                                  "srgb_rec709_scene");
-    if (Strutil::iequals(cs, "raw")) {
-        // Values straight from the chip
-        m_processor->imgdata.params.output_color = 0;
-        m_processor->imgdata.params.gamm[0]      = 1.0;
-        m_processor->imgdata.params.gamm[1]      = 1.0;
-    } else if (Strutil::iequals(cs, "srgb_rec709_scene")
-               || Strutil::iequals(cs, "sRGB") /* Necessary? */
-               || equivalent_colorspace(cs, "srgb_rec709_scene")) {
-        // Request explicit sRGB, including usual sRGB response
-        m_processor->imgdata.params.output_color = 1;
-        m_processor->imgdata.params.gamm[0]      = 1.0 / 2.4;
-        m_processor->imgdata.params.gamm[1]      = 12.92;
-    } else if (Strutil::iequals(cs, "sRGB-linear")
-               || Strutil::iequals(cs, "lin_srgb")
-               || Strutil::iequals(cs, "lin_rec709")
-               || Strutil::iequals(cs, "linear") /* DEPRECATED */
-               || equivalent_colorspace(cs, "lin_rec709_scene")) {
-        // Request "sRGB" primaries, linear response
-        m_processor->imgdata.params.output_color = 1;
-        m_processor->imgdata.params.gamm[0]      = 1.0;
-        m_processor->imgdata.params.gamm[1]      = 1.0;
-        cs                                       = "lin_rec709_scene";
-    } else if (Strutil::iequals(cs, "Adobe")) {
-        // Request Adobe color space with 2.2 gamma (no linear toe)
-        m_processor->imgdata.params.output_color = 2;
-        m_processor->imgdata.params.gamm[0]      = 1.0 / 2.2;
-        m_processor->imgdata.params.gamm[1]      = 0.0;
-    } else if (Strutil::iequals(cs, "Wide")) {
-        m_processor->imgdata.params.output_color = 3;
-        m_processor->imgdata.params.gamm[0]      = 1.0;
-        m_processor->imgdata.params.gamm[1]      = 1.0;
-    } else if (Strutil::iequals(cs, "ProPhoto")) {
-        // ProPhoto by convention has gamma 1.8
-        m_processor->imgdata.params.output_color = 4;
-        m_processor->imgdata.params.gamm[0]      = 1.0 / 1.8;
-        m_processor->imgdata.params.gamm[1]      = 0.0;
-    } else if (Strutil::iequals(cs, "ProPhoto-linear")) {
-        // Linear version of PhotoPro
-        m_processor->imgdata.params.output_color = 4;
-        m_processor->imgdata.params.gamm[0]      = 1.0;
-        m_processor->imgdata.params.gamm[1]      = 1.0;
-    } else if (Strutil::iequals(cs, "XYZ")) {
-        // XYZ linear
-        m_processor->imgdata.params.output_color = 5;
-        m_processor->imgdata.params.gamm[0]      = 1.0;
-        m_processor->imgdata.params.gamm[1]      = 1.0;
-    } else if (Strutil::iequals(cs, "ACES")) {
-        // ACES linear
-        m_processor->imgdata.params.output_color = 6;
-        m_processor->imgdata.params.gamm[0]      = 1.0;
-        m_processor->imgdata.params.gamm[1]      = 1.0;
-    } else if (Strutil::iequals(cs, "DCI-P3")) {
-        // DCI-P3
-        m_processor->imgdata.params.output_color = 7;
-        m_processor->imgdata.params.gamm[0]      = 1.0;
-        m_processor->imgdata.params.gamm[1]      = 1.0;
-    } else if (Strutil::iequals(cs, "Rec2020")) {
-        // Rec2020
-        m_processor->imgdata.params.output_color = 8;
-        m_processor->imgdata.params.gamm[0]      = 1.0;
-        m_processor->imgdata.params.gamm[1]      = 1.0;
-    } else {
+
+    const RawColorSpace* row = nullptr;
+    for (const auto& r : raw_colorspaces)
+        if (Strutil::iequals(cs, r.name)) {
+            row = &r;
+            break;
+        }
+    // After the literal names, a config alias of sRGB or linear Rec.709
+    // still selects that decode.
+    for (const auto& r : raw_colorspaces)
+        if (!row
+            && (Strutil::iequals(r.name, "srgb_rec709_scene")
+                || Strutil::iequals(r.name, "lin_rec709_scene"))
+            && equivalent_colorspace(cs, r.name))
+            row = &r;
+    if (!row) {
         errorfmt("raw:ColorSpace set to unknown value \"{}\"", cs);
         return false;
     }
-    m_spec.set_colorspace(cs);
+    if (row->deprecated_id) {
+        static std::atomic<int> warned { 0 };  // once per process per name
+        const int bit = 1 << int(row - raw_colorspaces);
+        if (!(warned.fetch_or(bit) & bit))
+            debugfmt("OpenImageIO WARNING: raw:ColorSpace \"{}\" is "
+                     "deprecated{}\n",
+                     row->name,
+                     *row->deprecated_id
+                         ? Strutil::fmt::format("; use \"{}\"",
+                                                row->deprecated_id)
+                         : std::string());
+    }
+    m_processor->imgdata.params.output_color = row->output_color;
+    m_processor->imgdata.params.gamm[0]      = row->gamm0;
+    m_processor->imgdata.params.gamm[1]      = row->gamm1;
+    // LibRaw skips the output matrix for monochrome sensors and for cameras
+    // it has no color matrix for, so those pixels stay camera-native, as
+    // "raw" always is. LibRaw also drops it while decoding Leaf backs
+    // without a CFA, which this check at open cannot see.
+    const char* tag = row->deprecated_id ? row->deprecated_id : row->name;
+    if (!row->output_color || m_processor->imgdata.rawdata.ioparams.raw_color
+        || m_processor->imgdata.idata.colors == 1) {
+        set_unnamed_color(m_spec);
+    } else if (!*tag) {
+        // Wide Gamut RGB has no color interop ID, so its decode goes
+        // untagged -- but it is no mystery, so say what it is instead of
+        // only that it has no name. These are the primaries of LibRaw's own
+        // Wide output matrix (LibRaw_constants::wide_rgb, read through the
+        // sRGB matrix it decodes through), with the D65 white it takes a
+        // neutral to, and gamm[] above makes the transfer function linear.
+        static const float wide_chromaticities[] = { 0.735433f, 0.260745f,
+                                                     0.095528f, 0.840843f,
+                                                     0.151495f, 0.023330f,
+                                                     0.3127f,   0.3290f };
+        set_unnamed_color(m_spec);
+        m_spec.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                         wide_chromaticities);
+        m_spec.attribute("oiio:Gamma", 1.0f);
+    } else {
+        m_spec.set_colorspace(tag);
+    }
 
     // Exposure adjustment
     float exposure = config.get_float_attribute("raw:Exposure", -1.0f);
@@ -789,8 +846,10 @@ RawInput::open_raw(bool unpack, bool process, const std::string& name,
             m_spec.attribute("raw:BlackLevel", black_level);
             m_spec.attribute("raw:BitsPerSample", raw_bps);
 
-            // Also, any previously set demosaicing options are void, so remove them
-            m_spec.erase_attribute("oiio:ColorSpace");
+            // Also, any previously set demosaicing options are void, so
+            // remove them. Undemosaiced pixels are camera-native whatever
+            // was requested.
+            set_unnamed_color(m_spec);
             m_spec.erase_attribute("raw:ColorSpace");
             m_spec.erase_attribute("raw:Exposure");
         } else {

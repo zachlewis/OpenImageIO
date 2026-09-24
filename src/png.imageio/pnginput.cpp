@@ -204,9 +204,9 @@ PNGInput::open(const std::string& name, ImageSpec& newspec)
         m_gamma = 1.0f;
     } else {
         m_gamma = pvt::get_colorspace_rec709_gamma(m_spec, false);
-        if (m_gamma == 0.0f) {
-            m_gamma = 1.0f;
-        }
+        // Primaries other than Rec.709 leave the file's own gamma.
+        if (m_gamma == 0.0f)
+            m_gamma = m_spec.get_float_attribute("oiio:Gamma", 1.0f);
     }
 
     newspec         = spec();

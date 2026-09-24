@@ -3225,6 +3225,49 @@ are often constructed from them:
 
 ## Color space conversion
 
+When `colorconvert()` or a forward `ociodisplay()` is given an empty or
+`"current"` source color space, it resolves the source from the image's
+metadata under the same color configuration and context used to build the
+processor. An explicit source is used as given. Resolution includes the
+reader's `oiio:ColorSpace` label and the container reported by the reader, so
+PNG cICP, sRGB, gamma, and chromaticities and OpenEXR chromaticities have the
+same meaning here as during automatic input conversion. PNG gamma without
+chromaticities selects a configured transfer match, display-referred first
+and then scene-referred, without asserting a gamut. OCIO FileRules are not
+applied to the ImageBuf name.
+
+If the image states nothing at all about its color, the configuration
+decides: under strict parsing the source is a color space the configuration
+names or aliases `unknown`, or `unknown` itself; otherwise it is the
+configuration's default file rule and then its `default` role. If the image
+states something this configuration cannot use, including a `colorInteropID`
+of `unknown`, the source is `unknown`. `unknown` is refused as a source with
+an error, unless the configuration defines a color space by that name. Before
+3.3, an image that established no source was silently converted as
+`scene_linear`. These calls always apply the configuration's policy to an
+image that states nothing, because they have been asked to convert and must
+choose a source; `oiiotool --autocc`, whose job includes deciding whether to
+convert at all, instead leaves such an image alone unless asked for this
+behavior with `--autocc:missing=config`.
+
+`ociolook()` resolves an empty or `"current"` source or destination from the
+image's metadata in the same way, except that an image that states nothing at
+all is taken to be `scene_linear`, as before.
+
+A known encoding absent from the active configuration can connect through its
+OCIO interchange role. A data source is copied unchanged, keeping the tags
+that say so. An inverse `ociodisplay()` treats its source argument as the
+scene end of the transform, so an empty source means `scene_linear`.
+
+After a conversion, source-encoding metadata is removed and the result is
+tagged with its destination, including a `colorInteropID` so that a writer
+need not re-derive one. That ID is `unknown` where the conversion has no one
+portable destination: a region of interest short of the whole color image
+(which is also labeled `oiio:ColorSpace` `unknown`), a conversion made under
+a context override, or a destination the configuration gives no ID. A
+conversion that is a no-op between one space and itself leaves all metadata
+alone.
+
 :::{doxygengroup} colorconvert
 :::
 
@@ -3729,4 +3772,3 @@ this section should not be expected to work with deep images.
     deep pixel of the source image (no true interpolation is done for deep
     images).
 ```
-

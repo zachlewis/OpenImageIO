@@ -767,18 +767,26 @@ OpenEXRInput::PartInfo::parse_header(OpenEXRInput* in,
 
     spec.attribute("oiio:subimages", in->m_nsubimages);
 
-    // Try to figure out the color space for some unambiguous cases
+    // Try to figure out the color space for some unambiguous cases. A
+    // "colorInteropID" of "unknown" says the writer could not identify the
+    // pixels, which is evidence and not a statement about them: leave the
+    // label unset so a conversion resolves from the rest of the header, and
+    // keep the attribute as the evidence it is.
     if (spec.get_int_attribute("acesImageContainerFlag") == 1) {
         pvt::set_colorspace(spec, "lin_ap0_scene");
     } else {
         // Follow the color interop forum recommendation for OpenEXR files,
-        // inheriting the colorInteropID from the first part.
+        // inheriting the colorInteropID from the first part. An inherited
+        // "unknown" is recorded as this part's own, the evidence it would be
+        // had the part stated it.
         string_view interop_id = spec.get_string_attribute("colorInteropID");
-        if (!interop_id.empty()) {
-            pvt::set_colorspace(spec, interop_id);
-        } else if (!in->m_file_color_interop_id.empty()) {
-            pvt::set_colorspace(spec, in->m_file_color_interop_id);
+        if (interop_id.empty()) {
+            interop_id = in->m_file_color_interop_id;
+            if (Strutil::iequals(interop_id, "unknown"))
+                spec.attribute("colorInteropID", interop_id);
         }
+        if (!interop_id.empty() && !Strutil::iequals(interop_id, "unknown"))
+            pvt::set_colorspace(spec, interop_id);
     }
 
     // Squash some problematic texture metadata if we suspect it's wrong

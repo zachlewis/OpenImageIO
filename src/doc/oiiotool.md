@@ -1017,7 +1017,8 @@ oiiotool multi.exr -sisplit -o:all=1 "sub.{TOP.'oiio:subimagename'}.exr"
 .. option:: --debug
 
     Debug mode --- print lots of information about what operations are being
-    performed.
+    performed. For each input resolved by `--autocc`, this includes one line
+    per resolver rule reached and one summary of the result.
 ```
 
 ```{eval-rst}
@@ -1348,6 +1349,22 @@ the way that subsequent images will be written upon output.
       `:autocc=` *int*
         Enable or disable `--autocc` for this input image (the default is to use
         the global setting).
+      `:failover=` *colorspace*
+        Use this color space when automatic input resolution finds no usable
+        source. Its presence overrides the persistent `--autocc` value for
+        this input, including an explicitly empty value.
+      `:filerules=` *metadata|first|fallback*
+        Override the persistent `--autocc` FileRules policy for this input.
+      `:missing=` *none|config*
+        Override the persistent missing-source policy for this input.
+      `:numericstate=` *scene|display*
+        Select the image state for PNG numeric metadata, including gamma
+        without chromaticities. The default is `display`; other metadata and
+        formats are unaffected.
+      `:key=` *name*, `:value=` *value*
+        Set comma-separated OCIO context variables for this input. The same
+        context is used for metadata resolution and the conversion that
+        follows it.
       `:unpremult=` *int*
         If autocc is used for this image, should any color transformation be
         done on unassociated colors (unpremultiplied by alpha). The default is 0.
@@ -1421,27 +1438,95 @@ These are all non-positional flags that affect how all images are read in the
     associated with a particular data format, it will output that data
     format (akin to `-d`).
 
-    The rules for deducing color spaces are as follows, in order of
-    priority:
+    An **input** file's color space is resolved from, in order: an explicit
+    assignment; an ACES container flag; the filename step when
+    `filerules=first`; `colorInteropID`; cICP; the PNG sRGB chunk; numeric
+    metadata; the filename step in the default `fallback` mode; the
+    reader's ``"oiio:ColorSpace"`` label; and finally `:failover=`. The
+    filename step is non-default OCIO FileRules together with OpenImageIO's
+    own convention of a color space name embedded in the filename, and
+    `filerules=metadata` turns both off. A full PNG cICP claim suppresses the
+    weaker in-file PNG facts and the reader label even when the claim cannot
+    be identified. Known encodings absent from the active configuration are
+    converted through OpenImageIO's internal reference and the configuration's
+    OCIO interchange role.
 
-    1. If the filename (input or output) contains as a substring the name of
-       a color space from the current OpenColorIO configuration, that will
-       be assumed to be the color space of input data (or be the requested
-       color space for output).
+    A file that states a color space this configuration cannot use, including
+    a `colorInteropID` of `unknown`, does not stop there: the rest of its
+    metadata and the filename step are still tried. If they establish nothing
+    either, the result is `unknown`, and the image is tagged as such and left
+    unconverted — unless the configuration itself defines a color space named
+    or aliased `unknown`. That space is the configuration author's
+    catch-space, and it answers every exhausted case: an image that stated
+    `unknown`, an identifier this configuration cannot use, a PNG cICP claim
+    that suppressed the weaker facts beneath it, and an image that stated
+    nothing at all under `missing=config`. The image is then converted from
+    that space like any other, so no image is tagged `unknown` for what it
+    said or failed to say. A name the *caller* spelled that this
+    configuration does not define is the one case the catch-space does not
+    answer, as the next paragraph describes.
 
-    2. For input files, if the ImageInput set the ``"oiio:ColorSpace"``
-       metadata, it will be honored if the filename did not override it.
+    A color space the caller names (`:failover=`, or the `assignment` a
+    library caller passes) is resolved under the effective OCIO context — the
+    configuration's own context plus any per-call context override — before it
+    is judged. One that resolves to an empty string named nothing and stays
+    catchable; one that resolves to a non-empty name this configuration does
+    not define is the caller's mistake, is not answered by the catch-space,
+    and fails with `Unknown color space name`. A variable the context does not
+    define is left unexpanded, so it is the caller's mistake too, not a name
+    that resolved to nothing. A per-call override needs a value:
+    `:key=CS:value=` with nothing after it overrides nothing, so a spelling
+    resolves to an empty string only where the configuration's own
+    `environment` maps it so.
 
-    3. When outputting to JPEG files, assume that sRGB is the desired output
-       color space (since JPEG requires sRGB), but still this only occurs if
-       the filename does not specify something different.
+    An **output** file's color space comes from the filename: if it contains
+    as a substring the name of a color space from the current OpenColorIO
+    configuration, that is the requested output color space. When writing
+    JPEG, sRGB is assumed, unless the filename specifies something different.
+    The image is converted from its ``"oiio:ColorSpace"``; an image without
+    one is converted from what its metadata establishes, as an input is, is
+    left unconverted if that ends as `unknown`, and is taken to be
+    scene-linear only if its metadata states nothing at all.
 
     If the implied color transformation is unknown (for example, involving a
-    color space that is not recognized), a warning will be printed, but it
-    the rest of `oiiotool` processing will proceed (but without having
+    color space that is not recognized), a warning will be printed, but the
+    rest of `oiiotool` processing will proceed (but without having
     transformed the colors of the image).
 
     Optional appended modifiers include:
+
+      `:failover=` *colorspace*
+        Use this source after ordinary input resolution is exhausted. The
+        value is resolved under each input's effective OCIO context before it
+        is judged, so it may spell a context variable. A value that resolves
+        to an empty string named nothing; one that resolves to a non-empty
+        name this configuration does not define is an error.
+      `:filerules=` *metadata|first|fallback*
+        Disable the filename step, try it before metadata, or try it after
+        metadata. The default is `fallback`; `-i:filerules=` overrides it for
+        one input.
+      `:missing=` *none|config*
+        What to do with an input that states nothing at all about its color.
+        With `none`, the default, leave it unconverted. With `config`, let
+        the configuration decide: under strict parsing the result is a color
+        space the configuration names or aliases `unknown`, or `unknown`
+        itself; otherwise it is the FileRules default assignment and then the
+        `default` role. This setting does not affect an input that did state
+        something: that always resolves, or ends as `unknown`.
+
+        An image that ends as `unknown` is tagged `unknown` and left
+        unconverted, and takes with it the in-file facts it could not act on,
+        so that the next reader is not handed evidence this read declined to
+        use.
+
+        `--autocc` and the library differ here on purpose.
+        `ImageBufAlgo::colorconvert()` and `ImageBufAlgo::ociodisplay()` with
+        an empty or `"current"` source always apply the configuration's policy
+        for an image that states nothing, because they have been asked to
+        convert and must choose some source. `--autocc` has not: its job
+        includes deciding whether to convert at all, so by default it leaves
+        such an image alone. Use `missing=config` to give `--autocc` the same
+        behavior as the library calls.
 
       `:unpremult=` *int*
         If nonzero, when autocc is performed on an image containing an alpha
@@ -1450,6 +1535,12 @@ These are all non-positional flags that affect how all images are read in the
         color transformation is done with unassociated color values. The
         default is 0, meaning that the color transformation will be done
         directly on the associated color values.
+
+    With `--debug`, automatic input conversion prints each resolver rule it
+    reaches, its outcome and reason, followed by the summary for that same
+    resolution. Debug tracing does not perform another resolution or change
+    the result. Invalid numeric evidence includes non-finite chromaticities
+    and negative or non-finite gamma; resolution then continues.
 
     Example:
 
@@ -5133,7 +5224,15 @@ will be printed with the command `oiiotool --colorconfiginfo`.
     Alter the metadata of the current image so that it thinks its pixels are
     in the named color space.  This does not alter the pixels of the image,
     it only changes :program:`oiiotool`'s understanding of what color space
-    those those pixels are in.
+    those pixels are in. The name is authoritative: as with
+    `ImageSpec::set_colorspace()`, the image's other color metadata (color
+    interop ID, CICP, chromaticities, gamma, PNG sRGB facts, the ACES
+    container flag and Exif and TIFF color tags) is kept where it agrees with
+    the named space, rewritten where the name determines it, and removed
+    otherwise, and ICC profiles are removed, so subsequent color resolution
+    and writers use the newly assigned space. This happens even when the name
+    is already the image's color space. Mastering display metadata is not
+    changed. An empty name only removes `oiio:ColorSpace`.
 ```
 
 ```{eval-rst}
@@ -5142,7 +5241,11 @@ will be printed with the command `oiiotool --colorconfiginfo`.
     Replace the current image with a new image whose pixels are transformed
     from the named *fromspace* color space into the named *tospace*
     (disregarding any notion it may have previously had about the color
-    space of the current image). Optional appended modifiers include:
+    space of the current image). An empty or `current` *fromspace* resolves
+    the source from the current image's metadata under the command's config
+    and context, and the configuration decides when the metadata establishes
+    no source (see Section :ref:`sec-iba-color`).
+    Optional appended modifiers include:
 
     - `key=` *name*, `value=` *str* :
 
@@ -5173,9 +5276,10 @@ will be printed with the command `oiiotool --colorconfiginfo`.
 .. option:: --tocolorspace <tospace>
 
     Replace the current image with a new image whose pixels are transformed
-    from their existing color space (as best understood or guessed by OIIO)
-    into the named *tospace*.  This is equivalent to a use of
-    `oiiotool --colorconvert` where the *fromspace* is automatically deduced.
+    into the named *tospace*. This is equivalent to `--colorconvert` with an
+    empty source: metadata is resolved under the current config and context,
+    and the configuration decides when it establishes no source. FileRules
+    are not applied to the current ImageBuf name.
 
     Optional appended modifiers include:
 
@@ -5296,11 +5400,13 @@ will be printed with the command `oiiotool --colorconfiginfo`.
     Optional appended modifiers include:
 
       `from=` *name*
-        Assume the image is in the named color space. If no `from=` is
-        supplied, it will try to deduce it from the image's metadata or
-        previous `--iscolorspace` directives. If no such hints are
-        available, it will assume the pixel data are in the default linear
-        scene-referred color space.
+        Name the scene-side end of the display transform. For a forward
+        transform, an empty value resolves the source from image metadata
+        under the same config and context, and the configuration decides
+        when the metadata establishes none.
+        A known encoding absent from the config connects through its OCIO
+        interchange role. For an inverse transform, an empty value means
+        `scene_linear`. A data source is copied unchanged.
 
       `key=` *name*, `value=` *str*
         Adds a key/value pair to the "context" that OpenColorIO will use
@@ -5629,4 +5735,3 @@ section should not be expected to work with deep images.
     "nonfinite") are repaired.  The *strategy* may be either `black` or
     `error`.
 ```
-

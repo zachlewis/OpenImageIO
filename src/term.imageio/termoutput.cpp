@@ -4,12 +4,15 @@
 
 #include <cstdio>
 
+#include <OpenImageIO/color.h>
 #include <OpenImageIO/filesystem.h>
 #include <OpenImageIO/imagebuf.h>
 #include <OpenImageIO/imagebufalgo.h>
 #include <OpenImageIO/imageio.h>
 #include <OpenImageIO/simd.h>
 #include <OpenImageIO/sysutil.h>
+
+#include "imageio_pvt.h"
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
 
@@ -138,8 +141,20 @@ TermOutput::close()
 bool
 TermOutput::output()
 {
-    // Color convert in place to sRGB, or it won't look right
+    // Color convert in place to sRGB, or it won't look right. An unlabeled
+    // image is what its metadata establishes. One that establishes nothing is
+    // displayed as scene-linear, which is what this driver has always shown
+    // for one; a terminal preview names the assumption it draws with rather
+    // than asking the configuration what an image that says nothing is.
     std::string cspace = m_buf.spec()["oiio:ColorSpace"].get();
+    if (cspace.empty())
+        cspace = pvt::resolve_colorspace_source(
+                     ColorConfig::default_colorconfig(), m_buf.spec(), "", "",
+                     "", "", "", pvt::FileRulesPrecedence::MetadataOnly,
+                     pvt::MissingColorSpace::Preserve)
+                     .name;
+    if (cspace.empty())
+        cspace = "scene_linear";
     ImageBufAlgo::colorconvert(m_buf, m_buf, cspace, "srgb_rec709_scene");
 
     string_view method(m_method);

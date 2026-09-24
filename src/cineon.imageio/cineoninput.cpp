@@ -12,8 +12,6 @@
 #include <OpenImageIO/strutil.h>
 #include <OpenImageIO/typedesc.h>
 
-#include "imageio_pvt.h"
-
 using namespace cineon;
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
@@ -204,32 +202,11 @@ CineonInput::open(const std::string& name, ImageSpec& newspec)
     }
     m_spec.attribute("Orientation", orientation);
 
-#if 1
-    // This is not very smart, but it seems that as a practical matter,
-    // all Cineon files are log. So ignore the gamma field and just set
-    // the color space to KodakLog.
-    pvt::set_colorspace(m_spec, "KodakLog");
-#else
-    // image linearity
-    // FIXME: making this more robust would require the per-channel transfer
-    // function functionality which isn't yet in OIIO
-    switch (m_cin.header.ImageDescriptor(0)) {
-    case cineon::kRec709Red:
-    case cineon::kRec709Green:
-    case cineon::kRec709Blue: pvt::set_colorspace(m_spec, "Rec709");
-    default:
-        // either grayscale or printing density
-        if (!std::isinf(m_cin.header.Gamma()) && m_cin.header.Gamma() != 0.0f)
-            // actual gamma value is read later on
-            pvt::set_colorspace_rec709_gamma(m_spec,
-                                             float(m_cin.header.Gamma()));
-        break;
-    }
-
-    // gamma exponent
-    if (!std::isinf(m_cin.header.Gamma()) && m_cin.header.Gamma() != 0.0f)
-        pvt::set_colorspace_rec709_gamma(m_spec, float(m_cin.header.Gamma()));
-#endif
+    // Cineon headers do not reliably identify a color space, so none is
+    // assumed from the image descriptor or gamma fields. Saying so is
+    // evidence, not a color space: resolution goes on through a FileRule or
+    // the filename.
+    m_spec.attribute("colorInteropID", "unknown");
 
     // general metadata
     // some non-compliant writers will dump a field filled with 0xFF rather

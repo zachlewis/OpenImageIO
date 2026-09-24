@@ -2,6 +2,7 @@ Reading ../oiio-images/cineon/checker.cin
 ../oiio-images/cineon/checker.cin :  160 x   90, 3 channel, uint10 cineon
     SHA-1: D9F0919A57216C4A76A7D18413D5BBFEB34C52AA
     channel list: R, G, B
+    colorInteropID: "unknown"
     DateTime: "2022:10:17 10:12:05+10"
     Orientation: 1 (normal)
     cineon:BitDepth: 10, 10, 10
@@ -32,7 +33,6 @@ Reading ../oiio-images/cineon/checker.cin
     cineon:YDevicePitch: -1.60948e-35
     cineon:YOffset: 0
     oiio:BitsPerSample: 10
-    oiio:ColorSpace: "KodakLog"
 oiiotool ERROR: read : "src/broken_bitdepth.cin": Invalid number of channels 255 (must be 1-8)
 Full command line was:
 > oiiotool --info --hash src/broken_bitdepth.cin

@@ -1,0 +1,84 @@
+=== only ===
+Pure22
+TrueSRGB
+=== transfer text ===
+Pure22
+=== transfer id ===
+TrueSRGB
+=== quoted term ===
+Pure22
+TrueSRGB
+=== quoted first term ===
+Pure22
+TrueSRGB
+=== quoted first term with comma ===
+Pure22
+TrueSRGB
+=== whole quoted term ===
+Pure22
+=== quoted first exclusion ===
+=== apostrophe in a name ===
+Shot's Look  transfer=power  gamma=2.2  equality=g22_rec709_scene  interop=g22_rec709_scene  encoding=sdr-video  state=scene  computed=1  available=1  derived=1
+=== apostrophe in a list ===
+Pure22
+Shot's Look
+=== gamut colon id ===
+CameraLinear
+=== quoted first colon id ===
+ACES
+CameraLinear
+DisplayMeaning
+=== quoted later colon id ===
+ACES
+CameraLinear
+DisplayMeaning
+=== inactive default ===
+=== inactive requested ===
+Hidden
+=== context default ===
+ShotSpace
+=== context override ===
+=== quoted context override ===
+=== semantic display state ===
+DisplayMeaning
+=== unknown state exclusion ===
+OddToeGain
+=== unknown state inverse ===
+=== properties ===
+Pure22  transfer=power  gamma=2.2  equality=g22_rec709_scene  interop=g22_rec709_scene  encoding=sdr-video  state=scene  computed=1  available=1  derived=1
+TrueSRGB  transfer=srgb  equality=srgb_rec709_scene  interop=srgb_rec709_scene  encoding=sdr-video  state=scene  computed=1  available=1  derived=1
+=== representation properties ===
+InsetChain  transfer=unrecognized  equality=-  interop=-  encoding=sdr-video  state=-  computed=1  available=1  derived=1
+OddToeGain  transfer=transform  equality=-  interop=-  encoding=sdr-video  state=-  computed=1  available=1  derived=1
+=== declared linear properties ===
+ACES  transfer=declared-linear  gamma=1  equality=lin_ap0_scene  interop=lin_ap0_scene  encoding=scene-linear  state=scene  computed=1  available=1  derived=0
+FalseLinearPower22  transfer=declared-linear  gamma=1  equality=g22_rec709_scene  interop=-  encoding=scene-linear  state=scene  computed=1  available=1  derived=0
+FalseLinearSRGB  transfer=declared-linear  gamma=1  equality=-  interop=-  encoding=scene-linear  state=scene  computed=1  available=1  derived=0
+=== declared linear measured ===
+ACES
+=== declared linear inverse ===
+FalseLinearPower22
+FalseLinearSRGB
+=== measured linear properties ===
+ShotSpace  transfer=linear  gamma=1  equality=lin_ap0_scene  interop=lin_ap0_scene  encoding=sdr-video  state=scene  computed=1  available=1  derived=1
+=== bad term ===
+oiiotool ERROR: --colorspacesearch:transfer=- : color space search hint may not be a bare operator: -
+Full command line was:
+> oiiotool --nostderr --colorconfig search.ocio --colorspacesearch:transfer=-
+=== bad modifier ===
+oiiotool ERROR: --colorspacesearch:bogus=1 : Unknown modifier "bogus"
+Full command line was:
+> oiiotool --nostderr --colorconfig search.ocio --colorspacesearch:bogus=1
+=== manual examples ===
+oiiotool --colorspacesearch:gamut=lin_ap1_scene:encoding=scene-linear
+  ok, named one or more color spaces
+oiiotool --colorspacesearch:transfer=srgb_rec709_display
+  ok, named one or more color spaces
+oiiotool --colorspacesearch:gamut=-rec709:state=~display
+  ok, named one or more color spaces
+oiiotool --colorspacesearch:only="ACEScg,Linear Rec.709 (sRGB)"
+  ok, named one or more color spaces
+oiiotool --colorspacesearch:encoding=sdr-video:properties=1
+  ok, named one or more color spaces
+oiiotool --evaloff "--colorspacesearch:transfer='<ExponentTransform> {value: 2.2, direction: inverse}'"
+  ok, named one or more color spaces

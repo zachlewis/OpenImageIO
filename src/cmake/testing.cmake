@@ -297,6 +297,7 @@ macro (oiio_add_all_tests)
              python-typedesc)
         set (nanobind_python_tests_imagedir
              python-imageinput
+             python-imageinput-colorconfig
              python-imagebufalgo)
         set (nanobind_python_test_suffix ".nanobind")
         if (OIIO_BUILD_PYTHON_PYBIND11)
@@ -318,7 +319,8 @@ macro (oiio_add_all_tests)
                 )
             # These Python tests also need access to oiio-images
             oiio_add_tests (
-                python-imageinput python-imagebufalgo
+                python-imageinput python-imageinput-colorconfig
+                python-imagebufalgo
                 IMAGEDIR oiio-images
                 ENVIRONMENT "${_pybind_tests_pythonpath}"
                 )

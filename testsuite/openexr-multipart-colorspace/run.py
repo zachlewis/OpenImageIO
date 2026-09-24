@@ -91,7 +91,7 @@ command += oiiotool("--pattern constant:color=0.25,0.25,0.25 4x4 3 -d half "
 rec709 = "0.64,0.33,0.3,0.6,0.15,0.06,0.3127,0.329"
 command += run_app(pythonbin + " src/without-ocio.py " + oiio_app("oiiotool")
                    + "--pattern constant:color=1,0,0 4x4 3 -d half "
-                   "--attrib oiio:ColorSpace lin_ap1_scene --attrib oiio:subimagename beauty "
+                   "--attrib colorInteropID lin_ap1_scene --attrib oiio:subimagename beauty "
                    "--attrib oiio:Gamma 1 "
                    "--attrib:type=float[8] chromaticities " + rec709 + " "
                    "--pattern constant:color=1,0,0 4x4 3 -d half "
@@ -131,9 +131,10 @@ command += oiiotool("--pattern constant:color=1,0,0 4x4 3 -d half "
 # so a later part's that differ are not written. Its own colorInteropID
 # states its encoding instead, and a part with none is written as "unknown"
 # rather than inherit the first part's. Parts: "lin_rec709_scene", from a
-# linear AP1 PNG, which gives it no ID; "lin_rec709_scene", "lin_ap1_scene"
-# with AP1 chromaticities. (The first write is silent: with OPENIMAGEIO_DEBUG
-# set, it says when a part is written as "unknown".)
+# linear AP1 PNG, whose cHRM and gAMA establish lin_ap1_scene;
+# "lin_rec709_scene", "lin_ap1_scene" with AP1 chromaticities. (The first
+# write is silent: with OPENIMAGEIO_DEBUG set, it says when a part is written
+# as "unknown".)
 ap1 = "0.713,0.293,0.165,0.830,0.128,0.044,0.32168,0.33767"
 command += oiiotool("--pattern constant:color=1,0,0 4x4 3 -d uint16 "
                     "--iscolorspace ACEScg -o ap1.png")
@@ -252,3 +253,40 @@ for f in ("strict_unknown_later.exr", "strict_unknown_both.exr"):
 # A later part's public output spec matches the header after OpenEXR rejects
 # chromaticities that the first part lacks.
 command += run_app(pythonbin + " src/check-output-spec.py", silent=True)
+
+# Strict judges the IDs the headers will carry, after each part's own color
+# metadata has had its say: an ID a later part's recognized ICC profile
+# derives is checked like a stated one, a label that part's other metadata
+# contradicts supplies "unknown", and a stated ID
+# outranks the profile. The Adobe RGB (1998) profile is copied here so that
+# the command lines are the same wherever the test runs.
+import shutil
+shutil.copyfile(OIIO_TESTSUITE_ROOT + "/oiiotool-attribs/ref/test.icc",
+                "adobergb.icc")
+first = ("--pattern constant:color=1,0,0 4x4 3 -d half "
+         "--attrib oiio:ColorSpace lin_ap1_scene --attrib oiio:subimagename beauty ")
+strict = "-sattrib openexr:ColorInteropIDPolicy strict "
+later = "--pattern constant:color=0,1,0 4x4 3 -d half "
+# Parts: "lin_ap1_scene", Adobe RGB profile -- written as g22_adobergb_display
+# without the policy, and rejected with it
+command += oiiotool(first + later + "--iccread adobergb.icc "
+                    "--attrib oiio:subimagename icc --siappendall -o icc_later.exr")
+command += oiiotool(first + strict + later + "--iccread adobergb.icc "
+                    "--attrib oiio:subimagename icc --siappendall "
+                    "-o strict_icc_later.exr", failureok=True)
+# Parts: "lin_ap1_scene", label "lin_rec709_scene" beside a gamma of 1.7 --
+# accepted, with "unknown" for the later part
+command += oiiotool(first + strict + later + "--attrib oiio:ColorSpace lin_rec709_scene "
+                    "--attrib oiio:Gamma 1.7 --attrib oiio:subimagename withheld "
+                    "--siappendall -o strict_withheld_later.exr")
+# Parts: "lin_ap1_scene", then the profile beside a stated "lin_ap1_scene"
+# (accepted) or "lin_rec709_scene" (rejected)
+command += oiiotool(first + strict + later + "--iccread adobergb.icc "
+                    "--attrib colorInteropID lin_ap1_scene --attrib oiio:subimagename stated "
+                    "--siappendall -o strict_stated_later.exr")
+command += oiiotool(first + strict + later + "--iccread adobergb.icc "
+                    "--attrib colorInteropID lin_rec709_scene --attrib oiio:subimagename stated "
+                    "--siappendall -o strict_stated_mismatch.exr", failureok=True)
+for f in ("icc_later.exr", "strict_withheld_later.exr", "strict_stated_later.exr"):
+    command += oiiotool(f + " --subimage 1 --echo \"" + f + " part 1: "
+                        "<{TOP['oiio:ColorSpace']}> <{TOP['colorInteropID']}>\"")

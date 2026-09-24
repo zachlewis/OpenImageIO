@@ -506,16 +506,10 @@ adobe = re.search(r'r-adobe.png resolve to "([^"]+)" \(numeric metadata',
 expected = average(["r-adobe.png", "--colorconvert", adobe,
                     "srgb_rec709_scene"])
 assert all(abs(v - 0.504) < 0.005 for v in expected), expected
+# A look is composed around a space only OpenImageIO's reference knows, as
+# with OpenColorIO 2.3's default configuration, which has no Adobe RGB.
 look = ["--ociolook", "", "--tocolorspace", "srgb_rec709_scene"]
 for argv in (["--tocolorspace", "srgb_rec709_scene"], look):
-    if argv == look and adobe not in names:
-        # A look is built by OCIO from configured spaces only, so a space
-        # only OpenImageIO's reference knows is refused, not replaced.
-        assert "not defined" in subprocess.run(
-            [oiiotool, "r-adobe.png", *argv], env=default_config,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True).stdout
-        continue
     grey = average(["r-adobe.png", *argv])
     assert grey == expected, (argv, grey, expected)
 # The output conversion too, for an input read without one.
@@ -529,24 +523,33 @@ display = average(["r-adobe.png", "--ociodisplay", "sRGB - Display",
 explicit = average(["r-adobe.png", "--ociodisplay:from=" + adobe,
                     "sRGB - Display", "Un-tone-mapped"])
 assert display == explicit, (display, explicit)
-# A PNG with primaries and no gamma, or with a gamma no configured space on
-# those primaries has (2.2 is not Adobe RGB's 563/256 at gAMA's precision),
-# states an encoding nothing here can use, so a conversion refuses it rather
-# than choosing one.
-for filename in ("r-chrm-only.png", "r-gamma-adobe.png"):
-    refused = subprocess.run([oiiotool, filename, "--tocolorspace",
-                              "srgb_rec709_scene", "-o", "x.exr"],
-                             env=default_config, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, text=True)
-    assert refused.returncode != 0 and "Unknown color space name" in \
-        refused.stdout, (filename, refused.stdout)
+# A PNG with primaries and no gamma states an encoding nothing here can use,
+# so a conversion refuses it rather than choosing one.
+refused = subprocess.run([oiiotool, "r-chrm-only.png", "--tocolorspace",
+                          "srgb_rec709_scene", "-o", "x.exr"],
+                         env=default_config, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True)
+assert refused.returncode != 0 and "Unknown color space name" in \
+    refused.stdout, refused.stdout
+# With a gamma no configured space on those primaries has (2.2 is not Adobe
+# RGB's 563/256 at gAMA's precision), the facts are complete, so a conversion
+# goes through a process-local selector for exactly them, display-referred as
+# PNG's numbers are by convention.
+trace = oiio(["--debug", "-i:autocc=1", "r-gamma-adobe.png", "-o", "x.exr"],
+             default_config)
+assert re.search(r'resolve to "<synthetic>display:[^"]+" \(numeric metadata',
+                 trace), trace
+grey = average(["r-gamma-adobe.png", "--tocolorspace", "srgb_rec709_scene"])
+assert all(abs(v - 0.504) < 0.005 for v in grey), grey
 
 # Copies keep what the file said. Another PNG carries the same cHRM and
 # gAMA, not the sRGB chunk an unlabeled image otherwise defaults to, and a
-# cHRM with no gamma is not written alone. OpenEXR chromaticities would state
-# a linear encoding, so they are not written beside gamma 2.2, and the file
-# says "unknown" rather than nothing. Targa's gamma alone would state Rec.709
-# primaries, so it is not written either.
+# cHRM with no gamma is not written alone. An OpenEXR copy states the
+# identity those facts name instead: its chromaticities would state a linear
+# encoding, so they are not written beside gamma 2.2. Facts only a
+# process-local selector names give it no ID to state, so it says "unknown"
+# rather than nothing. Targa's gamma alone would state Rec.709 primaries, so
+# it is not written either.
 oiio(["r-adobe.png", "-o", "copy-adobe.png"])
 assert chromaticities("copy-adobe.png") == tuple(
     v / 100000.0 for v in adobe_wire), chromaticities("copy-adobe.png")
@@ -565,6 +568,13 @@ assert "oiio:ColorSpace" not in info, info
 assert 'colorInteropID: "unknown"' in info, info
 oiio(["r-adobe.png", "-d", "half", "-o", "copy-adobe.exr"])
 info = oiio(["--info", "-v", "copy-adobe.exr"])
+assert "chromaticities" not in info, info
+assert 'colorInteropID: "g22_adobergb_display"' in info, info
+reread = average(["copy-adobe.exr", "--tocolorspace", "srgb_rec709_scene"])
+assert all(abs(a - b) < 0.002 for a, b in zip(reread, expected)), \
+    (reread, expected)
+oiio(["r-gamma-adobe.png", "-d", "half", "-o", "copy-gamma-adobe.exr"])
+info = oiio(["--info", "-v", "copy-gamma-adobe.exr"])
 assert "chromaticities" not in info, info
 assert 'colorInteropID: "unknown"' in info, info
 oiio(["r-adobe.png", "-o", "copy-adobe.tga"])

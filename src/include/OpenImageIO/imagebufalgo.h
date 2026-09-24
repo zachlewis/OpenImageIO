@@ -2230,12 +2230,13 @@ bool OIIO_API colormatrixtransform(ImageBuf& dst, const ImageBuf& src,
 /// @param  looks
 ///             The looks to apply (comma-separated).
 /// @param  fromspace/tospace
-///             For the varieties of `colorconvert()` that use named color
-///             spaces, these specify the color spaces by name.  If either
-///             is the empty string or `"current"`, it is the image's own
-///             color space, resolved from its metadata as `colorconvert()`
-///             resolves an empty source; an image whose metadata states
-///             nothing at all is taken to be `"scene_linear"`.
+///             The color spaces the look is applied between, by name. If
+///             either is the empty string or `"current"`, it is the image's
+///             own color space, resolved from its metadata as
+///             `colorconvert()` resolves an empty source; an image whose
+///             metadata states nothing at all is taken to be
+///             `"scene_linear"`. If either end is a data space, the pixels
+///             are copied unchanged.
 /// @param  unpremult
 ///             If true, unpremultiply the image (divide the RGB channels by
 ///             alpha if it exists and is nonzero) before color conversion,

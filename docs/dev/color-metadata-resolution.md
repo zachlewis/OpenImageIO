@@ -14,24 +14,39 @@ The input rules are evaluated in this order:
 3. The filename step when the policy is `first`.
 4. `colorInteropID`.
 5. cICP.
-6. A PNG sRGB chunk.
-7. Numeric metadata: PNG gamma, optionally with chromaticities, or OpenEXR
+6. An ICC profile.
+7. A PNG sRGB chunk.
+8. Numeric metadata: PNG gamma, optionally with chromaticities, or OpenEXR
    chromaticities.
-8. The filename step when the policy is `fallback`.
-9. The reader's `oiio:ColorSpace` label.
-10. A caller-provided failover.
+9. The filename step when the policy is `fallback`.
+10. The reader's `oiio:ColorSpace` label.
+11. A caller-provided failover.
 
 The filename step is a non-default OCIO FileRule together with OpenImageIO's
 own convention of a color space name embedded in the filename, which
 `getColorSpaceFromFilepath` matches in one call. The `metadata` FileRules
-policy omits steps 3 and 8, so it turns off both. A complete PNG cICP claim
+policy omits steps 3 and 9, so it turns off both. A complete PNG cICP claim
 suppresses weaker PNG chunks and the reader label, including when OpenImageIO
 cannot identify the claim. Invalid evidence does not stop resolution; the
 resolver records the failure and continues. Numeric evidence is invalid when
-chromaticities are non-finite or gamma is negative or non-finite. PNG gamma
-without chromaticities selects a configured space by transfer function,
-display-referred first and then scene-referred, without asserting a gamut.
-The resolver preserves but does not select an ICC profile.
+chromaticities are non-finite or gamma is negative or non-finite.
+RGB matrix/TRC ICC profiles supported by OpenColorIO are decoded and compared
+with known encodings. A known profile selects that encoding. An unmatched but
+decodable profile receives a process-local selector for its exact conversion;
+the selector is not a portable color interop ID. Unsupported profiles make no
+claim and resolution continues. PNG cICP retains precedence over ICC.
+
+Complete numeric facts that match no known encoding also receive a
+process-local selector when the resolution is for a conversion; resolved for
+anything else, they are evidence nothing here can use, as described below.
+Virtual primaries remain valid when their
+matrix is finite and invertible. Gamma without chromaticities remains a partial
+fact: it searches configured display-referred spaces first and then
+scene-referred spaces, without establishing a gamut. When neither search
+matches, conversion receives a process-local selector for the stated transfer.
+Resolution continues through the selected FileRules policy, the reader label,
+and any caller-provided failover; a result from one of those rules retains that
+rule's provenance.
 
 The resolver evaluates names, roles, FileRules, and transforms under the
 caller's effective OCIO context. Automatic conversion uses that same context,
@@ -113,6 +128,9 @@ sets an unset `oiio:ColorSpace` from this resolver, with no filename, and sets
 it only to a configured color space or a Color Interop ID; `""` removes only
 `oiio:ColorSpace`. A strict miss and an unsupported full PNG cICP claim use
 `set_colorspace("unknown")`, so their evidence is removed with them.
+Process-local ICC and numeric selectors are conversion endpoints only. They are
+spelled with a `<synthetic>` prefix, which no color interop ID can contain, and
+writing a converted result does not fabricate a `colorInteropID` for them.
 
 With `oiiotool --debug`, each reached rule reports whether it matched, missed,
 was skipped, or contained invalid evidence. The following summary describes

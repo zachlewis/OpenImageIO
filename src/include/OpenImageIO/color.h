@@ -255,7 +255,9 @@ public:
     /// inverse==true, request the inverse transformation.  The
     /// context_key and context_value can optionally be used to establish
     /// extra key/value pairs in the OCIO context if they are comma-
-    /// separated lists of context keys and values, respectively.
+    /// separated lists of context keys and values, respectively. If either
+    /// color space is a data space, the processor is an identity and the
+    /// look is not applied.
     ///
     /// The handle is actually a shared_ptr, so when you're done with a
     /// ColorProcess, just discard it. ColorProcessor(s) remain valid even
@@ -563,12 +565,13 @@ public:
     ///   "colorInteropID", "oiio:Gamma" (the pure-power exponent of `name`, if
     ///   it has one), "png:sRGB", "oiio:PNGNumericState",
     ///   "acesImageContainerFlag" and "Exif:ColorSpace". "ICCProfile" and
-    ///   "ICCProfile:*" are removed, as are "tiff:ColorSpace" and
-    ///   "tiff:PhotometricInterpretation". Mastering display metadata
-    ///   ("mdcv_*") is not changed. The name "unknown" states that nothing is
-    ///   known, so it removes all of them, except that a "colorInteropID" is
-    ///   rewritten to "unknown" rather than removed: the file goes on saying
-    ///   that nothing is known about it.
+    ///   "ICCProfile:*" cannot be rewritten: they are kept when the profile
+    ///   identifies as `name` and removed otherwise. "tiff:ColorSpace" and
+    ///   "tiff:PhotometricInterpretation" are removed. Mastering display
+    ///   metadata ("mdcv_*") is not changed. The name "unknown" states that
+    ///   nothing is known, so it removes all of them, except that a
+    ///   "colorInteropID" is rewritten to "unknown" rather than removed: the
+    ///   file goes on saying that nothing is known about it.
     /// - An empty name (`""` or an empty `std::string`) only erases
     ///   "oiio:ColorSpace". The other attributes stay, because they are
     ///   evidence of the encoding.

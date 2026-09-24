@@ -14,6 +14,8 @@
 #include <OpenImageIO/Imath.h>
 #include <OpenImageIO/platform.h>
 
+#include <limits>
+
 #include <OpenEXR/ImfArray.h>
 #include <OpenEXR/ImfChannelList.h>
 #include <OpenEXR/ImfEnvmap.h>
@@ -33,6 +35,9 @@ OIIO_GCC_PRAGMA(GCC diagnostic ignored "-Wunused-parameter")
 #include <OpenEXR/IexBaseExc.h>
 #include <OpenEXR/IexThrowErrnoExc.h>
 #include <OpenEXR/ImfBoxAttribute.h>
+#if OPENEXR_CODED_VERSION >= 30400
+#    include <OpenEXR/ImfBytesAttribute.h>
+#endif
 #include <OpenEXR/ImfChromaticitiesAttribute.h>
 #include <OpenEXR/ImfCompressionAttribute.h>
 #include <OpenEXR/ImfDeepFrameBuffer.h>
@@ -506,6 +511,9 @@ OpenEXRInput::PartInfo::parse_header(OpenEXRInput* in,
         const Imf::M33dAttribute* m33dattr;
         const Imf::M44dAttribute* m44dattr;
         const Imf::LineOrderAttribute* lattr;
+#if OPENEXR_CODED_VERSION >= 30400
+        const Imf::BytesAttribute* bytesattr;
+#endif
         const char* name = hit.name();
         auto found       = exr_tag_to_oiio_std.find(name);
         std::string oname(found != exr_tag_to_oiio_std.end() ? found->second
@@ -521,6 +529,18 @@ OpenEXRInput::PartInfo::parse_header(OpenEXRInput* in,
                     name))) {
             if (sattr->value().size())
                 spec.attribute(oname, sattr->value().c_str());
+#if OPENEXR_CODED_VERSION >= 30400
+        } else if (type == "bytes"
+                   && (bytesattr
+                       = header->findTypedAttribute<Imf::BytesAttribute>(
+                           name))) {
+            const size_t size = bytesattr->size();
+            if (size > 0 && size <= size_t(std::numeric_limits<int>::max())) {
+                const unsigned char* bytes = bytesattr->data();
+                spec.attribute(oname, TypeDesc(TypeDesc::UINT8, int(size)),
+                               bytes);
+            }
+#endif
         } else if (type == "int"
                    && (iattr = header->findTypedAttribute<Imf::IntAttribute>(
                            name)))

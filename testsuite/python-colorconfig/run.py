@@ -14,3 +14,4 @@ command += run_app(
 command += run_app(
     pythonbin + ' src/test_properties_api.py "' + OIIO_PROJECT_ROOT
     + '/src/libOpenImageIO/interop-identities-config.ocio"')
+command += run_app(pythonbin + " src/test_source_cache.py")

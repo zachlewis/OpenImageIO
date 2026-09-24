@@ -1,0 +1,20 @@
+=== runstats color metrics ===
+  shared.native_catalogs.entries
+  shared.native_catalogs.computed
+  shared.id_matches.entries
+  shared.id_matches.computed
+  shared.interop_ids.entries
+  shared.interop_ids.computed
+  shared.properties.entries
+  shared.properties.computed
+  shared.builtin_measurements.entries
+  shared.builtin_measurements.computed
+  shared.icc_profiles.entries
+  shared.icc_profiles.bytes
+  shared.icc_profiles.computed
+  config.views.entries
+  config.processors.requested
+  config.processors.created
+=== color sections per run ===
+runstats-color.txt:1
+runstats-plain.txt:0

@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 
 #include <OpenImageIO/filesystem.h>
@@ -21,12 +22,12 @@
 #include <OpenImageIO/imageio.h>
 #include <OpenImageIO/tiffutils.h>
 
-#include "imageio_pvt.h"
-
 #include <jxl/color_encoding.h>
 #include <jxl/decode.h>
 #include <jxl/decode_cxx.h>
 #include <jxl/resizable_parallel_runner_cxx.h>
+
+#include "imageio_pvt.h"
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
 
@@ -101,6 +102,117 @@ jpegxl_input_imageio_create()
 OIIO_EXPORT const char* jpegxl_input_extensions[] = { "jxl", nullptr };
 
 OIIO_PLUGIN_EXPORTS_END
+
+
+
+// The CICP primaries code of a JPEG XL color encoding, or 0 when it has none.
+// Every code names a white point as well as primaries, so an enumerated gamut
+// paired with another white point -- which JPEG XL can express and CICP cannot
+// -- has no code.
+static int
+cicp_primaries(const JxlColorEncoding& encoding)
+{
+    switch (encoding.primaries) {
+    case JXL_PRIMARIES_SRGB:  // 1
+    case JXL_PRIMARIES_2100:  // 9
+        return encoding.white_point == JXL_WHITE_POINT_D65
+                   ? int(encoding.primaries)
+                   : 0;
+    case JXL_PRIMARIES_P3:
+        // The JxlPrimaries enum covers P3 as 11 only; CICP separates the two
+        // white points, 11 for DCI and 12 for D65.
+        if (encoding.white_point == JXL_WHITE_POINT_DCI)
+            return 11;
+        if (encoding.white_point == JXL_WHITE_POINT_D65)
+            return 12;
+        return 0;
+    default: return 0;
+    }
+}
+
+
+
+// Record the display-referred identity a JPEG XL color encoding describes.
+// If none matches, retain the exact numeric evidence that OIIO can express.
+static void
+record_display_encoding(const JxlColorEncoding& encoding, ImageSpec& spec)
+{
+    float xy[8];
+    bool have_xy = true;
+    // Published RGB xy of the enumerated primaries.
+    static const float rec709[6] = { 0.64f, 0.33f, 0.30f, 0.60f, 0.15f, 0.06f };
+    static const float rec2020[6] = { 0.708f, 0.292f, 0.170f,
+                                      0.797f, 0.131f, 0.046f };
+    static const float p3[6]
+        = { 0.680f, 0.320f, 0.265f, 0.690f, 0.150f, 0.060f };
+    switch (encoding.primaries) {
+    case JXL_PRIMARIES_SRGB: std::copy_n(rec709, 6, xy); break;
+    case JXL_PRIMARIES_2100: std::copy_n(rec2020, 6, xy); break;
+    case JXL_PRIMARIES_P3: std::copy_n(p3, 6, xy); break;
+    case JXL_PRIMARIES_CUSTOM:
+        for (int i = 0; i < 2; ++i) {
+            xy[i]     = float(encoding.primaries_red_xy[i]);
+            xy[2 + i] = float(encoding.primaries_green_xy[i]);
+            xy[4 + i] = float(encoding.primaries_blue_xy[i]);
+        }
+        break;
+    default: have_xy = false; break;
+    }
+    switch (encoding.white_point) {
+    case JXL_WHITE_POINT_D65:
+        xy[6] = 0.3127f;
+        xy[7] = 0.3290f;
+        break;
+    case JXL_WHITE_POINT_DCI:
+        xy[6] = 0.314f;
+        xy[7] = 0.351f;
+        break;
+    case JXL_WHITE_POINT_E: xy[6] = xy[7] = 1.0f / 3.0f; break;
+    case JXL_WHITE_POINT_CUSTOM:
+        xy[6] = float(encoding.white_point_xy[0]);
+        xy[7] = float(encoding.white_point_xy[1]);
+        break;
+    default: have_xy = false; break;
+    }
+    std::string curve;
+    float gamma = 0.0f;
+    switch (encoding.transfer_function) {
+    case JXL_TRANSFER_FUNCTION_LINEAR:
+        curve = "lin";
+        gamma = 1.0f;
+        break;
+    case JXL_TRANSFER_FUNCTION_SRGB: curve = "srgb"; break;
+    // Like CICP transfer 1, which the Color Interop Forum reads as BT.1886.
+    case JXL_TRANSFER_FUNCTION_709: curve = "g24"; break;
+    case JXL_TRANSFER_FUNCTION_PQ: curve = "pq"; break;
+    // libjxl's DCI transfer is a pure gamma 2.6, with no white scaling.
+    case JXL_TRANSFER_FUNCTION_DCI:
+        curve = "g26";
+        gamma = 2.6f;
+        break;
+    case JXL_TRANSFER_FUNCTION_GAMMA: {
+        // libjxl stores the encoding exponent; name its decoding exponent.
+        // A gamma of 1 never arrives here: libjxl stores it as LINEAR.
+        const double g10 = 10.0 / encoding.gamma;
+        gamma            = float(1.0 / encoding.gamma);
+        if (std::isfinite(g10) && std::abs(g10 - std::round(g10)) <= 0.01)
+            curve = Strutil::fmt::format("g{}", int(std::round(g10)));
+        break;
+    }
+    default: break;
+    }
+    if (have_xy && !curve.empty()) {
+        string_view interop_id = pvt::get_display_interop_id(xy, curve);
+        if (!interop_id.empty()) {
+            spec.attribute("oiio:ColorSpace", interop_id);
+            return;
+        }
+    }
+    if (have_xy)
+        spec.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8), xy);
+    if (std::isfinite(gamma) && gamma > 0.0f)
+        spec.attribute("oiio:Gamma", gamma);
+}
 
 
 
@@ -435,29 +547,33 @@ JxlInput::open(const std::string& name, ImageSpec& newspec)
         }
     }
 
-    // Read CICP from color encoding. Custom primaries, custom white point and
-    // arbitrary gamma not supported currently. Nor is P3-D65 with libjxl's DCI
-    // transfer, a pure gamma 2.6: CICP 12,17 reads as DCDM, whose ST 428-1
-    // transfer also scales white.
-    if (have_color_encoding && color_encoding.primaries != JXL_PRIMARIES_CUSTOM
-        && color_encoding.white_point != JXL_WHITE_POINT_CUSTOM
-        && color_encoding.transfer_function != JXL_TRANSFER_FUNCTION_GAMMA
-        && !(color_encoding.primaries == JXL_PRIMARIES_P3
-             && color_encoding.white_point == JXL_WHITE_POINT_D65
-             && color_encoding.transfer_function == JXL_TRANSFER_FUNCTION_DCI)) {
-        int color_primaries = color_encoding.primaries;
-        // JxlPrimaries enum only covers P3 primaries as value 11 and not 12
-        // but CICP has separate code values based on white point.
-        if (color_primaries == JXL_PRIMARIES_P3
-            && color_encoding.white_point == JXL_WHITE_POINT_D65) {
-            color_primaries = 12;
+    if (have_color_encoding) {
+        // Read CICP from color encoding. Arbitrary gamma has no CICP code,
+        // and neither has libjxl's DCI transfer, a pure gamma 2.6 without
+        // CICP 17's white scaling.
+        const int color_primaries = cicp_primaries(color_encoding);
+        bool named_encoding       = false;
+        if (color_primaries
+            && color_encoding.transfer_function != JXL_TRANSFER_FUNCTION_GAMMA
+            && color_encoding.transfer_function != JXL_TRANSFER_FUNCTION_DCI) {
+            const int cicp[4] = { color_primaries,
+                                  color_encoding.transfer_function, 0 /* RGB */,
+                                  1 /* Full range */ };
+            m_spec.attribute("CICP", TypeDesc(TypeDesc::INT, 4), cicp);
+            if (color_encoding.transfer_function == JXL_TRANSFER_FUNCTION_HLG) {
+                string_view interop_id = pvt::get_color_interop_id(cicp);
+                if (!interop_id.empty()) {
+                    m_spec.attribute("oiio:ColorSpace", interop_id);
+                    named_encoding = true;
+                }
+            }
         }
-        const int cicp[4] = { color_primaries, color_encoding.transfer_function,
-                              0 /* RGB */, 1 /* Full range */ };
-        m_spec.attribute("CICP", TypeDesc(TypeDesc::INT, 4), cicp);
-        string_view interop_id = pvt::get_color_interop_id(cicp);
-        if (!interop_id.empty())
-            m_spec.attribute("oiio:ColorSpace", interop_id);
+        // libjxl's color management treats every encoding but HLG as display
+        // referred, so read one with known chromaticities and transfer
+        // function as the matching display-referred identity, if any. Otherwise
+        // retain only the exact evidence the encoding states.
+        if (!named_encoding)
+            record_display_encoding(color_encoding, m_spec);
     }
 
     newspec = m_spec;

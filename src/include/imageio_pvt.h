@@ -223,6 +223,11 @@ OIIO_API void set_colorspace_rec709_gamma(ImageSpec& spec, float gamma);
 /// config.
 OIIO_API string_view get_color_interop_id(const int cicp[4]);
 
+/// The display-referred identity of the built-in interop-identities config
+/// with these RGBW xy chromaticities and this curve token (the part of its
+/// name before the gamut, such as "srgb", "g22" or "lin"), or empty.
+OIIO_API string_view get_display_interop_id(cspan<float> xy, string_view curve);
+
 /// RGBW xy chromaticities of a CICP primaries code, read from the built-in
 /// interop-identities config. False when that config does not describe them.
 OIIO_API bool get_cicp_primaries_chromaticities(int primaries, float xy[8]);

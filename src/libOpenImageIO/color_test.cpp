@@ -1757,6 +1757,23 @@ test_private_properties()
 
 
 
+// A display identity's curve token ends where its gamut begins, so a prefix
+// of one names nothing: the JPEG XL reader must not read a pure gamma 2.0
+// file as g22.
+static void
+test_display_identity_curve_boundary()
+{
+    if (!ColorConfig::supportsOpenColorIO())
+        return;
+    const float rec709[8] = { 0.64f, 0.33f, 0.30f,   0.60f,
+                              0.15f, 0.06f, 0.3127f, 0.3290f };
+    OIIO_CHECK_EQUAL(pvt::get_display_interop_id(rec709, "g22"),
+                     "g22_rec709_display");
+    OIIO_CHECK_EQUAL(pvt::get_display_interop_id(rec709, "g2"), "");
+}
+
+
+
 int
 main(int argc, char* argv[])
 {
@@ -1786,6 +1803,7 @@ main(int argc, char* argv[])
     test_color_space_info_context();
     test_encoding_tie_break();
     test_private_properties();
+    test_display_identity_curve_boundary();
 
     return unit_test_failures != 0;
 }

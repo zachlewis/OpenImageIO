@@ -805,7 +805,7 @@ option):
 ```
 oiiotool in.tif -otex out.tx
 
-oiiotool in.jpg --colorconvert sRGB linear -d uint16 -otex out.tx
+oiiotool in.jpg --colorconvert srgb_rec709_scene lin_rec709_scene -d uint16 -otex out.tx
 
 oiiotool --pattern:checker 512x512 3 -d uint8 -otex:wrap=periodic checker.tx
 

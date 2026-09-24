@@ -2075,6 +2075,18 @@ significance and extreme simplicity, OpenImageIO supports them.
 PNM files do not support anything other than 1 or 3 channels, no tiles,
 no multi-image, no MIPmapping.
 
+Integer PNM input is tagged `ocio:itu709_rec709_scene` (the OCIO extension
+for the BT.709 camera transfer curve and Rec.709 primaries). Floating PFM
+input is tagged `lin_rec709_scene`. PFM does not declare primaries;
+Rec.709 is OIIO's retained default gamut convention. Reading and writing
+perform sample scaling and storage conversion, not color conversion;
+these tags describe the expected pixel encoding. `oiiotool --autocc`
+converts output written by the PNM plugin to `ocio:itu709_rec709_scene`,
+or to `lin_rec709_scene` when the output is float and so is written as PFM,
+and converts PNM input from its tag to `scene_linear`. The output choice uses
+the final data type after all inputs are read, including a native type retained
+from a direct-read input.
+
 The pbm, pgm, and ppm varieties are stored with scanlines ordered in the
 file as top-to-bottom (the same as the usual OIIO convention), but the
 float-based pfm files are conventionally ordered in the file as

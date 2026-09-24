@@ -404,7 +404,11 @@ PNMInput::read_file_header()
         m_spec.attribute("pnm:bigendian", m_scaling_factor < 0 ? 0 : 1);
         m_spec.attribute("pnm:binary", 1);
     }
-    pvt::set_colorspace(m_spec, "Rec709");
+    // PFM stores linear floats. Rec.709 primaries are OIIO's convention;
+    // the file header does not declare a gamut.
+    pvt::set_colorspace(m_spec, m_pnm_type == PF || m_pnm_type == Pf
+                                    ? "lin_rec709_scene"
+                                    : "ocio:itu709_rec709_scene");
     return true;
 }
 

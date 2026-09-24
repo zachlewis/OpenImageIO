@@ -5109,6 +5109,53 @@ bottom you will see the list of all color spaces, looks, and displays that
 will be printed with the command `oiiotool --colorconfiginfo`.
 
 ```{eval-rst}
+.. option:: --colortransfer <colorspace>
+
+    Print the named color space's encoding transfer function as a transform
+    document OpenColorIO can read. This command needs no image on the stack
+    and writes only the document to the console. The `<colorspace>` may be a
+    name, alias or role, or a context variable such as `$PLATE` (quoted from
+    the shell), which is expanded under the same context as the transform.
+
+    The exact per-channel operations are retained, including ranges and
+    uniform gain or offset operations. A leading channel-mixing matrix is
+    omitted only when it is proven to carry the interchange primaries into
+    the space's own linear RGB. Definitions or grammars that cannot state the
+    result exactly are refused. Optional appended modifiers include:
+
+    - `format=` *name* :
+
+      The grammar to write: `ctf` (the default) or `clf` for a complete
+      transform document, or `ocio` for the inline transform value from a
+      configuration. The `ocio` value is indented as it would follow a key
+      at the start of a line; to place it after an indented key, add that
+      key's indentation to each of its continuation lines.
+
+    - `oneline=` *int* :
+
+      If nonzero, write the `ocio` grammar on one line, in the flow syntax a
+      configuration can carry inline as the value of a key. A group of a
+      single operation is that operation. An operation OpenColorIO writes
+      over more than one line is refused rather than folded, and the `ctf`
+      and `clf` documents cannot be written this way at all.
+
+    - `key=` *name*, `value=` *str* :
+
+      Adds a key/value pair to the "context" that OpenColorIO will use
+      when building the transform. Multiple key/value pairs may be specified
+      by making each one a comma-separated list.
+
+    Examples:
+
+    .. literalinclude:: ../../testsuite/oiiotool-colortransfer/src/examples.txt
+        :language: bash
+        :start-after: BEGIN-oiiotool-colortransfer
+        :end-before: END-oiiotool-colortransfer
+
+    This command was added in OIIO 3.3.
+```
+
+```{eval-rst}
 .. option:: --colorconfiginfo
 
     Print to the console extensive information about the color management

@@ -344,6 +344,7 @@ macro (oiio_add_all_tests)
     endif ()
 
     oiio_add_tests (oiiotool-color
+                    oiiotool-colortransfer
                     FOUNDVAR OpenColorIO_FOUND)
 
     # Tests to run with HWY enabled.

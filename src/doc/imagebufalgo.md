@@ -3252,7 +3252,8 @@ behavior with `--autocc:missing=config`.
 
 `ociolook()` resolves an empty or `"current"` source or destination from the
 image's metadata in the same way, except that an image that states nothing at
-all is taken to be `scene_linear`, as before.
+all is taken to be `scene_linear`, as before. If either end is a data space,
+`ociolook()` copies the pixels unchanged.
 
 A known encoding absent from the active configuration can connect through its
 OCIO interchange role. A data source is copied unchanged, keeping the tags

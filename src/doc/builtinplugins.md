@@ -1786,6 +1786,53 @@ attributes are supported:
 
 **Configuration settings for OpenEXR output**
 
+When an `ImageBuf` or `oiiotool` copy writes OpenEXR without converting the
+pixels, OIIO resolves the retained source metadata under the source file's
+format rules and records a portable `colorInteropID` when one is established.
+An explicitly supplied `colorInteropID` remains authoritative. Recognized ICC
+profiles are independent of the source container and may also supply an ID to
+raw `ImageOutput` clients. An unmatched ICC profile keeps its profile bytes but
+its process-local `<synthetic>icc_` selector is not written as a portable ID.
+
+With OpenEXR 3.4 or newer, `ICCProfile` is stored as OpenEXR's native `bytes`
+attribute and both OpenEXR reader implementations restore the exact byte array.
+Older OpenEXR libraries have no corresponding native byte attribute, so this
+ICC carrier is unavailable; OIIO does not substitute a string, Base64 payload,
+or semantically opaque implementation encoding.
+
+A label set without `ImageSpec::set_colorspace()` -- a reader's derived guess,
+or an application's direct assignment -- supplies the `colorInteropID` only
+where the other color metadata agrees with it: chromaticities that name its
+primaries, a gamma equal to its own, a CICP code that names its encoding, and
+so on. Then the label's ID is written and chromaticities are dropped as
+redundant beside it (Color Interop Forum Recommendation 04). Metadata that
+contradicts the label wins: no ID is written, and chromaticities among it are
+kept unless a gamma other than 1 beside them rules them out, as above. A PNG
+sRGB chunk (`png:sRGB`) overrides the gamma and chromaticities beside it, so a
+PNG `ImageInput` spec copied to OpenEXR keeps its sRGB identity.
+
+For `ImageBuf` and `oiiotool` copies, the source container's own rules also
+apply, and evidence that establishes the same encoding as the label can still
+differ from it in image state. A CICP code states no image state, so the
+label's applies: a JPEG XL read as `lin_rec709_display` beside CICP 1/8 keeps
+that ID. A decoded ICC profile and complete PNG gAMA/cHRM state
+display-referred by convention, and a label is too weak to overturn a
+convention, so the evidence's state applies: a copy of a PNG whose gAMA 2.2 and
+Rec.709 cHRM agree with its `g22_rec709_scene` label is written as
+`g22_rec709_display`. An application that means the scene-referred reading
+asserts it with `ImageSpec::set_colorspace()` or `oiiotool --iscolorspace`,
+which records it, and the assertion is then what the writer sees.
+
+Raw `ImageOutput` clients do not carry source-container provenance, so the
+OpenEXR writer does not resolve chromaticities or gamma on its own: without a
+label they supply no ID. A specification that also carries an `ICCProfile` is
+resolved as a whole, without container rules, and gets an ID only from evidence
+that establishes one -- the profile itself, cICP, or complete chromaticities
+and gamma -- never from the label or a PNG sRGB chunk, unless the profile
+identifies as the label's encoding. So beside a profile OIIO cannot interpret,
+complete chromaticities and gamma, read as a scene-referred encoding, supply an
+ID that the same facts alone would not.
+
 When opening an OpenEXR ImageOutput, the following special metadata tokens
 control aspects of the writing itself:
 
@@ -1817,7 +1864,11 @@ control aspects of the writing itself:
        Interop Forum Recommendation for OpenEXR files, the output will
        throw an error and avoid writing the image. For compliance, the
        `colorInteropID` in all subimages must be either equal to the first
-       subimage, or be unspecified or set to `data`.
+       subimage, or be unspecified or set to `data`. The IDs checked are
+       the ones the headers will carry: an ID derived from a subimage's ICC
+       profile or other color metadata is checked like a stated one, and a
+       subimage whose label supplies no ID, because its other metadata
+       contradicts the label, is checked as unspecified.
    * - ``oiio:RawColor``
      - int
      - If nonzero, writing images with non-RGB color models (such as YCbCr)
@@ -1987,6 +2038,14 @@ or in debug builds. ICO input and output follow the same rules for PNG-encoded
 icons, but ICO does not report `supports("mdcv")`. No mastering values are
 inferred, and the metadata does not change the encoded color space or image
 samples.
+
+For automatic color conversion, PNG cICP takes precedence over an ICC profile.
+Supported RGB matrix/TRC profiles are decoded through OpenColorIO; a recognized
+profile selects the corresponding encoding, while an unmatched supported
+profile uses a process-local selector. Complete cHRM and gAMA facts
+can likewise describe a process-local conversion, including finite invertible
+virtual primaries. Gamma without cHRM does not establish a gamut. These
+selectors are not written as fabricated color interop IDs.
 
 **Configuration settings for PNG input**
 

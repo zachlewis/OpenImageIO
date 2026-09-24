@@ -18,11 +18,13 @@
 #include <OpenImageIO/benchmark.h>
 #include <OpenImageIO/color.h>
 #include <OpenImageIO/filesystem.h>
+#include <OpenImageIO/hash.h>
 #include <OpenImageIO/imagebuf.h>
 #include <OpenImageIO/imagebufalgo.h>
 #include <OpenImageIO/imageio.h>
 #include <OpenImageIO/simd.h>
 #include <OpenImageIO/strutil.h>
+#include <OpenImageIO/tiffutils.h>
 #include <OpenImageIO/timer.h>
 #include <OpenImageIO/typedesc.h>
 #include <OpenImageIO/unittest.h>
@@ -1586,6 +1588,23 @@ test_spi_conventions()
 
 
 
+// The resolved name alone, so the assertions below read as calls.
+static std::string
+resolve_colorspace(
+    const ColorConfig& config, const ImageSpec& spec, string_view filename = "",
+    string_view assignment = "", string_view failover = "",
+    string_view context_key = "", string_view context_value = "",
+    pvt::FileRulesPrecedence file_rules = pvt::FileRulesPrecedence::Fallback,
+    pvt::MissingColorSpace missing      = pvt::MissingColorSpace::Preserve)
+{
+    return pvt::resolve_colorspace_source(config, spec, filename, assignment,
+                                          failover, context_key, context_value,
+                                          file_rules, missing)
+        .name;
+}
+
+
+
 static void
 test_color_space_info_context()
 {
@@ -1705,6 +1724,38 @@ test_color_space_info_context()
                          pvt::color_space_info(vars, "$SHOT2", true, "SHOT2",
                                                "acescg")),
                      "lin_ap1_scene");
+
+    // A completed miss is reusable only under the effective context that
+    // proved it. Under rec2020 these BMD Wide Gamut facts need a synthetic
+    // endpoint; under bmdwg5 the context-dependent local Plate definition
+    // wins.
+    ImageSpec numeric;
+    numeric.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8), bmdwg5);
+    numeric.attribute("oiio:Gamma", 1.0f);
+    const std::string custom = resolve_colorspace(config, numeric, "frame.jpg",
+                                                  "", "", "SHOT", "rec2020");
+    OIIO_CHECK_ASSERT(Strutil::starts_with(custom, "<synthetic>"));
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, numeric, "frame.jpg", "", "",
+                                        "SHOT", "rec2020"),
+                     custom);
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, numeric, "frame.jpg", "", "",
+                                        "SHOT", "bmdwg5"),
+                     "Plate");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, numeric, "frame.jpg", "", "",
+                                        "SHOT", "rec2020"),
+                     custom);
+
+    ImageSpec tagged;
+    tagged.attribute("oiio:ColorSpace", "Plate");
+    pvt::finalize_resolved_color_metadata(tagged, config, "openexr",
+                                          "plate.exr", "SHOT", "rec2020");
+    OIIO_CHECK_EQUAL(tagged.get_string_attribute("colorInteropID"),
+                     "lin_rec2020_scene");
+    tagged.erase_attribute("colorInteropID");
+    pvt::finalize_resolved_color_metadata(tagged, config, "openexr",
+                                          "plate.exr", "SHOT", "bmdwg5");
+    OIIO_CHECK_EQUAL(tagged.get_string_attribute("colorInteropID"),
+                     "ocio:lin_bmdwg5_scene");
     Filesystem::remove_all(directory);
 }
 
@@ -1913,23 +1964,6 @@ test_private_properties()
 
 
 
-// The resolved name alone, so the assertions below read as calls.
-static std::string
-resolve_colorspace(
-    const ColorConfig& config, const ImageSpec& spec, string_view filename = "",
-    string_view assignment = "", string_view failover = "",
-    string_view context_key = "", string_view context_value = "",
-    pvt::FileRulesPrecedence file_rules = pvt::FileRulesPrecedence::Fallback,
-    pvt::MissingColorSpace missing      = pvt::MissingColorSpace::Preserve)
-{
-    return pvt::resolve_colorspace_source(config, spec, filename, assignment,
-                                          failover, context_key, context_value,
-                                          file_rules, missing)
-        .name;
-}
-
-
-
 static void
 test_metadata_resolution()
 {
@@ -1940,9 +1974,9 @@ test_metadata_resolution()
     // "data" and "bypass" are aliases, as the CIF ID must be: OCIO rejects a
     // config whose alias is also a role name, and the built-in configs
     // already exercise the role spelling. A glob rule needs an explicit
-    // extension; OCIO rejects an empty one. No interchange role is declared,
-    // so every expectation below is about authored names and aliases rather
-    // than about what a measured comparison would recognize.
+    // extension; OCIO rejects an empty one. Expectations for the declared
+    // interchange aliases below concern authored evidence; separate numeric
+    // cases exercise measured recognition.
     OIIO_CHECK_ASSERT(Filesystem::write_text_file(
         filename,
         "ocio_profile_version: 2.3\n"
@@ -2187,30 +2221,147 @@ test_metadata_resolution()
     }
     spec.erase_attribute("CICP");
 
-    // Numeric metadata selects only published or configured identities.
-    // Gamma alone supplies no gamut but can select a configured transfer
-    // match. An otherwise complete encoding that matches neither is evidence
-    // that does not help: it ends as "unknown", never as the configuration's
-    // missing-source default.
+    // Numeric metadata selects published or configured identities. Gamma
+    // alone supplies no gamut, but can select a configured transfer match.
+    // Complete unmatched facts give conversion a reusable process-local
+    // selector; ordinary resolution ends as "unknown", never as the
+    // configuration's missing-source default.
     ImageSpec numeric;
     numeric.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8), adobe);
     numeric.attribute("oiio:Gamma", 2.19921875f);
     provenance = pvt::resolve_colorspace_source(config, numeric, "frame.png");
     OIIO_CHECK_EQUAL(provenance.name, "AdobeRGB");
     OIIO_CHECK_ASSERT(provenance.source == Source::NumericMetadata);
+    // The configured alias selects the local endpoint, but its intentionally
+    // incomplete definition does not independently establish that identity.
+    OIIO_CHECK_EQUAL(config.get_color_interop_id("AdobeRGB"), "");
+    ImageSpec finalized_numeric = numeric;
+    pvt::finalize_resolved_color_metadata(finalized_numeric, config, "png",
+                                          "frame.png");
+    OIIO_CHECK_EQUAL(finalized_numeric.get_string_attribute("colorInteropID"),
+                     "g22_adobergb_display");
+    // Explicit metadata remains authoritative even when other facts disagree.
+    ImageSpec explicit_numeric = numeric;
+    explicit_numeric.attribute("colorInteropID", "lin_ap1_scene");
+    pvt::finalize_resolved_color_metadata(explicit_numeric, config, "png",
+                                          "frame.png");
+    OIIO_CHECK_EQUAL(explicit_numeric.get_string_attribute("colorInteropID"),
+                     "lin_ap1_scene");
+    ImageSpec retagged                 = explicit_numeric;
+    const unsigned char profile_byte[] = { 0 };
+    retagged.attribute("ICCProfile",
+                       TypeDesc(TypeDesc::UINT8, int(std::size(profile_byte))),
+                       profile_byte);
+    // Retagging makes the name authoritative: a profile that identifies as
+    // nothing goes, and the name's own identity and gamma replace the stale
+    // ones.
+    config.set_colorspace(retagged, "Linear");
+    OIIO_CHECK_ASSERT(retagged.find_attribute("ICCProfile") == nullptr);
+    OIIO_CHECK_EQUAL(config.get_color_interop_id("Linear"), "lin_rec709_scene");
+    OIIO_CHECK_EQUAL(retagged.get_string_attribute("colorInteropID"),
+                     "lin_rec709_scene");
+    OIIO_CHECK_EQUAL(retagged.get_float_attribute("oiio:Gamma"), 1.0f);
+    // A label is a derived guess. Beside chromaticities that agree with it,
+    // it earns its ID and the chromaticities go as redundant; metadata that
+    // contradicts it -- chromaticities or a gamma -- wins, and the missing
+    // identity is recorded as unknown.
+    ImageSpec label_agrees;
+    label_agrees.attribute("oiio:ColorSpace", "Linear");
+    label_agrees.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                           rec709);
+    pvt::finalize_resolved_color_metadata(label_agrees, config, "png",
+                                          "frame.png");
+    OIIO_CHECK_EQUAL(label_agrees.get_string_attribute("colorInteropID"),
+                     "lin_rec709_scene");
+    OIIO_CHECK_ASSERT(label_agrees.find_attribute("chromaticities") == nullptr);
+    ImageSpec label_contradicted = label_agrees;
+    label_contradicted.erase_attribute("colorInteropID");
+    label_contradicted.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                                 adobe);
+    pvt::finalize_resolved_color_metadata(label_contradicted, config, "png",
+                                          "frame.png");
+    OIIO_CHECK_EQUAL(label_contradicted.get_string_attribute("colorInteropID"),
+                     "unknown");
+    OIIO_CHECK_ASSERT(label_contradicted.find_attribute("chromaticities"));
+    ImageSpec gamma_labeled;
+    gamma_labeled.attribute("oiio:ColorSpace", "Linear");
+    gamma_labeled.attribute("oiio:Gamma", 1.8f);
+    pvt::finalize_resolved_color_metadata(gamma_labeled, config, "png",
+                                          "frame.png");
+    OIIO_CHECK_EQUAL(gamma_labeled.get_string_attribute("colorInteropID"),
+                     "unknown");
+    gamma_labeled.erase_attribute("colorInteropID");
+    gamma_labeled.attribute("oiio:Gamma", 1.0f);
+    pvt::finalize_resolved_color_metadata(gamma_labeled, config, "png",
+                                          "frame.png");
+    OIIO_CHECK_EQUAL(gamma_labeled.get_string_attribute("colorInteropID"),
+                     "lin_rec709_scene");
+    // An ICC profile this configuration cannot use still describes the
+    // encoding more completely than the sRGB chunk beside it. Ordinary
+    // finalization publishes the chunk's identity; a caller that writes the
+    // profile out with the pixels asks for a source that establishes an
+    // identity, and gets none here.
+    ImageSpec unreadable_icc;
+    unreadable_icc.attribute("ICCProfile",
+                             TypeDesc(TypeDesc::UINT8,
+                                      int(std::size(profile_byte))),
+                             profile_byte);
+    unreadable_icc.attribute("png:sRGB", 0);
+    provenance = pvt::resolve_colorspace_source(config, unreadable_icc,
+                                                "frame.png");
+    OIIO_CHECK_ASSERT(provenance.source == Source::PNGsRGB);
+    ImageSpec png_srgb = unreadable_icc;
+    pvt::finalize_resolved_color_metadata(png_srgb, config, "png", "frame.png");
+    OIIO_CHECK_EQUAL(png_srgb.get_string_attribute("colorInteropID"),
+                     "srgb_rec709_scene");
+    ImageSpec icc_out = unreadable_icc;
+    pvt::finalize_resolved_color_metadata(icc_out, config, "png", "frame.png",
+                                          {}, {}, true);
+    OIIO_CHECK_EQUAL(icc_out.get_string_attribute("colorInteropID"), "");
     numeric.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8), custom);
     numeric.attribute("oiio:Gamma", 1.8f);
     provenance = pvt::resolve_colorspace_source(config, numeric, "frame.png",
                                                 "", "", "", "", Rules::Fallback,
-                                                Missing::ConfigPolicy);
+                                                Missing::ConfigPolicy, nullptr,
+                                                /*synthesize=*/false);
     OIIO_CHECK_EQUAL(provenance.name, "unknown");
     OIIO_CHECK_ASSERT(provenance.terminal_unknown);
+    provenance = pvt::resolve_colorspace_source(config, numeric, "frame.png");
+    OIIO_CHECK_ASSERT(Strutil::starts_with(provenance.name, "<synthetic>"));
+    OIIO_CHECK_ASSERT(provenance.source == Source::NumericMetadata);
+    OIIO_CHECK_ASSERT(provenance.status == Status::Resolved);
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, numeric, "frame.png"),
+                     provenance.name);
+    ImageSpec finalized_custom = numeric;
+    pvt::finalize_resolved_color_metadata(finalized_custom, config, "png",
+                                          "frame.png");
+    OIIO_CHECK_EQUAL(finalized_custom.get_string_attribute("colorInteropID"),
+                     "");
+    // A selector is a conversion endpoint and nothing else, so only a
+    // resolution for a conversion mints one. The same facts resolved to
+    // choose a label end as "unknown" (above), and set_colorspace()
+    // therefore leaves the label unset rather than storing something that
+    // means nothing outside this process.
+    ImageSpec unlabeled_custom = numeric;
+    config.set_colorspace(unlabeled_custom);
+    OIIO_CHECK_ASSERT(!unlabeled_custom.find_attribute("oiio:ColorSpace"));
     ImageSpec gamma_only;
     gamma_only.attribute("oiio:Gamma", 2.2f);
     provenance = pvt::resolve_colorspace_source(config, gamma_only,
                                                 "frame.png");
     OIIO_CHECK_EQUAL(provenance.name, "DisplayGamma22");
     OIIO_CHECK_ASSERT(provenance.source == Source::NumericMetadata);
+    gamma_only.attribute("oiio:Gamma", 1.8f);
+    provenance = pvt::resolve_colorspace_source(config, gamma_only, "frame.png",
+                                                "", "", "", "", Rules::Fallback,
+                                                Missing::ConfigPolicy, nullptr,
+                                                /*synthesize=*/false);
+    OIIO_CHECK_EQUAL(provenance.name, "unknown");
+    provenance = pvt::resolve_colorspace_source(config, gamma_only,
+                                                "frame.png");
+    OIIO_CHECK_ASSERT(
+        Strutil::starts_with(provenance.name, "<synthetic>display:g"));
+    gamma_only.attribute("oiio:Gamma", 2.2f);
     gamma_only.attribute("oiio:PNGNumericState", "scene");
     provenance = pvt::resolve_colorspace_source(config, gamma_only,
                                                 "frame.png");
@@ -2673,6 +2824,1388 @@ test_set_colorspace_contract()
 
 
 
+// ---------------------------------------------------------------------------
+// ICC fixtures
+//
+// Built here rather than committed, so what each profile contains is
+// auditable in the same file that states what it should mean, and so the
+// bytes are identical on every platform. The colorant tags are the
+// load-bearing part: ICC states them adapted to the D50 profile connection
+// space, and OpenColorIO's ICC reader composes in its own fixed Bradford
+// D50-to-D65 matrix when it decodes, so they are built here as that step's
+// inverse and a decoded fixture recovers the primaries it was written from.
+// ---------------------------------------------------------------------------
+
+struct IccTag {
+    std::string signature;
+    std::vector<uint8_t> data;
+};
+
+
+static void
+icc_put32(std::vector<uint8_t>& out, uint32_t value)
+{
+    out.push_back(uint8_t(value >> 24));
+    out.push_back(uint8_t(value >> 16));
+    out.push_back(uint8_t(value >> 8));
+    out.push_back(uint8_t(value));
+}
+
+
+static void
+icc_put16(std::vector<uint8_t>& out, uint16_t value)
+{
+    out.push_back(uint8_t(value >> 8));
+    out.push_back(uint8_t(value));
+}
+
+
+static void
+icc_put_s15f16(std::vector<uint8_t>& out, double value)
+{
+    icc_put32(out, uint32_t(int32_t(std::lround(value * 65536.0))));
+}
+
+
+static void
+icc_put_sig(std::vector<uint8_t>& out, string_view text)
+{
+    out.insert(out.end(), text.begin(), text.end());
+}
+
+
+// XYZ triples. A plain array rather than Imath::V3d, whose operator[] in
+// Imath 3.1 is (&x)[i], undefined behavior for i > 0 that Intel icpx 2023
+// compiles to NaN in the loops below.
+using IccVector = std::array<double, 3>;
+
+
+// The ICC nCIEXYZ illuminant: the header value, the media white, and the
+// destination of the colorant adaptation below.
+static const IccVector icc_pcs_white { 0.9642, 1.0, 0.8249 };
+
+
+// A structurally valid profile from a tag list. `profile_id` writes the v4
+// header's optional profile ID field, which nothing in OIIO reads.
+static std::vector<uint8_t>
+icc_profile(const std::vector<IccTag>& tags, uint8_t profile_id = 0)
+{
+    std::vector<uint8_t> profile(128, 0);
+    profile[8] = 0x02;  // profile version 2.4.0
+    profile[9] = 0x40;
+    std::memcpy(&profile[12], "mntr", 4);  // display device class
+    std::memcpy(&profile[16], "RGB ", 4);  // device color space
+    std::memcpy(&profile[20], "XYZ ", 4);  // profile connection space
+    std::memcpy(&profile[36], "acsp", 4);  // magic
+    std::vector<uint8_t> illuminant;
+    for (int i = 0; i < 3; ++i)
+        icc_put_s15f16(illuminant, icc_pcs_white[i]);
+    std::memcpy(&profile[68], illuminant.data(), illuminant.size());
+    if (profile_id)
+        std::memset(&profile[84], profile_id, 16);
+
+    std::vector<uint8_t> directory, body;
+    icc_put32(directory, uint32_t(tags.size()));
+    const size_t base = 128 + 4 + 12 * tags.size();
+    for (const IccTag& tag : tags) {
+        icc_put_sig(directory, tag.signature);
+        icc_put32(directory, uint32_t(base + body.size()));
+        icc_put32(directory, uint32_t(tag.data.size()));
+        body.insert(body.end(), tag.data.begin(), tag.data.end());
+        while (body.size() % 4)
+            body.push_back(0);
+    }
+    profile.insert(profile.end(), directory.begin(), directory.end());
+    profile.insert(profile.end(), body.begin(), body.end());
+    std::vector<uint8_t> size;
+    icc_put32(size, uint32_t(profile.size()));
+    std::copy(size.begin(), size.end(), profile.begin());
+    return profile;
+}
+
+
+static IccTag
+icc_xyz_tag(const char* signature, const IccVector& xyz)
+{
+    IccTag tag { signature, {} };
+    icc_put_sig(tag.data, "XYZ ");
+    icc_put32(tag.data, 0);
+    for (int i = 0; i < 3; ++i)
+        icc_put_s15f16(tag.data, xyz[i]);
+    return tag;
+}
+
+
+// A tone curve as a table, the common spelling of a measured response.
+static IccTag
+icc_curv_table(const char* signature, const std::vector<double>& values)
+{
+    IccTag tag { signature, {} };
+    icc_put_sig(tag.data, "curv");
+    icc_put32(tag.data, 0);
+    icc_put32(tag.data, uint32_t(values.size()));
+    for (double v : values)
+        icc_put16(tag.data,
+                  uint16_t(std::min(std::max(std::lround(v * 65535.0), 0L),
+                                    65535L)));
+    return tag;
+}
+
+
+// A single-entry curve, which ICC reads as an 8.8 fixed-point exponent.
+static IccTag
+icc_curv_gamma(const char* signature, double gamma)
+{
+    IccTag tag { signature, {} };
+    icc_put_sig(tag.data, "curv");
+    icc_put32(tag.data, 0);
+    icc_put32(tag.data, 1);
+    icc_put16(tag.data, uint16_t(std::lround(gamma * 256.0)));
+    return tag;
+}
+
+
+// A type 3 parametric curve: c*X below d, (a*X + b)^g at and above it.
+static IccTag
+icc_para_type3(const char* signature, const std::vector<double>& params)
+{
+    IccTag tag { signature, {} };
+    icc_put_sig(tag.data, "para");
+    icc_put32(tag.data, 0);
+    icc_put16(tag.data, 3);
+    icc_put16(tag.data, 0);
+    for (double p : params)
+        icc_put_s15f16(tag.data, p);
+    return tag;
+}
+
+
+static IccVector
+icc_xy_to_xyz(double x, double y)
+{
+    return { x / y, 1.0, (1.0 - x - y) / y };
+}
+
+
+static IccVector
+icc_apply(const Imath::M33d& m, const IccVector& v)
+{
+    IccVector out {};
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col)
+            out[row] += m[row][col] * v[col];
+    return out;
+}
+
+
+static Imath::M33d
+icc_multiply(const Imath::M33d& a, const Imath::M33d& b)
+{
+    Imath::M33d out;
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col) {
+            double v = 0.0;
+            for (int k = 0; k < 3; ++k)
+                v += a[row][k] * b[k][col];
+            out[row][col] = v;
+        }
+    return out;
+}
+
+
+// rXYZ/gXYZ/bXYZ/wtpt for the given RGBW chromaticities: the normalized
+// primary matrix, Bradford-adapted from the profile's own white to the
+// connection space illuminant.
+static std::vector<IccTag>
+icc_matrix_tags(const std::vector<double>& primaries)
+{
+    const IccVector red   = icc_xy_to_xyz(primaries[0], primaries[1]);
+    const IccVector green = icc_xy_to_xyz(primaries[2], primaries[3]);
+    const IccVector blue  = icc_xy_to_xyz(primaries[4], primaries[5]);
+    const IccVector white = icc_xy_to_xyz(primaries[6], primaries[7]);
+    Imath::M33d columns(red[0], green[0], blue[0], red[1], green[1], blue[1],
+                        red[2], green[2], blue[2]);
+    const IccVector scale = icc_apply(columns.inverse(), white);
+    Imath::M33d npm;
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col)
+            npm[row][col] = columns[row][col] * scale[col];
+    const Imath::M33d bradford(0.8951, 0.2664, -0.1614, -0.7502, 1.7135, 0.0367,
+                               0.0389, -0.0685, 1.0296);
+    const IccVector from = icc_apply(bradford, white);
+    const IccVector to   = icc_apply(bradford, icc_pcs_white);
+    Imath::M33d ratio;
+    for (int i = 0; i < 3; ++i)
+        ratio[i][i] = to[i] / from[i];
+    const Imath::M33d adapted = icc_multiply(
+        icc_multiply(bradford.inverse(), icc_multiply(ratio, bradford)), npm);
+    return { icc_xyz_tag("rXYZ", IccVector { adapted[0][0], adapted[1][0],
+                                             adapted[2][0] }),
+             icc_xyz_tag("gXYZ", IccVector { adapted[0][1], adapted[1][1],
+                                             adapted[2][1] }),
+             icc_xyz_tag("bXYZ", IccVector { adapted[0][2], adapted[1][2],
+                                             adapted[2][2] }),
+             icc_xyz_tag("wtpt", icc_pcs_white) };
+}
+
+
+static std::vector<uint8_t>
+icc_matrix_trc_profile(const std::vector<double>& primaries, const IccTag& trc,
+                       uint8_t profile_id = 0)
+{
+    std::vector<IccTag> tags = icc_matrix_tags(primaries);
+    for (const char* channel : { "rTRC", "gTRC", "bTRC" }) {
+        IccTag copy    = trc;
+        copy.signature = channel;
+        tags.push_back(copy);
+    }
+    return icc_profile(tags, profile_id);
+}
+
+
+// Decode one RGB triple through a resolved color space into the config's own
+// CIE XYZ D65 interchange space, and report where it landed plus that point's
+// chromaticity.
+static bool
+icc_decode(const ColorConfig& config, string_view from, const float rgb[3],
+           IccVector& xyz, double& x, double& y)
+{
+    auto processor = config.createColorProcessor(from, "XYZ");
+    if (!processor)
+        return false;
+    float pixel[3] = { rgb[0], rgb[1], rgb[2] };
+    processor->apply(pixel);
+    xyz              = { pixel[0], pixel[1], pixel[2] };
+    const double sum = xyz[0] + xyz[1] + xyz[2];
+    if (!(std::abs(sum) > 1e-9))
+        return false;
+    x = xyz[0] / sum;
+    y = xyz[1] / sum;
+    return true;
+}
+
+
+// A supported ICC profile is measured and resolves like a declared identity;
+// a decodable profile nothing reproduces becomes a conversion handle; a
+// profile OpenColorIO cannot decode makes no claim at all.
+static void
+test_icc_identification()
+{
+    if (!ColorConfig::supportsOpenColorIO())
+        return;
+    const std::string filename = Filesystem::temp_directory_path() + "/"
+                                 + Filesystem::unique_path() + ".ocio";
+    // Both interchange roles, so a session handle can bridge out of this
+    // config, and one authored display counterpart for sRGB, so an
+    // identified profile has a local space to select.
+    OIIO_CHECK_ASSERT(Filesystem::write_text_file(
+        filename,
+        "ocio_profile_version: 2.3\n"
+        "roles: {default: Reference, scene_linear: Reference,"
+        " aces_interchange: Reference, cie_xyz_d65_interchange: XYZ}\n"
+        "file_rules:\n  - !<Rule> {name: Default, colorspace: default}\n"
+        "colorspaces:\n  - !<ColorSpace>\n    name: Reference\n"
+        "display_colorspaces:\n"
+        "  - !<ColorSpace>\n    name: XYZ\n    encoding: display-linear\n"
+        "  - !<ColorSpace>\n    name: Display sRGB\n"
+        "    aliases: [srgb_rec709_display]\n    encoding: sdr-video\n"
+        "    from_display_reference: !<GroupTransform>\n"
+        "      children:\n"
+        "        - !<MatrixTransform> {matrix: [3.24096994190452,"
+        " -1.53738317757009, -0.498610760293003, 0, -0.96924363628088,"
+        " 1.87596750150772, 0.0415550574071756, 0, 0.0556300796969936,"
+        " -0.203976958888976, 1.05697151424288, 0, 0, 0, 0, 1]}\n"
+        "        - !<ExponentWithLinearTransform> {gamma: 2.4, offset: 0.055,"
+        " style: mirror, direction: inverse}\n"));
+    ColorConfig config(filename);
+    OIIO_CHECK_EQUAL(config.geterror(false), "");
+    if (config.has_error()) {
+        Filesystem::remove(filename);
+        return;
+    }
+
+    const std::vector<double> rec709 { 0.64, 0.33, 0.30,   0.60,
+                                       0.15, 0.06, 0.3127, 0.3290 };
+    // Deliberately not a published gamut, so nothing can reproduce it.
+    const std::vector<double> wide { 0.7347, 0.2653, 0.1596, 0.8404,
+                                     0.0366, 0.0001, 0.3127, 0.3290 };
+    std::vector<double> srgb_curve(1024);
+    for (size_t i = 0; i < srgb_curve.size(); ++i) {
+        const double v = double(i) / double(srgb_curve.size() - 1);
+        srgb_curve[i]  = v <= 0.04045 ? v / 12.92
+                                      : std::pow((v + 0.055) / 1.055, 2.4);
+    }
+    // The same curve as a table, as a native parametric curve, and a pure
+    // power: the three shapes OpenColorIO's ICC reader supports.
+    const auto tabulated
+        = icc_matrix_trc_profile(rec709, icc_curv_table("rTRC", srgb_curve));
+    const auto parametric = icc_matrix_trc_profile(
+        rec709, icc_para_type3("rTRC", { 2.4, 1.0 / 1.055, 0.055 / 1.055,
+                                         1.0 / 12.92, 0.04045 }));
+    const auto pure_power = icc_matrix_trc_profile(wide,
+                                                   icc_curv_gamma("rTRC", 1.8));
+    // No colorant and no curve tags: outside the matrix/TRC model entirely.
+    const auto unsupported = icc_profile(
+        { icc_xyz_tag("wtpt", icc_pcs_white) });
+
+    auto resolve = [&](const std::vector<uint8_t>& profile) {
+        ImageSpec spec;
+        spec.attribute("ICCProfile",
+                       TypeDesc(TypeDesc::UINT8, int(profile.size())),
+                       profile.data());
+        spec.attribute("oiio:ColorSpace", "Reference");
+        return resolve_colorspace(config, spec, "frame.png");
+    };
+
+    // Identified: measured against the internal reference, in the display
+    // state the decode lands in, and answered with this config's own space.
+    OIIO_CHECK_EQUAL(resolve(tabulated), "Display sRGB");
+    OIIO_CHECK_EQUAL(resolve(parametric), "Display sRGB");
+    // set_colorspace() with no name stores only a portable answer, never a
+    // process-local selector. set_colorspace(name) keeps a profile that
+    // identifies as the name's encoding, image state aside, and removes one
+    // that does not.
+    {
+        auto with_icc = [&](const std::vector<uint8_t>& profile) {
+            ImageSpec spec;
+            spec.attribute("ICCProfile",
+                           TypeDesc(TypeDesc::UINT8, int(profile.size())),
+                           profile.data());
+            return spec;
+        };
+        ImageSpec unmatched = with_icc(pure_power);
+        config.set_colorspace(unmatched);
+        OIIO_CHECK_ASSERT(unmatched.find_attribute("oiio:ColorSpace")
+                          == nullptr);
+        ImageSpec srgb = with_icc(tabulated);
+        config.set_colorspace(srgb);
+        OIIO_CHECK_EQUAL(srgb.get_string_attribute("oiio:ColorSpace"),
+                         "Display sRGB");
+        config.set_colorspace(srgb, "srgb_rec709_scene");
+        OIIO_CHECK_ASSERT(srgb.find_attribute("ICCProfile"));
+        config.set_colorspace(srgb, "Reference");
+        OIIO_CHECK_ASSERT(srgb.find_attribute("ICCProfile") == nullptr);
+    }
+    {
+        ImageSpec spec;
+        spec.attribute("ICCProfile",
+                       TypeDesc(TypeDesc::UINT8, int(tabulated.size())),
+                       tabulated.data());
+        const auto result = pvt::resolve_colorspace_source(config, spec,
+                                                           "frame.png");
+        OIIO_CHECK_ASSERT(result.source == pvt::ColorSpaceSource::ICC);
+    }
+    // Not decodable: no claim, so the reader's label below still applies and
+    // no handle was minted for it.
+    OIIO_CHECK_EQUAL(resolve(unsupported), "Reference");
+    {
+        ImageSpec spec;
+        spec.attribute("ICCProfile",
+                       TypeDesc(TypeDesc::UINT8, int(unsupported.size())),
+                       unsupported.data());
+        OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "frame.png"), "");
+    }
+
+    // Decodable, reproduced by nothing: a conversion handle, the same one on
+    // every call and for every byte-identical copy, and not an identity.
+    const std::string handle = resolve(pure_power);
+    OIIO_CHECK_ASSERT(Strutil::starts_with(handle, "<synthetic>icc_"));
+    OIIO_CHECK_EQUAL(resolve(pure_power), handle);
+    OIIO_CHECK_EQUAL(resolve(std::vector<uint8_t>(pure_power)), handle);
+    OIIO_CHECK_EQUAL(config.get_color_interop_id(handle), "");
+    OIIO_CHECK_FALSE(config.isData(handle));
+    OIIO_CHECK_FALSE(config.equivalent(handle, "Reference"));
+
+    // The handle performs the profile's own decode, in the direction that
+    // decodes: device values into CIE XYZ at D65. Each primary comes back at
+    // the chromaticity the profile was written from, which is a statement
+    // about the colorimetry rather than about the identity string, and an
+    // encoding-direction transform could not produce it.
+    IccVector xyz;
+    double x = 0.0, y = 0.0;
+    const float red[3] = { 1.0f, 0.0f, 0.0f };
+    OIIO_CHECK_ASSERT(icc_decode(config, handle, red, xyz, x, y));
+    const double red_x = x, red_y = y;
+    OIIO_CHECK_EQUAL_THRESH(float(x), float(wide[0]), 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(y), float(wide[1]), 1.0e-3f);
+    const float green[3] = { 0.0f, 1.0f, 0.0f };
+    OIIO_CHECK_ASSERT(icc_decode(config, handle, green, xyz, x, y));
+    OIIO_CHECK_EQUAL_THRESH(float(x), float(wide[2]), 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(y), float(wide[3]), 1.0e-3f);
+    const float grey[3] = { 0.5f, 0.5f, 0.5f };
+    OIIO_CHECK_ASSERT(icc_decode(config, handle, grey, xyz, x, y));
+    OIIO_CHECK_EQUAL_THRESH(float(x), float(wide[6]), 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(y), float(wide[7]), 1.0e-3f);
+    // The 1.8 exponent, applied as a decode. Encoding it would give 0.7009.
+    OIIO_CHECK_EQUAL_THRESH(float(xyz[1]), std::pow(0.5f, 1.8f), 2.0e-3f);
+
+    // A real bidirectional endpoint: the round trip through this config's
+    // scene reference returns the values it started from.
+    ImageBuf src(ImageSpec(1, 1, 3, TypeDesc::FLOAT));
+    OIIO_CHECK_ASSERT(ImageBufAlgo::fill(src, { 0.25f, 0.5f, 0.75f }));
+    ImageBuf linear = ImageBufAlgo::colorconvert(src, handle, "Reference",
+                                                 false, "", "", &config);
+    OIIO_CHECK_FALSE(linear.has_error());
+    ImageBuf back = ImageBufAlgo::colorconvert(linear, "Reference", handle,
+                                               false, "", "", &config);
+    OIIO_CHECK_FALSE(back.has_error());
+    float out[3] = { 0.0f, 0.0f, 0.0f };
+    back.getpixel(0, 0, make_span(out));
+    const float expected[3] = { 0.25f, 0.5f, 0.75f };
+    for (int c = 0; c < 3; ++c)
+        OIIO_CHECK_EQUAL_THRESH(out[c], expected[c], 2.0e-3f);
+    // The handle is process-shared, not owned by the wrapper that minted it.
+    ColorConfig second(filename);
+    OIIO_CHECK_EQUAL(second.geterror(false), "");
+    IccVector elsewhere;
+    double x2 = 0.0, y2 = 0.0;
+    OIIO_CHECK_ASSERT(icc_decode(second, handle, red, elsewhere, x2, y2));
+    OIIO_CHECK_EQUAL_THRESH(float(x2), float(red_x), 1.0e-6f);
+    OIIO_CHECK_EQUAL_THRESH(float(y2), float(red_y), 1.0e-6f);
+
+    // Two valid profiles that declare the same v4 header profile ID are two
+    // different profiles. Nothing here reads that field, so they are named
+    // and converted by their bytes, in whichever order they arrive.
+    const std::vector<double> other { 0.7000, 0.2900, 0.1700, 0.8000,
+                                      0.0500, 0.0100, 0.3127, 0.3290 };
+    const auto twin_a
+        = icc_matrix_trc_profile(wide, icc_curv_gamma("rTRC", 1.8), 0x5A);
+    const auto twin_b
+        = icc_matrix_trc_profile(other, icc_curv_gamma("rTRC", 2.0), 0x5A);
+    const std::string first_a = resolve(twin_a);
+    const std::string first_b = resolve(twin_b);
+    const std::string again_b = resolve(twin_b);
+    const std::string again_a = resolve(twin_a);
+    OIIO_CHECK_ASSERT(Strutil::starts_with(first_a, "<synthetic>icc_"));
+    OIIO_CHECK_ASSERT(Strutil::starts_with(first_b, "<synthetic>icc_"));
+    OIIO_CHECK_ASSERT(first_a != first_b);
+    OIIO_CHECK_EQUAL(again_a, first_a);
+    OIIO_CHECK_EQUAL(again_b, first_b);
+    // And they convert differently, whichever one was seen first.
+    double xa = 0.0, ya = 0.0, xb = 0.0, yb = 0.0;
+    OIIO_CHECK_ASSERT(icc_decode(config, first_a, red, xyz, xa, ya));
+    OIIO_CHECK_ASSERT(icc_decode(config, first_b, red, xyz, xb, yb));
+    OIIO_CHECK_EQUAL_THRESH(float(xa), float(wide[0]), 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(ya), float(wide[1]), 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(xb), float(other[0]), 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(yb), float(other[1]), 1.0e-3f);
+
+    // An embedded cicpTag still names the signal before any decoding does.
+    {
+        std::vector<IccTag> tags = icc_matrix_tags(wide);
+        for (const char* channel : { "rTRC", "gTRC", "bTRC" })
+            tags.push_back(icc_curv_gamma(channel, 1.8));
+        IccTag cicp { "cicp", {} };
+        icc_put_sig(cicp.data, "cicp");
+        icc_put32(cicp.data, 0);
+        cicp.data.insert(cicp.data.end(), { 1, 13, 0, 1 });
+        tags.push_back(cicp);
+        OIIO_CHECK_EQUAL(resolve(icc_profile(tags)), "Display sRGB");
+    }
+    // The payload is four code bytes after the type header. A short cicpTag
+    // is not read past its declared extent and makes no claim.
+    {
+        IccTag cicp { "cicp", {} };
+        icc_put_sig(cicp.data, "cicp");
+        icc_put32(cicp.data, 0);
+        cicp.data.insert(cicp.data.end(), { 1, 13, 0 });
+        // The padding byte after it would complete a full-range sRGB tuple.
+        auto profile                             = icc_profile({ cicp });
+        profile[128 + 4 + 12 + cicp.data.size()] = 1;
+        OIIO_CHECK_EQUAL(resolve(profile), "Reference");
+        // Like any other malformed tag, it stops decoding the profile.
+        ImageSpec decoded;
+        std::string error;
+        OIIO_CHECK_FALSE(decode_icc_profile(profile, decoded, error));
+    }
+
+    // Nothing is written back to the caller's metadata.
+    {
+        ImageSpec spec;
+        spec.attribute("ICCProfile",
+                       TypeDesc(TypeDesc::UINT8, int(pure_power.size())),
+                       pure_power.data());
+        spec.attribute("colorInteropID", "lin_rec709_scene");
+        OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "frame.png"),
+                         "lin_rec709_scene");
+        OIIO_CHECK_EQUAL(spec.get_string_attribute("colorInteropID"),
+                         "lin_rec709_scene");
+    }
+
+    // Over the retention bound: refused before anything is decoded or held.
+    {
+        std::vector<uint8_t> huge = pure_power;
+        huge.resize(size_t(16) * 1024 * 1024 + 4, 0);
+        std::vector<uint8_t> size;
+        icc_put32(size, uint32_t(huge.size()));
+        std::copy(size.begin(), size.end(), huge.begin());
+        OIIO_CHECK_EQUAL(resolve(huge), "Reference");
+    }
+    Filesystem::remove(filename);
+}
+
+
+
+// Chromaticities and a gamma that name no published encoding still describe
+// a conversion. The assertions here are colorimetric, against the declared
+// coordinates rather than against anything the synthesis path produced.
+static void
+test_numeric_synthesis()
+{
+    if (!ColorConfig::supportsOpenColorIO())
+        return;
+    const std::string filename = Filesystem::temp_directory_path() + "/"
+                                 + Filesystem::unique_path() + ".ocio";
+    OIIO_CHECK_ASSERT(Filesystem::write_text_file(
+        filename,
+        "ocio_profile_version: 2.3\n"
+        "roles: {default: Reference, scene_linear: Reference,"
+        " aces_interchange: Reference, cie_xyz_d65_interchange: XYZ}\n"
+        "file_rules:\n  - !<Rule> {name: Default, colorspace: default}\n"
+        // A scene-referred endpoint reaching a display-referred one is
+        // connected inside the config that holds the display space, so this
+        // one needs its own bridge for the assertions below.
+        "default_view_transform: bridge\n"
+        "view_transforms:\n  - !<ViewTransform>\n    name: bridge\n"
+        "    from_scene_reference: !<BuiltinTransform>"
+        " {style: UTILITY - ACES-AP0_to_CIE-XYZ-D65_BFD}\n"
+        "colorspaces:\n  - !<ColorSpace>\n    name: Reference\n"
+        "display_colorspaces:\n"
+        "  - !<ColorSpace>\n    name: XYZ\n    encoding: display-linear\n"));
+    ColorConfig config(filename);
+    OIIO_CHECK_EQUAL(config.geterror(false), "");
+    if (config.has_error()) {
+        Filesystem::remove(filename);
+        return;
+    }
+
+    // Not a published gamut, and a gamma no reference encoding uses with it.
+    const float xy[8] = { 0.695f, 0.305f, 0.140f,  0.820f,
+                          0.100f, 0.005f, 0.3127f, 0.3290f };
+    ImageSpec spec;
+    spec.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8), xy);
+    spec.attribute("oiio:Gamma", 1.8f);
+    const std::string handle = resolve_colorspace(config, spec, "frame.png");
+    OIIO_CHECK_ASSERT(Strutil::starts_with(handle, "<synthetic>"));
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "frame.png"), handle);
+    // A conversion handle, not an identity.
+    OIIO_CHECK_EQUAL(config.get_color_interop_id(handle), "");
+    OIIO_CHECK_FALSE(config.isData(handle));
+
+    // Each declared primary lands at the chromaticity it was declared at,
+    // and the exponent is applied as a decode.
+    IccVector xyz;
+    double x = 0.0, y = 0.0;
+    const float red[3] = { 1.0f, 0.0f, 0.0f };
+    OIIO_CHECK_ASSERT(icc_decode(config, handle, red, xyz, x, y));
+    OIIO_CHECK_EQUAL_THRESH(float(x), xy[0], 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(y), xy[1], 1.0e-3f);
+    const float blue[3] = { 0.0f, 0.0f, 1.0f };
+    OIIO_CHECK_ASSERT(icc_decode(config, handle, blue, xyz, x, y));
+    OIIO_CHECK_EQUAL_THRESH(float(x), xy[4], 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(y), xy[5], 1.0e-3f);
+    const float grey[3] = { 0.5f, 0.5f, 0.5f };
+    OIIO_CHECK_ASSERT(icc_decode(config, handle, grey, xyz, x, y));
+    OIIO_CHECK_EQUAL_THRESH(float(x), xy[6], 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(y), xy[7], 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(xyz[1]), std::pow(0.5f, 1.8f), 1.0e-4f);
+
+    // Gamma alone supplies a transfer-only endpoint, while chromaticities
+    // that do not span a plane describe no conversion and remain "unknown".
+    ImageSpec bare;
+    bare.attribute("oiio:Gamma", 1.8f);
+    const std::string bare_handle = resolve_colorspace(config, bare,
+                                                       "frame.png");
+    OIIO_CHECK_ASSERT(
+        Strutil::starts_with(bare_handle, "<synthetic>display:g"));
+    OIIO_CHECK_ASSERT(icc_decode(config, bare_handle, grey, xyz, x, y));
+    for (int c = 0; c < 3; ++c)
+        OIIO_CHECK_EQUAL_THRESH(float(xyz[c]), std::pow(0.5f, 1.8f), 1.0e-4f);
+    const float collinear[8] = { 0.3f, 0.3f, 0.4f,    0.4f,
+                                 0.5f, 0.5f, 0.3127f, 0.3290f };
+    ImageSpec degenerate;
+    degenerate.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                         collinear);
+    degenerate.attribute("oiio:Gamma", 1.8f);
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, degenerate, "frame.png"),
+                     "unknown");
+    const float impossible[8] = { 0.64f, 0.0f,  0.30f,   0.60f,
+                                  0.15f, 0.06f, 0.3127f, 0.3290f };
+    degenerate.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                         impossible);
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, degenerate, "frame.png"),
+                     "unknown");
+    Filesystem::remove(filename);
+}
+
+
+// A configuration for the session-handle tests: both interchange roles, a
+// display-referred CIE XYZ, and a bridge so a scene-referred handle can reach
+// it. `extra` continues the display_colorspaces sequence, or opens a new
+// top-level block after it.
+static std::string
+session_test_config(const std::string& extra)
+{
+    const std::string path = Filesystem::temp_directory_path() + "/"
+                             + Filesystem::unique_path() + ".ocio";
+    OIIO_CHECK_ASSERT(Filesystem::write_text_file(
+        path, "ocio_profile_version: 2.3\n"
+              "roles: {default: Reference, scene_linear: Reference,"
+              " aces_interchange: Reference, cie_xyz_d65_interchange: XYZ}\n"
+              "file_rules:\n  - !<Rule> {name: Default, colorspace: default}\n"
+              "default_view_transform: bridge\n"
+              "view_transforms:\n  - !<ViewTransform>\n    name: bridge\n"
+              "    from_scene_reference: !<BuiltinTransform>"
+              " {style: UTILITY - ACES-AP0_to_CIE-XYZ-D65_BFD}\n"
+              "colorspaces:\n  - !<ColorSpace>\n    name: Reference\n"
+              "display_colorspaces:\n"
+              "  - !<ColorSpace>\n    name: XYZ\n    encoding: display-linear\n"
+                  + extra));
+    return path;
+}
+
+
+// A configuration that already uses a session selector's spelling keeps it.
+// The file that produced that spelling still converts, through a
+// collision-free handle that performs its own decode, and the authored
+// definition still answers for its own name. Checked once where the
+// configuration owns the spelling through an alias, and once where it owns it
+// as a named transform, because both are consulted before a session handle is.
+static void
+test_session_selector_collision()
+{
+    if (!ColorConfig::supportsOpenColorIO())
+        return;
+    const std::string plain = session_test_config("");
+    ColorConfig config(plain);
+    OIIO_CHECK_EQUAL(config.geterror(false), "");
+    if (config.has_error()) {
+        Filesystem::remove(plain);
+        return;
+    }
+
+    // Published by nothing, so both facts below reach synthesis rather than
+    // an identity, and distinct from the fixtures the other tests mint.
+    const std::vector<double> unnamed { 0.7100, 0.2900, 0.1300, 0.8300,
+                                        0.0500, 0.0050, 0.3127, 0.3290 };
+    const auto profile = icc_matrix_trc_profile(unnamed,
+                                                icc_curv_gamma("rTRC", 2.0));
+    ImageSpec icc_spec;
+    icc_spec.attribute("ICCProfile",
+                       TypeDesc(TypeDesc::UINT8, int(profile.size())),
+                       profile.data());
+    const std::string icc_handle = resolve_colorspace(config, icc_spec,
+                                                      "frame.png");
+    OIIO_CHECK_ASSERT(Strutil::starts_with(icc_handle, "<synthetic>icc_"));
+
+    // The same spelling, as an alias on an unrelated Rec.709 display space.
+    const std::string collide = session_test_config(
+        "  - !<ColorSpace>\n    name: Collide\n    aliases: [\"" + icc_handle
+        + "\"]\n    encoding: display-linear\n"
+          "    to_display_reference: !<MatrixTransform> {matrix:"
+          " [0.4123907992659595, 0.3575843393838780, 0.1804807884018343, 0,"
+          " 0.2126390058715104, 0.7151686787677559, 0.0721923153607337, 0,"
+          " 0.0193308187155918, 0.1191947797946259, 0.9505321522496608, 0,"
+          " 0, 0, 0, 1]}\n");
+    ColorConfig owner(collide);
+    OIIO_CHECK_EQUAL(owner.geterror(false), "");
+    if (owner.has_error()) {
+        Filesystem::remove(plain);
+        Filesystem::remove(collide);
+        return;
+    }
+
+    // Resolution steps past the spelling the configuration owns, and does so
+    // the same way on every repeat.
+    const std::string owned = resolve_colorspace(owner, icc_spec, "frame.png");
+    OIIO_CHECK_ASSERT(Strutil::starts_with(owned, "<synthetic>icc_"));
+    OIIO_CHECK_ASSERT(owned != icc_handle);
+    OIIO_CHECK_EQUAL(resolve_colorspace(owner, icc_spec, "frame.png"), owned);
+
+    // What comes back converts the profile: red lands where the profile put
+    // it, not where the authored space would have put it.
+    IccVector xyz;
+    double x = 0.0, y = 0.0;
+    const float red[3] = { 1.0f, 0.0f, 0.0f };
+    OIIO_CHECK_ASSERT(icc_decode(owner, owned, red, xyz, x, y));
+    OIIO_CHECK_EQUAL_THRESH(float(x), float(unnamed[0]), 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(y), float(unnamed[1]), 1.0e-3f);
+    // And the authored alias still means the space it was authored on.
+    OIIO_CHECK_ASSERT(icc_decode(owner, icc_handle, red, xyz, x, y));
+    OIIO_CHECK_EQUAL_THRESH(float(x), 0.64f, 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(y), 0.33f, 1.0e-3f);
+    // The configuration that never used the spelling still gets it, and it
+    // still decodes the profile there.
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, icc_spec, "frame.png"),
+                     icc_handle);
+    OIIO_CHECK_ASSERT(icc_decode(config, icc_handle, red, xyz, x, y));
+    OIIO_CHECK_EQUAL_THRESH(float(x), float(unnamed[0]), 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(y), float(unnamed[1]), 1.0e-3f);
+
+    // The numeric spelling is fully predictable, so the same collision is
+    // easier to build there. A named transform is enough to own it.
+    const float xy[8] = { 0.6800f, 0.3050f, 0.1450f, 0.8100f,
+                          0.0900f, 0.0150f, 0.3127f, 0.3290f };
+    ImageSpec numeric;
+    numeric.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8), xy);
+    numeric.attribute("oiio:Gamma", 1.9f);
+    const std::string custom = resolve_colorspace(config, numeric, "frame.png");
+    OIIO_CHECK_ASSERT(Strutil::starts_with(custom, "<synthetic>"));
+    // The completed local-precedence proof is shared across wrappers of the
+    // same effective configuration, and the selector remains stable.
+    ColorConfig repeated(plain);
+    OIIO_CHECK_EQUAL(repeated.geterror(false), "");
+    if (!repeated.has_error()) {
+        OIIO_CHECK_EQUAL(resolve_colorspace(repeated, numeric, "frame.png"),
+                         custom);
+        OIIO_CHECK_EQUAL(resolve_colorspace(repeated, numeric, "frame.png"),
+                         custom);
+    }
+    const float xy2[8] = { 0.7000f, 0.2900f, 0.1700f, 0.8000f,
+                           0.0500f, 0.0100f, 0.3127f, 0.3290f };
+    ImageSpec numeric2;
+    numeric2.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8), xy2);
+    numeric2.attribute("oiio:Gamma", 2.0f);
+    const std::string custom2 = resolve_colorspace(config, numeric2,
+                                                   "frame.png");
+    OIIO_CHECK_ASSERT(Strutil::starts_with(custom2, "<synthetic>"));
+    OIIO_CHECK_ASSERT(custom2 != custom);
+
+    // Both endpoints are session-owned. A supported context-variable file
+    // inside a non-identity named look must sit between the two bridges, and
+    // its inverse must undo the whole chain when the endpoints are exchanged.
+    const std::string look_directory = Filesystem::temp_directory_path() + "/"
+                                       + Filesystem::unique_path();
+    OIIO_CHECK_ASSERT(Filesystem::create_directory(look_directory));
+    auto gain_file = [&](string_view name, int gain) {
+        return Filesystem::write_text_file(
+            Strutil::fmt::format("{}/gain_{}.ctf", look_directory, name),
+            Strutil::fmt::format(
+                "<ProcessList version=\"1.3\" id=\"gain\">\n"
+                "  <Matrix inBitDepth=\"32f\" outBitDepth=\"32f\">\n"
+                "    <Array dim=\"3 3\">{} 0 0 0 {} 0 0 0 {}</Array>\n"
+                "  </Matrix>\n</ProcessList>\n",
+                gain, gain, gain));
+    };
+    OIIO_CHECK_ASSERT(gain_file("two", 2));
+    OIIO_CHECK_ASSERT(gain_file("three", 3));
+    const std::string look_config_file = look_directory + "/look.ocio";
+    OIIO_CHECK_ASSERT(Filesystem::write_text_file(
+        look_config_file,
+        "ocio_profile_version: 2.3\n"
+        "environment: {GAIN: two}\nsearch_path: .\n"
+        "roles: {default: Reference, scene_linear: Reference,"
+        " aces_interchange: Reference, cie_xyz_d65_interchange: XYZ}\n"
+        "default_view_transform: bridge\n"
+        "view_transforms:\n  - !<ViewTransform>\n    name: bridge\n"
+        "    from_scene_reference: !<BuiltinTransform>"
+        " {style: UTILITY - ACES-AP0_to_CIE-XYZ-D65_BFD}\n"
+        "colorspaces:\n  - !<ColorSpace> {name: Reference}\n"
+        "  - !<ColorSpace> {name: Raw, isdata: true}\n"
+        "display_colorspaces:\n  - !<ColorSpace> {name: XYZ,"
+        " encoding: display-linear}\n"
+        "looks:\n  - !<Look>\n    name: gain\n"
+        "    process_space: Reference\n"
+        "    transform: !<FileTransform> {src: gain_$GAIN.ctf}\n"));
+    ColorConfig look_config(look_config_file);
+    OIIO_CHECK_EQUAL(look_config.geterror(false), "");
+    ImageBuf look_src(ImageSpec(1, 1, 3, TypeDesc::FLOAT));
+    OIIO_CHECK_ASSERT(ImageBufAlgo::fill(look_src, { 0.10f, 0.20f, 0.30f }));
+    ImageBuf gain2 = ImageBufAlgo::ociolook(look_src, "gain", custom, custom2,
+                                            false, false, "GAIN", "two",
+                                            &look_config);
+    ImageBuf gain3 = ImageBufAlgo::ociolook(look_src, "gain", custom, custom2,
+                                            false, false, "GAIN", "three",
+                                            &look_config);
+    const bool gain2_ok = !gain2.has_error();
+    const bool gain3_ok = !gain3.has_error();
+    OIIO_CHECK_ASSERT(gain2_ok);
+    OIIO_CHECK_ASSERT(gain3_ok);
+    if (!gain2_ok) {
+        const std::string error = gain2.geterror();
+        OIIO_CHECK_EQUAL(error, "");
+    }
+    if (!gain3_ok) {
+        const std::string error = gain3.geterror();
+        OIIO_CHECK_EQUAL(error, "");
+    }
+    if (gain2_ok && gain3_ok) {
+        float p2[3] = {}, p3[3] = {};
+        gain2.getpixel(0, 0, make_span(p2));
+        gain3.getpixel(0, 0, make_span(p3));
+        OIIO_CHECK_ASSERT(std::abs(p2[0] - p3[0]) > 1.0e-3f);
+        ImageBuf undone = ImageBufAlgo::ociolook(gain2, "gain", custom2, custom,
+                                                 false, true, "GAIN", "two",
+                                                 &look_config);
+        const bool undone_ok = !undone.has_error();
+        OIIO_CHECK_ASSERT(undone_ok);
+        if (!undone_ok) {
+            const std::string error = undone.geterror();
+            OIIO_CHECK_EQUAL(error, "");
+        } else {
+            float restored[3] = {};
+            undone.getpixel(0, 0, make_span(restored));
+            const float look_input[3] = { 0.10f, 0.20f, 0.30f };
+            for (int c = 0; c < 3; ++c)
+                OIIO_CHECK_EQUAL_THRESH(restored[c], look_input[c], 2.0e-3f);
+        }
+        OIIO_CHECK_EQUAL(gain2.spec().get_string_attribute("colorInteropID"),
+                         "unknown");
+        OIIO_CHECK_ASSERT(gain2.spec().find_attribute("chromaticities")
+                          == nullptr);
+    }
+
+    // Data input bypasses the look for pixels, while retaining the same
+    // destination-tagging contract as an identity processor. A complete
+    // output names the explicit destination; a partial output is mixed and
+    // therefore unknown. In both cases stale source evidence is removed.
+    ImageBuf data_src(ImageSpec(2, 1, 3, TypeDesc::FLOAT));
+    OIIO_CHECK_ASSERT(ImageBufAlgo::fill(data_src, { 0.15f, 0.25f, 0.35f }));
+    data_src.specmod().set_colorspace("Raw");
+    data_src.specmod().attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                                 xy);
+    data_src.specmod().attribute("oiio:Gamma", 1.9f);
+    data_src.specmod().attribute("colorInteropID", "stale-source-id");
+    ImageBuf data_full = ImageBufAlgo::ociolook(data_src, "gain", "Raw",
+                                                "Reference", false, false, "",
+                                                "", &look_config);
+    const bool data_full_ok = !data_full.has_error();
+    OIIO_CHECK_ASSERT(data_full_ok);
+    float data_pixel[3] = {};
+    if (!data_full_ok) {
+        const std::string error = data_full.geterror();
+        OIIO_CHECK_EQUAL(error, "");
+    } else {
+        data_full.getpixel(0, 0, make_span(data_pixel));
+        for (int c = 0; c < 3; ++c)
+            OIIO_CHECK_EQUAL_THRESH(data_pixel[c], 0.15f + 0.10f * c, 1.0e-7f);
+        OIIO_CHECK_EQUAL(data_full.spec().get_string_attribute(
+                             "oiio:ColorSpace"),
+                         "Reference");
+        OIIO_CHECK_ASSERT(
+            data_full.spec().get_string_attribute("colorInteropID")
+            != "stale-source-id");
+        OIIO_CHECK_ASSERT(data_full.spec().find_attribute("chromaticities")
+                          == nullptr);
+        OIIO_CHECK_ASSERT(data_full.spec().find_attribute("oiio:Gamma")
+                          == nullptr);
+    }
+
+    ROI one_pixel(0, 1, 0, 1, 0, 1, 0, 3);
+    ImageBuf data_partial;
+    OIIO_CHECK_ASSERT(ImageBufAlgo::copy(data_partial, data_src));
+    const bool data_partial_ok
+        = ImageBufAlgo::ociolook(data_partial, data_src, "gain", "Raw",
+                                 "Reference", false, false, "", "",
+                                 &look_config, one_pixel);
+    OIIO_CHECK_ASSERT(data_partial_ok);
+    if (!data_partial_ok) {
+        const std::string error = data_partial.geterror();
+        OIIO_CHECK_EQUAL(error, "");
+    } else {
+        data_partial.getpixel(0, 0, make_span(data_pixel));
+        for (int c = 0; c < 3; ++c)
+            OIIO_CHECK_EQUAL_THRESH(data_pixel[c], 0.15f + 0.10f * c, 1.0e-7f);
+        OIIO_CHECK_EQUAL(data_partial.spec().get_string_attribute(
+                             "oiio:ColorSpace"),
+                         "unknown");
+        OIIO_CHECK_EQUAL(data_partial.spec().get_string_attribute(
+                             "colorInteropID"),
+                         "unknown");
+        OIIO_CHECK_ASSERT(data_partial.spec().find_attribute("chromaticities")
+                          == nullptr);
+        OIIO_CHECK_ASSERT(data_partial.spec().find_attribute("oiio:Gamma")
+                          == nullptr);
+    }
+    // A data destination leaves the pixels alone too.
+    ImageBuf into_data = ImageBufAlgo::ociolook(data_src, "gain", "Reference",
+                                                "Raw", false, false, "", "",
+                                                &look_config);
+    OIIO_CHECK_ASSERT(!into_data.has_error());
+    into_data.getpixel(0, 0, make_span(data_pixel));
+    for (int c = 0; c < 3; ++c)
+        OIIO_CHECK_EQUAL_THRESH(data_pixel[c], 0.15f + 0.10f * c, 1.0e-7f);
+
+    Filesystem::remove_all(look_directory);
+
+    const std::string named = session_test_config(
+        "named_transforms:\n  - !<NamedTransform>\n    name: \"" + custom
+        + "\"\n    transform: !<MatrixTransform> {matrix:"
+          " [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1]}\n");
+    ColorConfig transformed(named);
+    OIIO_CHECK_EQUAL(transformed.geterror(false), "");
+    if (!transformed.has_error()) {
+        const std::string stepped = resolve_colorspace(transformed, numeric,
+                                                       "frame.png");
+        OIIO_CHECK_ASSERT(Strutil::starts_with(stepped, "<synthetic>"));
+        OIIO_CHECK_ASSERT(stepped != custom);
+        OIIO_CHECK_EQUAL(resolve_colorspace(transformed, numeric, "frame.png"),
+                         stepped);
+        // A proof from the plain configuration cannot bypass this
+        // configuration's authored-name precedence.
+        OIIO_CHECK_EQUAL(resolve_colorspace(config, numeric, "frame.png"),
+                         custom);
+        // The authored named transform keeps its name.
+        const auto names = transformed.getNamedTransformNames();
+        OIIO_CHECK_ASSERT(std::find(names.begin(), names.end(), custom)
+                          != names.end());
+        // And the handle converts the declared primaries, not the scale by 2
+        // the named transform would have applied.
+        OIIO_CHECK_ASSERT(icc_decode(transformed, stepped, red, xyz, x, y));
+        OIIO_CHECK_EQUAL_THRESH(float(x), xy[0], 1.0e-3f);
+        OIIO_CHECK_EQUAL_THRESH(float(y), xy[1], 1.0e-3f);
+    }
+
+    // Exhaust every selector spelling for a fresh ICC payload. Minting
+    // declines rather than guesses, so no session selector comes back.
+    const auto exhausted_profile
+        = icc_matrix_trc_profile(unnamed, icc_curv_gamma("rTRC", 2.1));
+    const std::string exhausted_base
+        = "<synthetic>icc_"
+          + Strutil::lower(
+              SHA1::digest(exhausted_profile.data(), exhausted_profile.size()));
+    std::string aliases;
+    for (int n = 0; n <= 64; ++n) {
+        if (n)
+            aliases += ", ";
+        aliases += "\"" + exhausted_base
+                   + (n ? Strutil::fmt::format("@{}", n) : std::string())
+                   + "\"";
+    }
+    const std::string exhausted = session_test_config(
+        "  - !<ColorSpace>\n    name: Exhausted selectors\n    aliases: ["
+        + aliases + "]\n    encoding: display-linear\n");
+    ColorConfig exhausted_config(exhausted);
+    OIIO_CHECK_EQUAL(exhausted_config.geterror(false), "");
+    if (!exhausted_config.has_error()) {
+        ImageSpec exhausted_spec;
+        exhausted_spec.attribute("ICCProfile",
+                                 TypeDesc(TypeDesc::UINT8,
+                                          int(exhausted_profile.size())),
+                                 exhausted_profile.data());
+        OIIO_CHECK_FALSE(Strutil::starts_with(
+            resolve_colorspace(exhausted_config, exhausted_spec, "frame.png"),
+            "<synthetic>"));
+    }
+
+    // Concurrent duplicates publish one numeric endpoint and every caller
+    // receives that stable selector.
+    const float concurrent_xy[8] = { 0.6900f, 0.2950f, 0.1550f, 0.8150f,
+                                     0.0750f, 0.0120f, 0.3127f, 0.3290f };
+    ImageSpec concurrent_spec;
+    concurrent_spec.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                              concurrent_xy);
+    concurrent_spec.attribute("oiio:Gamma", 1.7f);
+    std::array<std::string, 8> concurrent_names;
+    std::vector<std::thread> threads;
+    for (size_t i = 0; i < concurrent_names.size(); ++i)
+        threads.emplace_back([&, i] {
+            concurrent_names[i] = resolve_colorspace(config, concurrent_spec,
+                                                     "frame.png");
+        });
+    for (auto& thread : threads)
+        thread.join();
+    for (const auto& name : concurrent_names) {
+        OIIO_CHECK_ASSERT(Strutil::starts_with(name, "<synthetic>"));
+        OIIO_CHECK_EQUAL(name, concurrent_names[0]);
+    }
+
+    Filesystem::remove(exhausted);
+    Filesystem::remove(named);
+    Filesystem::remove(collide);
+    Filesystem::remove(plain);
+}
+
+
+// Virtual primaries are ordinary primaries. AP0's blue sits below the x axis
+// and its green at x = 0, and camera native gamuts are wider still, so a
+// coordinate outside the spectral triangle describes a conversion like any
+// other. What is refused is a description with no conversion in it: a
+// coordinate that names no direction in XYZ, and a value with no wire
+// spelling at all.
+static void
+test_virtual_primary_gamut()
+{
+    if (!ColorConfig::supportsOpenColorIO())
+        return;
+    const std::string filename = session_test_config("");
+    ColorConfig config(filename);
+    OIIO_CHECK_EQUAL(config.geterror(false), "");
+    if (config.has_error()) {
+        Filesystem::remove(filename);
+        return;
+    }
+
+    // Sony S-Gamut3.Venice: a shipping camera gamut whose blue primary has a
+    // negative y, at its own D65 white so the bridge returns the declared
+    // coordinates rather than adapted ones. The exponent belongs to no
+    // published encoding with these primaries, so this reaches synthesis.
+    const float venice[8] = { 0.74046426f, 0.27936437f, 0.08924115f,
+                              0.89380953f, 0.11048824f, -0.05257933f,
+                              0.3127f,     0.3290f };
+    ImageSpec spec;
+    spec.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8), venice);
+    spec.attribute("oiio:Gamma", 1.8f);
+    const std::string handle = resolve_colorspace(config, spec, "frame.png");
+    OIIO_CHECK_ASSERT(Strutil::starts_with(handle, "<synthetic>"));
+
+    IccVector xyz;
+    double x = 0.0, y = 0.0;
+    const float red[3] = { 1.0f, 0.0f, 0.0f };
+    OIIO_CHECK_ASSERT(icc_decode(config, handle, red, xyz, x, y));
+    OIIO_CHECK_EQUAL_THRESH(float(x), venice[0], 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(y), venice[1], 1.0e-3f);
+    const float green[3] = { 0.0f, 1.0f, 0.0f };
+    OIIO_CHECK_ASSERT(icc_decode(config, handle, green, xyz, x, y));
+    OIIO_CHECK_EQUAL_THRESH(float(x), venice[2], 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(y), venice[3], 1.0e-3f);
+    // The primary the spectral triangle would have refused.
+    const float blue[3] = { 0.0f, 0.0f, 1.0f };
+    OIIO_CHECK_ASSERT(icc_decode(config, handle, blue, xyz, x, y));
+    OIIO_CHECK_EQUAL_THRESH(float(x), venice[4], 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(y), venice[5], 1.0e-3f);
+    const float grey[3] = { 0.5f, 0.5f, 0.5f };
+    OIIO_CHECK_ASSERT(icc_decode(config, handle, grey, xyz, x, y));
+    OIIO_CHECK_EQUAL_THRESH(float(x), venice[6], 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(y), venice[7], 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(xyz[1]), std::pow(0.5f, 1.8f), 1.0e-4f);
+
+    // AP0 itself, whose green is at x = 0 and whose blue is at y = -0.077.
+    // Its white is D60, so the assertion is on the white the adaptation
+    // lands at rather than on the declared coordinates.
+    const float ap0[8] = { 0.7347f, 0.2653f,  0.0f,     1.0f,
+                           0.0001f, -0.0770f, 0.32168f, 0.33767f };
+    ImageSpec aces;
+    aces.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8), ap0);
+    aces.attribute("oiio:Gamma", 1.8f);
+    const std::string ap0_handle = resolve_colorspace(config, aces,
+                                                      "frame.png");
+    OIIO_CHECK_ASSERT(Strutil::starts_with(ap0_handle, "<synthetic>"));
+    OIIO_CHECK_ASSERT(icc_decode(config, ap0_handle, grey, xyz, x, y));
+    OIIO_CHECK_EQUAL_THRESH(float(x), 0.3127f, 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(y), 0.3290f, 1.0e-3f);
+    OIIO_CHECK_EQUAL_THRESH(float(xyz[1]), std::pow(0.5f, 1.8f), 1.0e-4f);
+
+    // Finite, and still outside what the wire can hold: declined before
+    // anything is rounded or narrowed, not converted out of range, and so
+    // evidence that does not help.
+    const float unrepresentable[8] = { 1.0e20f, 0.3f,  0.30f,   0.60f,
+                                       0.15f,   0.06f, 0.3127f, 0.3290f };
+    ImageSpec extreme;
+    extreme.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                      unrepresentable);
+    extreme.attribute("oiio:Gamma", 1.8f);
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, extreme, "frame.png"),
+                     "unknown");
+    // A positive exponent so small its reciprocal has no wire spelling, and
+    // one so large the wire rounds it away.
+    ImageSpec exponent;
+    exponent.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8), venice);
+    exponent.attribute("oiio:Gamma", 1.0e-30f);
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, exponent, "frame.png"),
+                     "unknown");
+    exponent.attribute("oiio:Gamma", 1.0e9f);
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, exponent, "frame.png"),
+                     "unknown");
+    Filesystem::remove(filename);
+}
+
+
+// A deterministically unsupported profile mints no endpoint. Its bytes may
+// remain in the bounded verdict memo, which can be cleared independently of
+// admitted session endpoints. This checks the observable behavior: distinct
+// unsupported profiles keep declining, and an earlier handle stays usable.
+static void
+test_icc_unsupported_retention()
+{
+    if (!ColorConfig::supportsOpenColorIO())
+        return;
+    const std::string filename = session_test_config("");
+    ColorConfig config(filename);
+    OIIO_CHECK_EQUAL(config.geterror(false), "");
+    if (config.has_error()) {
+        Filesystem::remove(filename);
+        return;
+    }
+
+    const std::vector<double> unnamed { 0.7050, 0.2950, 0.1250, 0.8250,
+                                        0.0450, 0.0100, 0.3127, 0.3290 };
+    const auto usable = icc_matrix_trc_profile(unnamed,
+                                               icc_curv_gamma("rTRC", 2.1));
+    auto resolve      = [&](const std::vector<uint8_t>& profile) {
+        ImageSpec spec;
+        spec.attribute("ICCProfile",
+                       TypeDesc(TypeDesc::UINT8, int(profile.size())),
+                       profile.data());
+        return resolve_colorspace(config, spec, "frame.png");
+    };
+    const std::string handle = resolve(usable);
+    OIIO_CHECK_ASSERT(Strutil::starts_with(handle, "<synthetic>icc_"));
+    IccVector xyz;
+    double x = 0.0, y = 0.0;
+    const float red[3] = { 1.0f, 0.0f, 0.0f };
+    OIIO_CHECK_ASSERT(icc_decode(config, handle, red, xyz, x, y));
+    const double before_x = x, before_y = y;
+
+    // Structurally valid, no colorant and no curve tags, and each one a
+    // distinct payload: outside the matrix/TRC model, so each is measured,
+    // declines, and creates no endpoint.
+    std::vector<uint8_t> last;
+    for (int i = 0; i < 32; ++i) {
+        last = icc_profile(
+            { icc_xyz_tag("wtpt",
+                          IccVector { icc_pcs_white[0] + 0.0001 * (i + 1), 1.0,
+                                      icc_pcs_white[2] }) });
+        OIIO_CHECK_EQUAL(resolve(last), "");
+    }
+    // The same bytes again, now answered from the memo if it survived and
+    // re-measured if it did not. Either way the verdict is the same.
+    OIIO_CHECK_EQUAL(resolve(last), "");
+
+    // The usable handle is untouched by all of it: same selector, same decode.
+    OIIO_CHECK_EQUAL(resolve(usable), handle);
+    OIIO_CHECK_ASSERT(icc_decode(config, handle, red, xyz, x, y));
+    OIIO_CHECK_EQUAL_THRESH(float(x), float(before_x), 1.0e-6f);
+    OIIO_CHECK_EQUAL_THRESH(float(y), float(before_y), 1.0e-6f);
+    Filesystem::remove(filename);
+}
+
+
+// A raw ImageOutput copy of an ImageInput spec has no source container. The
+// OpenEXR writer keeps the label's ID for a PNG sRGB chunk or a bare gamma,
+// which contradict nothing, and withholds it beside chromaticities. Beside an
+// ID in the header, chromaticities survive exactly where nothing establishes
+// them to disagree with it, in encoding or in gamut.
+static void
+test_exr_writer_copy_identity()
+{
+    if (!ColorConfig::supportsOpenColorIO())
+        return;
+    const std::string base = Filesystem::temp_directory_path() + "/"
+                             + Filesystem::unique_path();
+    auto write = [](const std::string& name, const ImageSpec& spec) {
+        auto out = ImageOutput::create(name);
+        std::vector<float> pixels(spec.image_pixels() * spec.nchannels, 0.5f);
+        return out && out->open(name, spec)
+               && out->write_image(TypeFloat, pixels.data()) && out->close();
+    };
+    bool copy_kept_chromaticities = false;
+    auto exr_copy_id              = [&](const ImageSpec& spec) {
+        const std::string exr = base + ".exr";
+        OIIO_CHECK_ASSERT(write(exr, spec));
+        auto in        = ImageInput::open(exr);
+        std::string id = in ? in->spec().get_string_attribute("colorInteropID")
+                            : "<unreadable>";
+        copy_kept_chromaticities
+            = in && in->spec().find_attribute("chromaticities") != nullptr;
+        in.reset();
+        Filesystem::remove(exr);
+        return id;
+    };
+    auto png_copy_id = [&](string_view label) {
+        const std::string png = base + ".png";
+        ImageSpec spec(2, 2, 3, TypeUInt8);
+        spec.set_colorspace(label);
+        OIIO_CHECK_ASSERT(write(png, spec));
+        auto in = ImageInput::open(png);
+        OIIO_CHECK_ASSERT(in);
+        ImageSpec read = in ? in->spec() : ImageSpec();
+        in.reset();
+        Filesystem::remove(png);
+        OIIO_CHECK_ASSERT(read.find_attribute("oiio:Gamma"));
+        return exr_copy_id(read);
+    };
+    // OIIO's PNG writer emits sRGB, gAMA and cHRM for sRGB, gAMA for gamma.
+    OIIO_CHECK_EQUAL(png_copy_id("srgb_rec709_scene"), "srgb_rec709_scene");
+    // The cHRM primaries describe a display encoding, which an OpenEXR
+    // chromaticities attribute cannot state. Only the ID is written.
+    OIIO_CHECK_FALSE(copy_kept_chromaticities);
+    OIIO_CHECK_EQUAL(png_copy_id("g22_rec709_scene"), "g22_rec709_scene");
+    const float custom[8] = { 0.705f, 0.295f, 0.125f,  0.825f,
+                              0.045f, 0.010f, 0.3127f, 0.3290f };
+    ImageSpec contradicted(2, 2, 3, TypeFloat);
+    contradicted.set_colorspace("g22_rec709_scene");
+    contradicted.attribute("oiio:Gamma", 2.2f);
+    contradicted.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                           custom);
+    OIIO_CHECK_EQUAL(exr_copy_id(contradicted), "unknown");
+    // With no ID, the gamma of 2.2 beside them says those chromaticities
+    // state no linear encoding, so they are not written either, and the file
+    // says "unknown" rather than nothing. The linear case below keeps them.
+    OIIO_CHECK_FALSE(copy_kept_chromaticities);
+    // A gamma that contradicts the label wins the same way.
+    ImageSpec gamma_contradicted(2, 2, 3, TypeFloat);
+    gamma_contradicted.set_colorspace("g22_rec709_scene");
+    gamma_contradicted.attribute("oiio:Gamma", 1.8f);
+    OIIO_CHECK_EQUAL(exr_copy_id(gamma_contradicted), "");
+    // Chromaticities that agree with the label are redundant beside its ID
+    // (Color Interop Forum Recommendation 04).
+    const float rec709_label[8] = { 0.64f, 0.33f, 0.30f,   0.60f,
+                                    0.15f, 0.06f, 0.3127f, 0.3290f };
+    const float ap0_label[8]    = { 0.7347f, 0.2653f, 0.0f,     1.0f,
+                                    0.0001f, -0.077f, 0.32168f, 0.33767f };
+    ImageSpec agreed(2, 2, 3, TypeFloat);
+    agreed.set_colorspace("lin_rec709_scene");
+    agreed.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                     rec709_label);
+    OIIO_CHECK_EQUAL(exr_copy_id(agreed), "lin_rec709_scene");
+    OIIO_CHECK_FALSE(copy_kept_chromaticities);
+    // ImageBuf::write applies the same rule.
+    auto ibuf_copy_id = [&](const ImageSpec& spec) {
+        const std::string exr = base + "-ibuf.exr";
+        OIIO_CHECK_ASSERT(ImageBuf(spec).write(exr));
+        auto in        = ImageInput::open(exr);
+        std::string id = in ? in->spec().get_string_attribute("colorInteropID")
+                            : "<unreadable>";
+        copy_kept_chromaticities
+            = in && in->spec().find_attribute("chromaticities") != nullptr;
+        in.reset();
+        Filesystem::remove(exr);
+        return id;
+    };
+    OIIO_CHECK_EQUAL(ibuf_copy_id(agreed), "lin_rec709_scene");
+    OIIO_CHECK_FALSE(copy_kept_chromaticities);
+    ImageSpec disagreed = agreed;
+    disagreed.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                        ap0_label);
+    OIIO_CHECK_EQUAL(ibuf_copy_id(disagreed), "unknown");
+    OIIO_CHECK_FALSE(copy_kept_chromaticities);
+    OIIO_CHECK_EQUAL(exr_copy_id(disagreed), "unknown");
+    OIIO_CHECK_FALSE(copy_kept_chromaticities);
+
+    // An OpenEXR file that already states its primaries. The ID an ImageBuf
+    // copy derives from them says what they say, so the copy states both and
+    // the standard attribute every current reader understands survives a
+    // plain passthrough.
+    const float rec709[8] = { 0.64f, 0.33f, 0.30f,   0.60f,
+                              0.15f, 0.06f, 0.3127f, 0.3290f };
+    ImageSpec carried(2, 2, 3, TypeFloat);
+    carried.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8), rec709);
+    // An explicit gamma of 1 is the writer's documented linear carve-out.
+    carried.attribute("oiio:Gamma", 1.0f);
+    const std::string carried_name = base + "-carried.exr";
+    const std::string copied_name  = base + "-copied.exr";
+    OIIO_CHECK_ASSERT(write(carried_name, carried));
+    ImageBuf copy(carried_name);
+    OIIO_CHECK_ASSERT(copy.read(0, 0, true, TypeFloat));
+    OIIO_CHECK_ASSERT(copy.write(copied_name));
+    auto reread = ImageInput::open(copied_name);
+    OIIO_CHECK_ASSERT(reread);
+    if (reread) {
+        const ImageSpec& got = reread->spec();
+        OIIO_CHECK_EQUAL(got.get_string_attribute("colorInteropID"),
+                         "lin_rec709_scene");
+        const ParamValue* chroma = got.find_attribute("chromaticities");
+        const bool eight = chroma
+                           && chroma->type() == TypeDesc(TypeDesc::FLOAT, 8);
+        OIIO_CHECK_ASSERT(eight);
+        const float* xy = eight ? (const float*)chroma->data() : nullptr;
+        for (int i = 0; xy && i < 8; ++i)
+            OIIO_CHECK_EQUAL_THRESH(xy[i], rec709[i], 1.0e-6f);
+    }
+    reread.reset();
+    Filesystem::remove(carried_name);
+    Filesystem::remove(copied_name);
+
+    // A linear ID is not restated by whatever primaries the spec happens to
+    // hold. Beside primaries this build establishes to be a different gamut
+    // the two claims contradict exactly as a non-linear ID does, so only the
+    // ID is written.
+    const float ap0[8] = { 0.7347f, 0.2653f, 0.0f,     1.0f,
+                           0.0001f, -0.077f, 0.32168f, 0.33767f };
+    ImageSpec mismatched(2, 2, 3, TypeFloat);
+    mismatched.attribute("colorInteropID", "lin_rec709_scene");
+    mismatched.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8), ap0);
+    OIIO_CHECK_EQUAL(exr_copy_id(mismatched), "lin_rec709_scene");
+    OIIO_CHECK_FALSE(copy_kept_chromaticities);
+
+    // An ID whose encoding nothing here establishes does not prove the pixels
+    // linear, so its chromaticities are omitted. A namespaced ID this
+    // configuration does not define is that case.
+    ImageSpec unestablished(2, 2, 3, TypeFloat);
+    unestablished.attribute("colorInteropID", "acme:private_scene");
+    unestablished.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                            rec709);
+    OIIO_CHECK_EQUAL(exr_copy_id(unestablished), "acme:private_scene");
+    OIIO_CHECK_FALSE(copy_kept_chromaticities);
+
+    // Beside an ICC profile the writer resolves the spec itself, taking only
+    // a rule that establishes an identity. A profile it cannot interpret
+    // outranks the PNG sRGB chunk beside it, so neither the chunk's ID nor
+    // the label's is written.
+    const unsigned char unreadable[] = { 0 };
+    ImageSpec icc_srgb(2, 2, 3, TypeFloat);
+    icc_srgb.set_colorspace("srgb_rec709_scene");
+    icc_srgb.attribute("png:sRGB", 0);
+    icc_srgb.attribute("ICCProfile", TypeDesc(TypeDesc::UINT8, 1), unreadable);
+    OIIO_CHECK_EQUAL(exr_copy_id(icc_srgb), "");
+    // But complete chromaticities and gamma beside that profile are read the
+    // generic way and do supply an ID, where the same facts alone supply
+    // none, and the file says "unknown".
+    ImageSpec icc_numeric(2, 2, 3, TypeFloat);
+    icc_numeric.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                          rec709);
+    icc_numeric.attribute("oiio:Gamma", 2.2f);
+    OIIO_CHECK_EQUAL(exr_copy_id(icc_numeric), "unknown");
+    icc_numeric.attribute("ICCProfile", TypeDesc(TypeDesc::UINT8, 1),
+                          unreadable);
+    OIIO_CHECK_EQUAL(exr_copy_id(icc_numeric), "g22_rec709_scene");
+
+    // Where libpng can write cICP, the writer records the explicitly asserted
+    // scene identity in the PNG, since a CICP code states no image state and
+    // this one reads back as g22_rec709_scene. An ImageBuf copy then preserves
+    // it with or without a repeated assertion. With an older libpng the writer
+    // falls back to gAMA and cHRM, which are display-referred by convention,
+    // so only a repeated assertion keeps the scene identity.
+    const std::string png_state = base + "-state.png";
+    ImageSpec png_spec(2, 2, 3, TypeUInt8);
+    png_spec.set_colorspace("g22_rec709_scene");
+    OIIO_CHECK_ASSERT(write(png_state, png_spec));
+    bool png_has_cicp = false;
+    if (auto in = ImageInput::open(png_state))
+        png_has_cicp = in->spec().find_attribute("CICP") != nullptr;
+    auto buf_copy_id = [&](bool assert_scene) {
+        const std::string exr = base + "-state.exr";
+        ImageBuf buf(png_state);
+        OIIO_CHECK_ASSERT(buf.read(0, 0, true, TypeFloat));
+        // Beside cICP, OIIO's own PNG writer emits no cHRM for a gamma space,
+        // so supply the primaries a PNG that carries both chunks would be
+        // read with.
+        buf.specmod().attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                                rec709);
+        if (assert_scene)
+            buf.specmod().set_colorspace("g22_rec709_scene");
+        OIIO_CHECK_ASSERT(buf.write(exr));
+        auto in        = ImageInput::open(exr);
+        std::string id = in ? in->spec().get_string_attribute("colorInteropID")
+                            : "<unreadable>";
+        in.reset();
+        Filesystem::remove(exr);
+        return id;
+    };
+    OIIO_CHECK_EQUAL(buf_copy_id(false),
+                     png_has_cicp ? "g22_rec709_scene" : "g22_rec709_display");
+    OIIO_CHECK_EQUAL(buf_copy_id(true), "g22_rec709_scene");
+    Filesystem::remove(png_state);
+}
+
+
+static void
+test_ociolook_default_config()
+{
+    if (!ColorConfig::supportsOpenColorIO())
+        return;
+    ImageBuf src(ImageSpec(1, 1, 3, TypeDesc::FLOAT)), dst;
+    src.specmod().set_colorspace("scene_linear");
+    OIIO_CHECK_ASSERT(ImageBufAlgo::fill(src, { 0.25f, 0.5f, 0.75f }));
+    // Empty endpoints request the current encoding. Install the default null
+    // configuration before resolving that implicit source.
+    OIIO_CHECK_ASSERT(ImageBufAlgo::ociolook(dst, src, "", "", "", true, false,
+                                             "", "", nullptr));
+    OIIO_CHECK_FALSE(dst.has_error());
+}
+
+
 int
 main(int argc, char* argv[])
 {
@@ -2706,6 +4239,13 @@ main(int argc, char* argv[])
     test_private_properties();
     test_metadata_resolution();
     test_set_colorspace_contract();
+    test_icc_identification();
+    test_numeric_synthesis();
+    test_session_selector_collision();
+    test_virtual_primary_gamut();
+    test_icc_unsupported_retention();
+    test_exr_writer_copy_identity();
+    test_ociolook_default_config();
 
     return unit_test_failures != 0;
 }

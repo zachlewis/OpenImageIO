@@ -228,6 +228,35 @@ ImageBufAlgo color conversions use the resolver to select a source color space;
 `oiiotool --debug` reports the selecting rule, status, approximation flag and
 advisory metadata warnings. Resolution leaves the `ImageSpec` unchanged.
 
+The resolver treats `ICCProfile` as a color-space fact after cICP and before
+PNG sRGB and numeric facts. OpenColorIO-supported RGB matrix/TRC profiles may
+select a known encoding or a process-local selector. Complete numeric
+descriptions can likewise create a process-local selector when their matrix is
+finite and invertible. Both kinds of selector are spelled with a `<synthetic>`
+prefix, which no color interop ID can contain; neither is a portable color
+interop ID, and gamma without chromaticities never establishes a gamut.
+`set_colorspace()` with no name never stores a selector in `oiio:ColorSpace`,
+and pixels converted into a selector are tagged `"unknown"`, because a selector
+means nothing outside the process that made it.
+
+When an OpenEXR writer chooses the `colorInteropID` to write, a label set
+without `set_colorspace()` -- a reader's derived guess or an application's
+direct assignment -- supplies it only where the other color metadata agrees
+with the label. Then the label's ID is written, and chromaticities that agree
+with it are dropped as redundant (Color Interop Forum Recommendation 04).
+Metadata that contradicts the label wins: no ID is written for the label, and
+the metadata is kept wherever an OpenEXR header can state it. An ICC profile
+agrees when it identifies as the label's encoding; one OIIO cannot identify is
+kept and supplies no ID. Where in-file evidence
+establishes the same encoding as the label, its image state decides, unless it
+states none: a CICP code states none, while a decoded ICC profile and complete
+PNG gAMA/cHRM state display-referred by convention.
+
+Because a PNG's `cHRM` and `gAMA` are display-referred by convention,
+asserting a scene-referred name over them -- `set_colorspace()` with that name,
+or `oiiotool --iscolorspace` -- also sets `oiio:PNGNumericState` to `scene`, so
+every later reading of those numbers agrees with the assertion.
+
 ```{eval-rst}
 .. option:: "oiio:ColorSpace" : string
 
@@ -273,7 +302,9 @@ advisory metadata warnings. Resolution leaves the `ImageSpec` unchanged.
     `set_colorspace("")` removes only this attribute, and `set_colorspace()`
     with no name sets it from the spec's own color metadata when it is unset,
     leaving it unset when nothing there names a configured color space or
-    Color Interop ID.
+    Color Interop ID. An ICC profile is kept by `set_colorspace(name)` only
+    when it identifies as the encoding `name` names, whatever image state
+    each states; otherwise it is removed.
 ```
 
 ```{eval-rst}
@@ -339,6 +370,13 @@ advisory metadata warnings. Resolution leaves the `ImageSpec` unchanged.
     ICC profile byte array (`"ICCProfile"`), which is considered the sole
     piece of durable ICC profile information.
 
+    An ICC `cicp` tag is reported as `ICCProfile:cicp`, an `int[4]` holding
+    its color primaries, transfer characteristics, matrix coefficients and
+    video full range flag. A `cicp` tag shorter than 12 bytes is treated like
+    other malformed ICC tags: profile decoding stops there, so with
+    `imageinput:strict` set the file fails to open (JPEG, PNG, TIFF, WebP,
+    JPEG XL, PSD, JPEG 2000), and otherwise the tags after it are not
+    reported.
 
 ```
 

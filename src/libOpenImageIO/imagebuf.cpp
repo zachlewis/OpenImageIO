@@ -10,6 +10,7 @@
 
 #include <OpenImageIO/half.h>
 
+#include <OpenImageIO/color.h>
 #include <OpenImageIO/dassert.h>
 #include <OpenImageIO/deepdata.h>
 #include <OpenImageIO/fmath.h>
@@ -1817,6 +1818,11 @@ ImageBuf::write(string_view _filename, TypeDesc dtype, string_view _fileformat,
         newspec.set_format(nativespec().format);
         newspec.channelformats = nativespec().channelformats;
     }
+
+    if (Strutil::iequals(out->format_name(), "openexr"))
+        pvt::finalize_resolved_color_metadata(newspec,
+                                              ColorConfig::default_colorconfig(),
+                                              file_format_name(), name());
 
     if (m_impl->m_wioproxy) {
         if (!out->supports("ioproxy")

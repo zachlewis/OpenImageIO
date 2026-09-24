@@ -1,0 +1,30 @@
+gamma-only gamma: 2.19998
+gamma-only chromaticities: <>
+Resolver rule numeric metadata: matched
+Resolver rule numeric metadata: matched
+Computing diff of "exr_numeric_actual.exr" vs "exr_numeric_expected.exr"
+PASS
+Computing diff of "look_numeric.exr" vs "exr_numeric_expected.exr"
+PASS
+Computing diff of "autocc_icc.exr" vs "expected_icc.exr"
+PASS
+Computing diff of "autocc_odd.exr" vs "expected_odd.exr"
+PASS
+into a selector: unknown unknown
+Computing diff of "autocc_unsupported_icc.exr" vs "expected_unsupported_icc.exr"
+PASS
+copied numeric: g22_adobergb_display
+Computing diff of "copy_adobe_actual.exr" vs "copy_adobe_expected.exr"
+PASS
+copied known ICC: srgb_rec709_display
+copied unmatched ICC: <>
+copied unsupported ICC: <>
+copied explicit: lin_ap1_scene
+copied retag: lin_ap1_scene
+g22 rec709 raw copy: <g22_rec709_scene> chroma <>
+PNG numerics copied: <g22_rec709_display>
+PNG numerics asserted: <g22_rec709_scene>
+input-context id: <srgb_rec709_display>
+no input-context id: <>
+Computing diff of "unknown_icc_actual.exr" vs "unknown_icc_expected.exr"
+PASS

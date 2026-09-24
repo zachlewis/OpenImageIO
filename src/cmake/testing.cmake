@@ -345,7 +345,7 @@ macro (oiio_add_all_tests)
         endif ()
     endif ()
 
-    oiio_add_tests (oiiotool-color
+    oiio_add_tests (oiiotool-color oiiotool-cache-stats
                     FOUNDVAR OpenColorIO_FOUND)
     oiio_add_tests (oiiotool-color-icc
                     FOUNDVAR OpenColorIO_FOUND)

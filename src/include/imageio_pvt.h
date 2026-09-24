@@ -530,6 +530,50 @@ OIIO_API ColorSpaceResolution resolve_colorspace_source(
     MissingColorSpace missing        = MissingColorSpace::Preserve,
     std::vector<ResolverStep>* trace = nullptr, bool synthesize = true);
 
+/// Report what the color caches currently retain, and how much work this
+/// process has done to fill them, as a list of named `int64` values. It is
+/// meant to be printed, or to be compared between two snapshots taken
+/// around an operation. The `shared.` values describe caches every
+/// ColorConfig in the process shares:
+///
+/// - `shared.native_catalogs.entries` : color space inventories, one per
+///   distinct configuration.
+/// - `shared.id_matches.entries` : local names found, or found missing, for
+///   built-in identities.
+/// - `shared.interop_ids.entries` : memoized `get_color_interop_id()`
+///   answers.
+/// - `shared.properties.entries` : memoized color-space properties,
+///   including retained transfer-curve measurements.
+/// - `shared.builtin_measurements.entries` : measurements of the fixed
+///   built-in interop-identities config, summed across the three kinds that
+///   share one store: response measurements, transform comparisons and
+///   transfer curves. The fixed reference vocabulary itself is built once
+///   and is not counted here.
+/// - `shared.icc_profiles.entries` and `shared.icc_profiles.bytes` :
+///   memoized ICC profile identifications, and the exact number of profile
+///   bytes those entries retain in order to prove their keys. No other
+///   memory figure is reported, and none is estimated.
+///
+/// The `config.` values describe `config` alone:
+/// `config.views.entries` counts the sibling views it holds for
+/// caller-supplied contexts, and `config.processors.requested` /
+/// `config.processors.created` count the color processors asked of it and
+/// built by it. Processors and views belonging to those sibling views are
+/// deliberately excluded; only this wrapper is reported.
+///
+/// Every cache also reports a `.computed` counter: how many times this
+/// process began the work that fills that cache. It is counted before the
+/// work runs and only when the cache could not answer, so two threads
+/// racing the same cold entry each count one, and a cache hit never counts
+/// at all. These counters only rise, they are never reset, and they say
+/// nothing about how long the work took. A repeated operation that adds
+/// nothing to them reused everything.
+///
+/// Each cache is read under its own lock, so a snapshot is cheap but is
+/// not atomic across caches. Asking for statistics performs no color work
+/// and creates no context. oiiotool --runstats prints them.
+OIIO_API ParamValueList color_cache_stats(const ColorConfig& config);
+
 /// Test harness for reading an image, analogous to calling
 /// ImageInput::read_image(), but it doesn't return pixels and does as little
 /// extraneous allocation as possible. What is this good for? (1) Benchmarking
@@ -547,6 +591,7 @@ OIIO_NAMESPACE_3_1_END
 OIIO_NAMESPACE_BEGIN
 namespace pvt {
 using v3_1::pvt::autocc_terminal_unknown_attrib;
+using v3_1::pvt::color_cache_stats;
 using v3_1::pvt::colorspace_label_agrees;
 using v3_1::pvt::ColorSpaceResolution;
 using v3_1::pvt::ColorSpaceSource;

@@ -1,0 +1,15 @@
+ocio_profile_version: 2
+
+roles:
+  default: Reference
+  scene_linear: Reference
+
+file_rules:
+  - !<Rule> {name: Default, colorspace: default}
+
+colorspaces:
+  - !<ColorSpace>
+    name: Reference
+  - !<ColorSpace>
+    name: Encoded
+    to_scene_reference: !<ExponentTransform> {value: 2.2}

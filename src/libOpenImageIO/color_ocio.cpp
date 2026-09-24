@@ -136,6 +136,26 @@ sanitize_id_token(string_view name)
 }
 
 
+// Attempted cold work, one counter per shared memo family below. Each is
+// incremented once per attempt the family's memo could not answer, before the
+// work runs: two threads racing the same entry therefore count one each, and a
+// hit counts nothing. They measure attempts rather than time and are read only
+// by color_cache_stats().
+static std::atomic<uint64_t> native_catalogs_computed { 0 };
+static std::atomic<uint64_t> id_matches_computed { 0 };
+static std::atomic<uint64_t> interop_ids_computed { 0 };
+static std::atomic<uint64_t> properties_computed { 0 };
+static std::atomic<uint64_t> builtin_measurements_computed { 0 };
+static std::atomic<uint64_t> icc_profiles_computed { 0 };
+
+
+static void
+count_cold_work(std::atomic<uint64_t>& counter)
+{
+    counter.fetch_add(1, std::memory_order_relaxed);
+}
+
+
 // OCIO before 2.3.2 drops the default view transform name on copy, and native
 // context copies may drop the environment mode; keep both on every copy.
 static OCIO::ConfigRcPtr
@@ -1040,8 +1060,8 @@ private:
     // Whether this configuration's text reads each context variable.
     mutable std::map<std::string, bool> m_reads_variable;
     ColorProcessorMap colorprocmap;  // cache of ColorProcessors
-    atomic_int colorprocs_requested;
-    atomic_int colorprocs_created;
+    atomic_int colorprocs_requested { 0 };
+    atomic_int colorprocs_created { 0 };
     std::string m_configname;
 
 public:
@@ -1124,6 +1144,24 @@ public:
             handle = found->second;
         }
         return handle;
+    }
+
+    // What this wrapper alone retains. Sibling views keep their own views and
+    // processors and are deliberately not walked: reporting would then depend
+    // on how many contexts a caller happened to ask for, and walking them
+    // would need their locks as well as this one.
+    void cache_stats(ParamValueList& stats) const
+    {
+        int64_t views = 0;
+        {
+            spin_rw_read_lock lock(m_mutex);
+            views = int64_t(m_views.size());
+        }
+        stats.attribute("config.views.entries", TypeInt64, &views);
+        const int64_t requested = colorprocs_requested;
+        stats.attribute("config.processors.requested", TypeInt64, &requested);
+        const int64_t created = colorprocs_created;
+        stats.attribute("config.processors.created", TypeInt64, &created);
     }
 
     int getNumColorSpaces() const
@@ -1314,6 +1352,7 @@ ColorConfig::Impl::inventory()
                         return;
                     }
                 }
+                count_cold_work(native_catalogs_computed);
                 auto catalog = std::make_shared<NativeCatalog>();
                 catalog->spaces.reserve(n);
                 for (int i = 0; i < n; ++i) {
@@ -1487,6 +1526,7 @@ ColorConfig::Impl::bridge(int identity, bool* success) const
         unplaced = unplaced_bridges.count(key);
     }
     if (!result && !unplaced) {
+        count_cold_work(id_matches_computed);
         try {
             // IdentifyBuiltinColorSpace mutates BOTH processor-cache flags.
             // Detached analysis copies never affect conversion handles.
@@ -2685,6 +2725,8 @@ ColorConfig::Impl::configured_space(string_view name) const
 // Private seam, befriended by ColorConfig, that lets createDisplayTransform
 // and ImageBufAlgo::ociodisplay make the same display/view selection.
 struct ColorConfigAccess {
+    static auto impl(const ColorConfig& config) { return config.getImpl(); }
+
     using Disposition = pvt::ColorSpaceStatus;
     struct Source {
         std::string name;
@@ -4106,6 +4148,7 @@ ColorConfig::Impl::get_color_interop_id(string_view colorspace) const
         }
     }
 
+    count_cold_work(interop_ids_computed);
     if (cacheable) {
         DBG("Interop ID memo cold work for {}:{}\n", m_interop_cache_id,
             resolved);
@@ -5089,6 +5132,7 @@ retained_analytic_pair(OCIO::ConstConfigRcPtr reference, const char* role,
         if (found != analytic_references.end())
             return found->second;
     }
+    count_cold_work(builtin_measurements_computed);
     auto measured = analytic_pair(reference, role, id);
     if (!measured)
         measured = std::make_shared<const AnalyticPair>();
@@ -6106,6 +6150,7 @@ recognize_reference(OCIO::ConstConfigRcPtr config,
                 expected = found->second;
         }
         if (!expected) {
+            count_cold_work(builtin_measurements_computed);
             expected = probe_response_of(reference, role, id, display, false);
             // Acquisition failures raise and stay retryable. A null result is
             // the fixed built-in definition leaving the sampled domain, which
@@ -6231,6 +6276,7 @@ recognize_analytic(OCIO::ConstConfigRcPtr config,
                 expected = found->second;
         }
         if (!expected) {
+            count_cold_work(builtin_measurements_computed);
             expected = analytic_pair(reference, role, id);
             if (!expected) {
                 // Distinct from a resource verdict: the measurement itself is
@@ -6604,6 +6650,7 @@ reference_transfer_signature(OCIO::ConstConfigRcPtr reference, const char* role,
         if (found != transfer_references.end())
             return found->second;
     }
+    count_cold_work(builtin_measurements_computed);
     auto measured = std::make_shared<const TransferSignature>(
         transfer_signature(reference, role, id.c_str()));
     if (!measured->valid())
@@ -6992,6 +7039,7 @@ ColorConfig::Impl::color_space_info(string_view colorspace, bool derive,
         return result;
     }
     try {
+        count_cold_work(properties_computed);
         DBG("Color properties {}cold work: {}\n",
             measured_only ? "measured " : "", cs->name);
         std::string identity = known_identity;
@@ -7522,6 +7570,7 @@ reference_curve_signature(const std::string& name)
         if (found != transfer_references.end())
             return found->second;
     }
+    count_cold_work(builtin_measurements_computed);
     auto measured = std::make_shared<const TransferSignature>(
         named_transform_signature(internal_reference(), name.c_str()));
     if (!measured->valid())
@@ -7841,6 +7890,7 @@ ColorConfig::Impl::retained_transfer(const std::string& name,
                        : TransferSignature();
         }
     }
+    count_cold_work(properties_computed);
     auto signature = measured_transfer(config_, target);
     if (!signature.valid())
         return signature;
@@ -8634,6 +8684,7 @@ icc_measure(const std::string& digest, cspan<uint8_t> profile)
     // Acquired before the memoized work so an interrupted acquisition stays
     // retryable and leaves nothing published. Building the probe is
     // acquisition too, not a statement about the bytes.
+    count_cold_work(icc_profiles_computed);
     auto reference = internal_reference();
     auto payload = std::make_shared<const std::vector<uint8_t>>(profile.begin(),
                                                                 profile.end());
@@ -9292,6 +9343,66 @@ claim_numeric(const Resolution& res, const OCIO::ConstConfigRcPtr& native,
 }
 
 }  // namespace
+
+
+
+ParamValueList
+pvt::color_cache_stats(const ColorConfig& config)
+{
+    ParamValueList stats;
+    const auto add = [&](string_view name, int64_t value) {
+        stats.attribute(name, TypeInt64, &value);
+    };
+    const auto computed = [&](string_view name,
+                              const std::atomic<uint64_t>& counter) {
+        add(name, int64_t(counter.load(std::memory_order_relaxed)));
+    };
+    // One family at a time under that family's own existing lock. A reader
+    // that wanted one consistent picture across families would have to hold
+    // them all at once, which is a cost this pays nothing for: these are
+    // counts to look at, not an invariant to enforce.
+    {
+        spin_rw_read_lock lock(native_catalog_mutex);
+        add("shared.native_catalogs.entries", int64_t(native_catalogs.size()));
+    }
+    computed("shared.native_catalogs.computed", native_catalogs_computed);
+    {
+        spin_rw_read_lock lock(identity_bridge_mutex);
+        add("shared.id_matches.entries",
+            int64_t(identity_bridges.size() + unplaced_bridges.size()));
+    }
+    computed("shared.id_matches.computed", id_matches_computed);
+    {
+        spin_rw_read_lock lock(interop_id_memo_mutex);
+        add("shared.interop_ids.entries", int64_t(interop_id_memo.size()));
+    }
+    computed("shared.interop_ids.computed", interop_ids_computed);
+    {
+        spin_rw_read_lock lock(properties_mutex);
+        add("shared.properties.entries", int64_t(properties_memo.size()));
+    }
+    computed("shared.properties.computed", properties_computed);
+    {
+        // The three reference measurement kinds share one lock and one store,
+        // so they are reported as one number.
+        spin_rw_read_lock lock(analytic_reference_mutex);
+        add("shared.builtin_measurements.entries",
+            int64_t(analytic_references.size() + probe_references.size()
+                    + transfer_references.size()));
+    }
+    computed("shared.builtin_measurements.computed",
+             builtin_measurements_computed);
+    {
+        spin_rw_read_lock lock(icc_verdict_mutex);
+        add("shared.icc_profiles.entries", int64_t(icc_verdicts.size()));
+        // The exact bytes the entries retain, already tracked for the budget
+        // above. Nothing else here estimates its own memory.
+        add("shared.icc_profiles.bytes", int64_t(icc_verdict_bytes));
+    }
+    computed("shared.icc_profiles.computed", icc_profiles_computed);
+    ColorConfigAccess::impl(config)->cache_stats(stats);
+    return stats;
+}
 
 
 

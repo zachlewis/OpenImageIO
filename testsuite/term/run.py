@@ -17,8 +17,27 @@ command += oiiotool ("-echo 24bit-space rampsmall.exr -iscolorspace srgb -attrib
 command += oiiotool ("-echo dither rampsmall.exr -iscolorspace srgb -attrib term:method dither -attrib term:fit 0 -attrib term:filename dither.out -o dither.term")
 command += oiiotool ("-echo iterm2 ramp.exr -iscolorspace srgb -attrib term:method iterm2 -attrib term:fit 0 -attrib term:filename iterm2.out -o iterm2.term")
 
+# An image that establishes no color space of its own is still displayed as
+# scene-linear, so an untagged EXR looks the way it always has and no error
+# is left behind.
+command += oiiotool ("-echo untagged rampsmall.exr -attrib term:method 24bit-space -attrib term:fit 0 -attrib term:filename untagged.out -o untagged.term")
+
+# A gAMA-only PNG has no reader label, but its transfer evidence is resolved
+# before display. It renders identically to the explicit configured source.
+command += oiiotool ("-pattern constant:color=.5,.5,.5 4x2 3 -d uint8 "
+                     "-attrib oiio:Gamma 2.2 "
+                     "-eraseattrib oiio:ColorSpace -o gamma-only.png")
+command += oiiotool ("gamma-only.png -attrib term:method 24bit-space "
+                     "-attrib term:fit 0 -attrib term:filename gamma-resolved.out "
+                     "-o gamma-resolved.term")
+command += oiiotool ("gamma-only.png -iscolorspace g22_rec709_display "
+                     "-attrib term:method 24bit-space -attrib term:fit 0 "
+                     "-attrib term:filename gamma-explicit.out "
+                     "-o gamma-explicit.term")
+command += run_app ("cmp gamma-resolved.out gamma-explicit.out")
+
 command += oiiotool ("-echo done")
 
 outputs = [ "24bit.out", "24bit-space.out", "dither.out",
-            "iterm2.out",
+            "iterm2.out", "untagged.out",
             "out.txt" ]

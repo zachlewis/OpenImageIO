@@ -378,7 +378,7 @@ HeifInput::read_subimage_spec(int subimage)
     if (m_bitdepth > 8) {
         m_spec.attribute("oiio:BitsPerSample", m_bitdepth);
     }
-    m_spec.set_colorspace("srgb_rec709_scene");
+    m_spec.attribute("oiio:ColorSpace", "srgb_rec709_scene");
 
 #if LIBHEIF_HAVE_VERSION(1, 9, 0)
     // Read CICP. Have to use the C API to get it from the image handle,

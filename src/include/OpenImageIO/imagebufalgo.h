@@ -2122,7 +2122,13 @@ bool OIIO_API erode(ImageBuf& dst, const ImageBuf& src, int width = 3,
 ///
 /// @param  fromspace/tospace
 ///             For the varieties of `colorconvert()` that use named color
-///             spaces, these specify the color spaces by name.
+///             spaces, these specify the color spaces by name. If `fromspace`
+///             is empty or `"current"`, the source is resolved from the
+///             image's metadata under the same config and context, and the
+///             configuration decides when the metadata establishes no
+///             source. The resolver uses the container reported by the
+///             reader and does not apply OCIO FileRules to the ImageBuf
+///             name.
 /// @param  context_key/context_value
 ///             For the varieties of `colorconvert()` that use named color
 ///             spaces, these optionally specify a "key" name/value pair to
@@ -2226,7 +2232,10 @@ bool OIIO_API colormatrixtransform(ImageBuf& dst, const ImageBuf& src,
 /// @param  fromspace/tospace
 ///             For the varieties of `colorconvert()` that use named color
 ///             spaces, these specify the color spaces by name.  If either
-///             is the empty string, it will use `"scene_linear"`.
+///             is the empty string or `"current"`, it is the image's own
+///             color space, resolved from its metadata as `colorconvert()`
+///             resolves an empty source; an image whose metadata states
+///             nothing at all is taken to be `"scene_linear"`.
 /// @param  unpremult
 ///             If true, unpremultiply the image (divide the RGB channels by
 ///             alpha if it exists and is nonzero) before color conversion,
@@ -2277,10 +2286,14 @@ bool OIIO_API ociolook(ImageBuf& dst, const ImageBuf& src, string_view looks,
 ///             The OCIO "view" to use. If this is `"default"` or the empty
 ///             string `""`, the default view for this display will be used.
 /// @param  fromspace
-///             If `fromspace` is not supplied, it will assume that the
-///             source color space is whatever is indicated by the source
-///             image's metadata or filename, and if that cannot be deduced,
-///             it will be assumed to be `"scene_linear"`.
+///             The scene-side end of the display transform. If empty or
+///             `"current"` and `inverse` is false, the source is resolved
+///             from the image's metadata under the same config and context,
+///             and the configuration decides when the metadata establishes
+///             no source. A known encoding absent from the config enters
+///             the display through the config's OCIO interchange role. If
+///             `inverse` is true, an empty source means `"scene_linear"`. A
+///             data source is copied unchanged.
 /// @param  looks
 ///             The looks to apply (comma-separated). This may be empty,
 ///             in which case no "look" is used. Note: this parameter value

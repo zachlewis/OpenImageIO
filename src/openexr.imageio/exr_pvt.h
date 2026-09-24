@@ -61,6 +61,28 @@ bool channels_are_rgb(const ImageSpec& spec);
 
 
 
+// Record the color space a header states. A reader records what the file
+// says and consults no color config, so this sets "oiio:ColorSpace" itself
+// rather than asserting it with set_colorspace(). A new label drops what
+// labeling always dropped: "Exif:ColorSpace" (unless the name is sRGB), the
+// TIFF color tags and "oiio:Gamma".
+inline void
+exr_record_colorspace(ImageSpec& spec, string_view name)
+{
+    if (spec.get_string_attribute("oiio:ColorSpace") == name)
+        return;
+    spec.attribute("oiio:ColorSpace", name);
+    if (!Strutil::iequals(name, "srgb_rec709_scene")
+        && !Strutil::iequals(name, "srgb_texture")
+        && !Strutil::iequals(name, "sRGB"))
+        spec.erase_attribute("Exif:ColorSpace");
+    spec.erase_attribute("tiff:ColorSpace");
+    spec.erase_attribute("tiff:PhotometricInterpretation");
+    spec.erase_attribute("oiio:Gamma");
+}
+
+
+
 // Scanlines packed into each compressed chunk of a scanline file, by
 // compression scheme. Fixed by the EXR file format. Imf::numLinesInBuffer()
 // reports the same thing, but it lives in ImfCompressor.h, which OpenEXR only

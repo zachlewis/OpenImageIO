@@ -196,19 +196,39 @@ PNGInput::open(const std::string& name, ImageSpec& newspec)
         return false;
     }
 
-    // Only premultiplying in linear space needs the transfer function, and
-    // deciding it can load the color config, so don't unless we must.
-    if (!m_linear_premult) {
-        m_srgb  = false;
-        m_gamma = 1.0f;
-    } else if (is_colorspace_srgb(m_spec)) {
-        m_srgb  = true;
-        m_gamma = 1.0f;
-    } else {
-        m_srgb  = false;
-        m_gamma = pvt::get_colorspace_rec709_gamma(m_spec);
-        if (m_gamma == 0.0f) {
-            m_gamma = 1.0f;
+    // Only premultiplying in linear space needs the transfer function. It
+    // comes from the names this reader recorded, with no color config: sRGB,
+    // a linear name, the gamma a "g<NN>_rec709" name spells, or else the
+    // file's own gamma.
+    m_srgb  = false;
+    m_gamma = 1.0f;
+    if (m_linear_premult) {
+        string_view cs = m_spec.get_string_attribute("oiio:ColorSpace");
+        string_view s  = cs;
+        int g10        = 0;
+        if (Strutil::iequals(cs, "srgb_rec709_scene")
+            || Strutil::iequals(cs, "srgb_rec709_display")
+            || Strutil::iequals(cs, "srgb_texture")
+            || Strutil::iequals(cs, "srgb_display")
+            || Strutil::iequals(cs, "sRGB")) {
+            m_srgb = true;
+        } else if (Strutil::parse_prefix(s, "g") && Strutil::parse_int(s, g10)
+                   && g10 > 0
+                   && (s == "_rec709_scene" || s == "_rec709_display")) {
+            m_gamma = float(g10) / 10.0f;
+        } else if (!Strutil::iequals(cs, "linear")
+                   && !Strutil::iequals(cs, "scene_linear")
+                   && !Strutil::iequals(cs, "lin_rec709_scene")) {
+            // A DEPRECATED(3.1) "Gamma <g>" name spells one, too.
+            float g = 0.0f;
+            if (Strutil::istarts_with(cs, "Gamma")) {
+                s = cs;
+                Strutil::parse_word(s);
+                g = Strutil::from_string<float>(s);
+            }
+            m_gamma = (g >= 0.01f && g <= 10.0f)
+                          ? g
+                          : m_spec.get_float_attribute("oiio:Gamma", 1.0f);
         }
     }
 

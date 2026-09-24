@@ -1312,9 +1312,17 @@ decode_exif(cspan<uint8_t> exif, ImageSpec& spec)
         else if (p->type() == TypeDesc::INT16)
             cs = *(const short*)p->data();
         // Exif spec says that anything other than 0xffff==uncalibrated
-        // should be interpreted to be sRGB.
-        if (cs != 0xffff)
-            spec.set_colorspace("srgb_rec709_scene");
+        // should be interpreted to be sRGB. Image readers decode Exif, so
+        // record that without asserting it (which would consult the color
+        // config), dropping what a new label always dropped.
+        if (cs != 0xffff
+            && spec.get_string_attribute("oiio:ColorSpace")
+                   != "srgb_rec709_scene") {
+            spec.attribute("oiio:ColorSpace", "srgb_rec709_scene");
+            spec.erase_attribute("tiff:ColorSpace");
+            spec.erase_attribute("tiff:PhotometricInterpretation");
+            spec.erase_attribute("oiio:Gamma");
+        }
     }
 
     // Look for a maker note offset, now that we have seen all the metadata

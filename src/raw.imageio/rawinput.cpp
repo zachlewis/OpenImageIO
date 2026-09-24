@@ -638,6 +638,7 @@ RawInput::open_raw(bool unpack, bool process, const std::string& name,
     // response.
     std::string cs = config.get_string_attribute("raw:ColorSpace",
                                                  "srgb_rec709_scene");
+    bool srgb      = false;
     if (Strutil::iequals(cs, "raw")) {
         // Values straight from the chip
         m_processor->imgdata.params.output_color = 0;
@@ -647,6 +648,7 @@ RawInput::open_raw(bool unpack, bool process, const std::string& name,
                || Strutil::iequals(cs, "sRGB") /* Necessary? */
                || equivalent_colorspace(cs, "srgb_rec709_scene")) {
         // Request explicit sRGB, including usual sRGB response
+        srgb                                     = true;
         m_processor->imgdata.params.output_color = 1;
         m_processor->imgdata.params.gamm[0]      = 1.0 / 2.4;
         m_processor->imgdata.params.gamm[1]      = 12.92;
@@ -703,7 +705,11 @@ RawInput::open_raw(bool unpack, bool process, const std::string& name,
         errorfmt("raw:ColorSpace set to unknown value \"{}\"", cs);
         return false;
     }
-    m_spec.set_colorspace(cs);
+    // Record the color space asked for, without asserting it. As labeling
+    // always did, drop the file's "Exif:ColorSpace" unless the output is sRGB.
+    m_spec.attribute("oiio:ColorSpace", cs);
+    if (!srgb)
+        m_spec.erase_attribute("Exif:ColorSpace");
 
     // Exposure adjustment
     float exposure = config.get_float_attribute("raw:Exposure", -1.0f);

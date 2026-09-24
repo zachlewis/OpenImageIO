@@ -889,15 +889,47 @@ public:
         deep = other.deep;
     }
 
-    /// Set the metadata to presume that color space is `name` (or to assume
-    /// nothing about the color space if `name` is empty). The core operation
-    /// is to set the "oiio:ColorSpace" attribute, but it also removes or
-    /// alters several other attributes that may hint color space in ways that
-    /// might be contradictory or no longer true. Like the free function
-    /// `set_colorspace()`, it loads the default color config only if needed.
+    /// Set the color space metadata. `name` selects one of three
+    /// behaviors:
+    ///
+    /// - A color space name or Color Interop ID makes `name` the authoritative
+    ///   description of the encoding, even when it is already the
+    ///   "oiio:ColorSpace" value. Each other color-describing attribute is kept
+    ///   when it agrees with `name`, rewritten when `name` determines it, and
+    ///   removed otherwise: "chromaticities" and "oiio:Chromaticities", "CICP",
+    ///   "colorInteropID", "oiio:Gamma" (the pure-power exponent of `name`, if
+    ///   it has one), "png:sRGB", "oiio:PNGNumericState",
+    ///   "acesImageContainerFlag" and "Exif:ColorSpace". "ICCProfile" and
+    ///   "ICCProfile:*" are removed, as are "tiff:ColorSpace" and
+    ///   "tiff:PhotometricInterpretation". Mastering display metadata
+    ///   ("mdcv_*") is not changed. The name "unknown" states that nothing is
+    ///   known, so it removes all of them, except that a "colorInteropID" is
+    ///   rewritten to "unknown" rather than removed: the file goes on saying
+    ///   that nothing is known about it.
+    /// - An empty name (`""` or an empty `std::string`) only erases
+    ///   "oiio:ColorSpace". The other attributes stay, because they are
+    ///   evidence of the encoding.
+    /// - A null name (the default, `string_view()`, `nullptr` or a
+    ///   default-constructed `ustring`) sets "oiio:ColorSpace" from the spec's
+    ///   own color metadata if it is not already set, and changes nothing else.
+    ///   It is left unset if that metadata names no configured color space or
+    ///   Color Interop ID. Note that `ustring("")` and the `ustring` of an
+    ///   attribute holding an empty string are *not* null and clear the label,
+    ///   but `get_string_attribute()` of an attribute that is *not present*
+    ///   returns a null `string_view` and therefore resolves.
+    ///
+    /// So "oiio:ColorSpace" has three states: unset (not resolved yet; the
+    /// evidence is still on the spec, and a conversion resolves it then),
+    /// "unknown" (explicitly nothing known; a conversion refuses it as a
+    /// source), or a name or ID (authoritative; the other attributes agree
+    /// with it).
+    ///
+    /// Before 3.3, an empty name also erased "oiio:Gamma", "Exif:ColorSpace"
+    /// and the TIFF color tags, and setting the current name changed nothing.
+    /// This uses the default color config, as `OIIO::set_colorspace()` does.
     ///
     /// @version 2.5
-    void set_colorspace(string_view name);
+    void set_colorspace(string_view name = {});
 
     /// Returns `true` for a newly initialized (undefined) `ImageSpec`.
     /// (Designated by no channels and undefined data type -- true of the
@@ -4375,25 +4407,57 @@ inline string_view get_string_attribute (string_view name,
 /// @}
 
 
-/// Set the metadata of the `spec` to presume that color space is `name` (or
-/// to assume nothing about the color space if `name` is empty). The core
-/// operation is to set the "oiio:ColorSpace" attribute, but it also removes
-/// or alters several other attributes that may hint color space in ways that
-/// might be contradictory or no longer true. This uses the current default
-/// color config to adjudicate color space name equivalencies, but only
-/// when it must: if `spec` has an "Exif:ColorSpace" attribute and `name`
-/// is not "srgb_rec709_scene", to decide whether `name` is equivalent to
-/// sRGB. Otherwise, no color config is loaded.
+/// Set the `spec`'s color space metadata. `name` selects one of three
+/// behaviors:
+///
+/// - A color space name or Color Interop ID makes `name` the authoritative
+///   description of the encoding, even when it is already the
+///   "oiio:ColorSpace" value. Each other color-describing attribute is kept
+///   when it agrees with `name`, rewritten when `name` determines it, and
+///   removed otherwise: "chromaticities" and "oiio:Chromaticities", "CICP",
+///   "colorInteropID", "oiio:Gamma" (the pure-power exponent of `name`, if
+///   it has one), "png:sRGB", "oiio:PNGNumericState",
+///   "acesImageContainerFlag" and "Exif:ColorSpace". "ICCProfile" and
+///   "ICCProfile:*" are removed, as are "tiff:ColorSpace" and
+///   "tiff:PhotometricInterpretation". Mastering display metadata
+///   ("mdcv_*") is not changed. The name "unknown" states that nothing is
+///   known, so it removes all of them, except that a "colorInteropID" is
+///   rewritten to "unknown" rather than removed: the file goes on saying
+///   that nothing is known about it.
+/// - An empty name (`""` or an empty `std::string`) only erases
+///   "oiio:ColorSpace". The other attributes stay, because they are
+///   evidence of the encoding.
+/// - A null name (the default, `string_view()`, `nullptr` or a
+///   default-constructed `ustring`) sets "oiio:ColorSpace" from the spec's
+///   own color metadata if it is not already set, and changes nothing else.
+///   It is left unset if that metadata names no configured color space or
+///   Color Interop ID. Note that `ustring("")` and the `ustring` of an
+///   attribute holding an empty string are *not* null and clear the label,
+///   but `get_string_attribute()` of an attribute that is *not present*
+///   returns a null `string_view` and therefore resolves.
+///
+/// So "oiio:ColorSpace" has three states: unset (not resolved yet; the
+/// evidence is still on the spec, and a conversion resolves it then),
+/// "unknown" (explicitly nothing known; a conversion refuses it as a
+/// source), or a name or ID (authoritative; the other attributes agree
+/// with it).
+///
+/// Before 3.3, an empty name also erased "oiio:Gamma", "Exif:ColorSpace"
+/// and the TIFF color tags, and setting the current name changed nothing.
+/// This uses the current default color config, with the behavior of
+/// `ColorConfig::set_colorspace()`.
 ///
 /// @version 3.0
-OIIO_API void set_colorspace(ImageSpec& spec, string_view name);
+OIIO_API void set_colorspace(ImageSpec& spec, string_view name = {});
 
 /// Set the metadata of the `spec` to reflect Rec709 color primaries and the
-/// given gamma. The core operation is to set the "oiio:ColorSpace" attribute,
-/// but it also removes or alters several other attributes that may hint color
-/// space in ways that might be contradictory or no longer true. As with
-/// `set_colorspace()`, the default color config is loaded only if `spec`
-/// has an "Exif:ColorSpace" attribute.
+/// given gamma: "oiio:ColorSpace" becomes "lin_rec709_scene" or
+/// "g<NN>_rec709_scene", and "oiio:Gamma" the gamma (none for linear). Unlike
+/// `set_colorspace()`, this labels without reconciling the other color
+/// metadata with the name: it only removes "Exif:ColorSpace", the TIFF color
+/// tags and any other "oiio:Gamma", and it loads the default color config
+/// only if `spec` has an "Exif:ColorSpace" attribute, to ask whether the name
+/// is sRGB. Image readers use it to record a gamma that a file states.
 ///
 /// @version 3.0
 OIIO_API void set_colorspace_rec709_gamma(ImageSpec& spec, float gamma);

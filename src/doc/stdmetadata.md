@@ -210,6 +210,24 @@ OpenImageIO understands.
 
 ## Color information
 
+The color-metadata resolver uses the supplied configuration and OCIO context
+to interpret in-file facts before the default filename fallback. PNG gamma
+without chromaticities does not establish a gamut, but it can select a
+configured space with the same transfer function. Numerical PNG metadata
+prefers a display-referred encoding and falls back to a scene-referred one;
+set the string attribute `oiio:PNGNumericState` to `scene` to request the
+scene-referred interpretation. EXR chromaticities describe a linear encoding.
+Numeric metadata that identifies nothing usable is evidence that does not
+help, like a `"colorInteropID"` of `"unknown"`: when
+nothing else establishes a source, the answer is `"unknown"`, not a default. The resolver
+does not infer scene/display meaning solely from an OCIO reference space.
+
+`png:sRGB` records an actual PNG sRGB chunk, while `oiio:ColorSpace` may also
+be a reader default. These are distinct evidence. `oiiotool --autocc` and the
+ImageBufAlgo color conversions use the resolver to select a source color space;
+`oiiotool --debug` reports the selecting rule, status, approximation flag and
+advisory metadata warnings. Resolution leaves the `ImageSpec` unchanged.
+
 ```{eval-rst}
 .. option:: "oiio:ColorSpace" : string
 
@@ -235,6 +253,27 @@ OpenImageIO understands.
     Additionally, `"scene_linear"` is a role that is appropriate for color
     pixel values are known to be scene-linear and using facility-default color
     primaries as defined by the OpenColorIO configuration.
+
+    The attribute has three states:
+
+    - Unset: not resolved yet. The color metadata is still on the spec, and
+      a conversion that needs a source resolves one from it then.
+    - `"unknown"`: explicitly nothing is known. Setting it with
+      `set_colorspace()` removes the other color metadata, except that a
+      `"colorInteropID"` is rewritten to `"unknown"` rather than removed, and
+      a conversion refuses it as a source. A file whose own
+      `"colorInteropID"` is `"unknown"`, by contrast, is evidence rather than
+      an assertion about the pixels: readers leave this attribute unset and
+      keep that ID, and a conversion goes on to the file's other metadata
+      before concluding `"unknown"`.
+    - Any other name or Color Interop ID: authoritative. Setting it with
+      `set_colorspace()` keeps the other color metadata that agrees with it,
+      rewrites what it determines and removes the rest.
+
+    `set_colorspace("")` removes only this attribute, and `set_colorspace()`
+    with no name sets it from the spec's own color metadata when it is unset,
+    leaving it unset when nothing there names a configured color space or
+    Color Interop ID.
 ```
 
 ```{eval-rst}
@@ -1534,4 +1573,3 @@ To avoid conflicts with other plugins, or with any additional standard
 metadata names that may be added in future versions of OpenImageIO, it is
 strongly advised that writers of new plugins should prefix their metadata
 with the name of the format, much like the `"Exif:"` and `"IPTC:"` metadata.
-

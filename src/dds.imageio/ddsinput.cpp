@@ -901,7 +901,8 @@ DDSInput::read_miplevel_spec(int miplevel)
         && (basetype == TypeDesc::HALF || basetype == TypeDesc::FLOAT))
         colorspace = "lin_rec709_scene";
 
-    m_spec.set_colorspace(colorspace);
+    if (colorspace)
+        m_spec.attribute("oiio:ColorSpace", colorspace);
 
     m_spec.default_channel_names();
     // Special case: if a 2-channel DDS RG or YA?

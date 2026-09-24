@@ -393,6 +393,117 @@ OIIO_NAMESPACE_END
 
 OIIO_NAMESPACE_3_1_BEGIN
 namespace pvt {
+
+inline constexpr string_view autocc_terminal_unknown_attrib
+    = "oiio:autoccTerminalUnknown";
+
+/// Controls where OpenColorIO FileRules participate in input color-space
+/// resolution.
+enum class FileRulesPrecedence {
+    MetadataOnly,  ///< Do not consult FileRules.
+    First,         ///< After explicit assignment and the ACES container.
+    Fallback,      ///< After in-file metadata.
+};
+
+/// Controls the result when no assignment, metadata, FileRule, or
+/// failover establishes a usable source color space.
+enum class MissingColorSpace {
+    Preserve,      ///< Preserve the established no-source behavior.
+    ConfigPolicy,  ///< Follow OCIO strict parsing or default assignment.
+};
+
+/// The evidence that selected a color space during metadata resolution.
+enum class ColorSpaceSource {
+    Unspecified,
+    Assignment,
+    ACES,
+    FileRulesFirst,
+    InteropID,
+    CICP,
+    PNGsRGB,
+    NumericMetadata,
+    FileRulesFallback,
+    ReaderLabel,
+    Failover,
+    FileRulesDefault,
+    DefaultRole,
+    TerminalPolicy,
+};
+
+/// The outcome of metadata color-space resolution.
+enum class ColorSpaceStatus {
+    Resolved,
+    TerminalUnknown,
+    NoSource,
+};
+
+/// A resolved color-space name and the evidence and outcome that selected
+/// it. `terminal_unknown` distinguishes the resolver's generated terminal
+/// `unknown` from a configured color space with that same name.
+struct ColorSpaceResolution {
+    std::string name;
+    bool terminal_unknown   = false;
+    ColorSpaceSource source = ColorSpaceSource::Unspecified;
+    ColorSpaceStatus status = ColorSpaceStatus::NoSource;
+    bool approximate        = false;
+    std::vector<std::string> metadata_warnings;
+};
+
+/// One step of the ordered color space resolver, recorded only when a caller
+/// asks for a trace. `candidate` is the source evidence as read -- never a
+/// profile's bytes -- and `resolved` is the selected result, filled for
+/// `Matched` only; a terminal policy can select the unknown sentinel instead
+/// of a color space. `reason` is a static literal owned by the library,
+/// never a temporary.
+struct ResolverStep {
+    enum class Rule {
+        Assignment,
+        ACES,
+        FileRulesFirst,
+        InteropID,
+        CICP,
+        ICC,
+        PNGsRGB,
+        NumericMetadata,
+        FileRulesFallback,
+        ReaderLabel,
+        Failover,
+        FileRulesDefault,
+        DefaultRole,
+        TerminalPolicy,
+    };
+    /// Matched: this rule selected the result. Missed: evidence was present
+    /// and no usable result came of it. Skipped: no evidence, the rule's
+    /// placement was turned off, or a prior claim suppressed it. Invalid:
+    /// malformed evidence such as a wrong type or count or a non-finite value.
+    /// Approximate selected a usable result through a documented identity
+    /// substitution. Invalid changes only the trace, never selection.
+    enum class Outcome { Matched, Approximate, Missed, Skipped, Invalid };
+    Rule rule;
+    Outcome outcome;
+    std::string candidate;
+    std::string resolved;
+    string_view reason;
+};
+
+/// Resolve source color-space evidence without modifying the ImageSpec.
+/// Explicit assignment, container metadata, FileRules, reader labels, and
+/// failover are considered in documented priority order, under an effective
+/// OCIO context formed from comma-separated context keys and values.
+///
+/// When `trace` is non-null, one step per rule the resolver reaches is
+/// appended to it and `metadata_warnings` reports advisory metadata
+/// contradictions or carriage losses. A null `trace` costs nothing: no step
+/// is built and no reason string is formatted. Rules after the one that
+/// terminates the executor are not reached and not recorded.
+OIIO_API ColorSpaceResolution resolve_colorspace_source(
+    const ColorConfig& config, const ImageSpec& spec, string_view filename = "",
+    string_view assignment = "", string_view failover = "",
+    string_view context_key = "", string_view context_value = "",
+    FileRulesPrecedence file_rules   = FileRulesPrecedence::Fallback,
+    MissingColorSpace missing        = MissingColorSpace::Preserve,
+    std::vector<ResolverStep>* trace = nullptr);
+
 /// Test harness for reading an image, analogous to calling
 /// ImageInput::read_image(), but it doesn't return pixels and does as little
 /// extraneous allocation as possible. What is this good for? (1) Benchmarking
@@ -409,6 +520,14 @@ OIIO_NAMESPACE_3_1_END
 
 OIIO_NAMESPACE_BEGIN
 namespace pvt {
+using v3_1::pvt::autocc_terminal_unknown_attrib;
+using v3_1::pvt::ColorSpaceResolution;
+using v3_1::pvt::ColorSpaceSource;
+using v3_1::pvt::ColorSpaceStatus;
+using v3_1::pvt::FileRulesPrecedence;
+using v3_1::pvt::MissingColorSpace;
+using v3_1::pvt::resolve_colorspace_source;
+using v3_1::pvt::ResolverStep;
 using v3_1::pvt::test_read_all_images;
 using v3_1::pvt::test_read_image;
 }  // namespace pvt

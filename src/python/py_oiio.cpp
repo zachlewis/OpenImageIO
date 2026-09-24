@@ -537,10 +537,14 @@ declare_global_attribute_functions(py_module& m)
         "name"_a, "defaultval"_a.none() = "");
     m.def(
         "set_colorspace",
-        [](ImageSpec& spec, const std::string& name) {
-            set_colorspace(spec, name);
+        [](ImageSpec& spec, const py::object& name) {
+            // None resolves an unset label; "" clears it.
+            if (name.is_none())
+                set_colorspace(spec);
+            else
+                set_colorspace(spec, oiio_py::str_to_stdstring(name));
         },
-        "spec"_a, "name"_a);
+        "spec"_a, "name"_a.none() = py::none());
     m.def(
         "set_colorspace_rec709_gamma",
         [](ImageSpec& spec, float gamma) {

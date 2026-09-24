@@ -328,9 +328,15 @@ DPXInput::seek_subimage(int subimage, int miplevel)
 
     // image linearity
     switch (m_dpx.header.Transfer(subimage)) {
-    case dpx::kLinear: m_spec.set_colorspace("lin_rec709_scene"); break;
-    case dpx::kLogarithmic: m_spec.set_colorspace("KodakLog"); break;
-    case dpx::kITUR709: m_spec.set_colorspace("srgb_rec709_scene"); break;
+    case dpx::kLinear:
+        m_spec.attribute("oiio:ColorSpace", "lin_rec709_scene");
+        break;
+    case dpx::kLogarithmic:
+        m_spec.attribute("oiio:ColorSpace", "KodakLog");
+        break;
+    case dpx::kITUR709:
+        m_spec.attribute("oiio:ColorSpace", "srgb_rec709_scene");
+        break;
     case dpx::kUserDefined:
         if (!std::isnan(m_dpx.header.Gamma()) && m_dpx.header.Gamma() != 0) {
             set_colorspace_rec709_gamma(m_spec, float(m_dpx.header.Gamma()));

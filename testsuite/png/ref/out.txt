@@ -8,6 +8,7 @@ Reading ../oiio-images/png/oiio-logo-no-alpha.png
     XResolution: 72
     YResolution: 72
     oiio:ColorSpace: "srgb_rec709_scene"
+    png:sRGB: 0
 Comparing "../oiio-images/png/oiio-logo-no-alpha.png" and "oiio-logo-no-alpha.png"
 PASS
 Reading ../oiio-images/png/oiio-logo-with-alpha.png
@@ -20,17 +21,21 @@ Reading ../oiio-images/png/oiio-logo-with-alpha.png
     XResolution: 72
     YResolution: 72
     oiio:ColorSpace: "srgb_rec709_scene"
+    png:sRGB: 0
 Comparing "../oiio-images/png/oiio-logo-with-alpha.png" and "oiio-logo-with-alpha.png"
 PASS
 Reading exif.png
 exif.png             :   64 x   64, 3 channel, uint8 png
     SHA-1: 7CB41FEA50720B48BE0C145E1473982B23E9AB77
     channel list: R, G, B
+    chromaticities: 0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329
     Exif:ExifVersion: "0230"
     Exif:FlashPixVersion: "0100"
     Exif:FocalLength: 45.7 (45.7 mm)
     Exif:WhiteBalance: 0 (auto)
     oiio:ColorSpace: "srgb_rec709_scene"
+    oiio:Gamma: 2.19998
+    png:sRGB: 3
 alphagamma:
    1 x    1, 4 channel, float png
     channel list: R, G, B, A
@@ -40,7 +45,7 @@ alphagamma:
     YResolution: 300
     Exif:ImageHistory: "oiiotool -no-autopremult SLEEP_MM.png -cut 1x1+227+1211 -o kaka.png"
     oiio:ColorSpace: "Gamma2.2"
-    oiio:Gamma: 2.2
+    oiio:Gamma: 2.19998
     oiio:SourceFileFormat: "png"
     oiio:SourcePath: "src/alphagamma.png"
     Stats Min: 186 186 186 127 (of 255)
@@ -97,20 +102,28 @@ smallalpha.png       :    1 x    1, 4 channel, uint8 png
 cicp:
   16 x   16, 4 channel, float png
     channel list: R, G, B, A
+    chromaticities: 0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329
     CICP: 1, 13, 0, 1
     oiio:ColorSpace: "srgb_rec709_scene"
+    oiio:Gamma: 2.19998
     oiio:SourceFileFormat: "png"
     oiio:SourcePath: "test16.png"
+    png:sRGB: 3
 removed_cicp:
   16 x   16, 4 channel, float png
     channel list: R, G, B, A
+    chromaticities: 0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329
     oiio:ColorSpace: "srgb_rec709_scene"
+    oiio:Gamma: 2.19998
     oiio:SourceFileFormat: "png"
     oiio:SourcePath: "test16.png"
+    png:sRGB: 3
 remove_cicp_via_set_colorspace:
   16 x   16, 4 channel, float png
     channel list: R, G, B, A
+    chromaticities: 0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329
     oiio:ColorSpace: "g22_rec709_display"
+    oiio:Gamma: 2.19998
     oiio:SourceFileFormat: "png"
     oiio:SourcePath: "test16.png"
 lin_rec2020_scene:
@@ -118,6 +131,7 @@ lin_rec2020_scene:
     channel list: R, G, B
     CICP: 9, 8, 0, 1
     oiio:ColorSpace: "lin_rec2020_scene"
+    oiio:Gamma: 1
     oiio:SourceFileFormat: "png"
     oiio:SourcePath: "lin_rec2020_scene.png"
 lin_p3d65_scene:
@@ -125,12 +139,15 @@ lin_p3d65_scene:
     channel list: R, G, B
     CICP: 12, 8, 0, 1
     oiio:ColorSpace: "lin_p3d65_scene"
+    oiio:Gamma: 1
     oiio:SourceFileFormat: "png"
     oiio:SourcePath: "lin_p3d65_scene.png"
 lin_rec709_scene:
    4 x    4, 3 channel, float png
     channel list: R, G, B
+    CICP: 1, 8, 0, 1
     oiio:ColorSpace: "lin_rec709_scene"
+    oiio:Gamma: 1
     oiio:SourceFileFormat: "png"
     oiio:SourcePath: "lin_rec709_scene.png"
 lin_rec2020_display:
@@ -138,6 +155,7 @@ lin_rec2020_display:
     channel list: R, G, B
     CICP: 9, 8, 0, 1
     oiio:ColorSpace: "lin_rec2020_scene"
+    oiio:Gamma: 1
     oiio:SourceFileFormat: "png"
     oiio:SourcePath: "lin_rec2020_display.png"
 lin_p3d65_display:
@@ -145,6 +163,7 @@ lin_p3d65_display:
     channel list: R, G, B
     CICP: 12, 8, 0, 1
     oiio:ColorSpace: "lin_p3d65_scene"
+    oiio:Gamma: 1
     oiio:SourceFileFormat: "png"
     oiio:SourcePath: "lin_p3d65_display.png"
 Comparing "test16.png" and "ref/test16.png"

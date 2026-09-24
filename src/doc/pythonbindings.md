@@ -704,11 +704,16 @@ Copies from ImageSpec `other` only the fields describing the size and
 data types, but not the arbitrary named metadata or channel names.
 :::
 
-:::{py:method} bool ImageSpec.set_colorspace (name)
-Set metadata to indicate the presumed color space `name`, or clear all
-such metadata if `name` is the empty string.
+:::{py:method} ImageSpec.set_colorspace (name=None)
+Set the color space metadata, as `ImageSpec::set_colorspace()` does in C++.
+A color space name or Color Interop ID is authoritative: the spec's other
+color metadata is kept where it agrees with `name`, rewritten where `name`
+determines it, and removed otherwise. The empty string `""` removes only
+`"oiio:ColorSpace"`. `None` (the default) sets `"oiio:ColorSpace"` from the
+spec's own color metadata if it is unset, and changes nothing else.
 
-This function was added in version 2.5.
+This function was added in version 2.5. The `None` default and the
+empty-string meaning were changed in version 3.3.
 
 Example:
 
@@ -4201,9 +4206,9 @@ Retrieves the latest global error, as a string.
 
 ```
 
-:::{py:method} set_colorspace (spec, name)
-Set the metadata of the `spec` to presume that color space is `name` (or
-to assume nothing about the color space if `name` is empty).
+:::{py:method} set_colorspace (spec, name=None)
+Set the color space metadata of the `spec`, with the same meaning of
+`name`, `""` and `None` as `ImageSpec.set_colorspace()`.
 
 Example:
 

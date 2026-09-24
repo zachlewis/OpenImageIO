@@ -271,10 +271,14 @@ declare_imagespec(py_module& m)
         .def("copy_dimensions", &ImageSpec::copy_dimensions, "other"_a)
         .def(
             "set_colorspace",
-            [](ImageSpec& self, const std::string& cs) {
-                self.set_colorspace(cs);
+            [](ImageSpec& self, const py::object& name) {
+                // None resolves an unset label; "" clears it.
+                if (name.is_none())
+                    self.set_colorspace();
+                else
+                    self.set_colorspace(oiio_py::str_to_stdstring(name));
             },
-            "name"_a)
+            "name"_a.none() = py::none())
         // __getitem__ is the dict-like `ImageSpec[key]` lookup
         .def("__getitem__",
              [](const ImageSpec& self, const std::string& key) {

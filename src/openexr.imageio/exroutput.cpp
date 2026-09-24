@@ -23,6 +23,7 @@
 #include <OpenEXR/ImfTiledOutputFile.h>
 
 #include "exr_pvt.h"
+#include "imageio_pvt.h"
 
 // The way that OpenEXR uses dynamic casting for attributes requires
 // temporarily suspending "hidden" symbol visibility mode.
@@ -738,6 +739,9 @@ OpenEXROutput::validate_color_interop_ids()
                 "colorInteropID");
         string_view interop_id = attr ? string_view(attr->value())
                                       : string_view();
+        // "unknown" makes no claim, so it is checked as a missing ID is.
+        if (Strutil::iequals(interop_id, "unknown"))
+            interop_id = string_view();
 
         if (s == 0) {
             file_interop_id = interop_id;
@@ -803,6 +807,35 @@ OpenEXROutput::open(const std::string& name, int subimages,
             m_headers[s].setType(
                 deep ? (tiled ? Imf::DEEPTILE : Imf::DEEPSCANLINE)
                      : (tiled ? Imf::TILEDIMAGE : Imf::SCANLINEIMAGE));
+        }
+    }
+
+    // OpenEXR rejects a later part whose chromaticities differ from the
+    // first part's, or that has them where the first part has none. Its own
+    // colorInteropID states such a part's encoding instead; a part with none
+    // says "unknown" rather than inherit the first part's.
+    const auto* first_chroma
+        = m_headers[0].findTypedAttribute<Imf::ChromaticitiesAttribute>(
+            "chromaticities");
+    for (int s = 1; s < subimages; ++s) {
+        const auto* chroma
+            = m_headers[s].findTypedAttribute<Imf::ChromaticitiesAttribute>(
+                "chromaticities");
+        if (!chroma
+            || (first_chroma && chroma->value() == first_chroma->value()))
+            continue;
+        m_headers[s].erase("chromaticities");
+        m_subimagespecs[s].erase_attribute("chromaticities");
+        if (!m_headers[s].findTypedAttribute<Imf::StringAttribute>(
+                "colorInteropID")) {
+            OIIO::debugfmt("OpenImageIO WARNING: OpenEXR subimage {} cannot "
+                           "keep chromaticities that differ from the first "
+                           "subimage's, and has no colorInteropID, so it is "
+                           "written as \"unknown\"\n",
+                           s);
+            m_headers[s].insert("colorInteropID",
+                                Imf::StringAttribute("unknown"));
+            m_subimagespecs[s].attribute("colorInteropID", "unknown");
         }
     }
 
@@ -1100,9 +1133,58 @@ OpenEXROutput::spec_to_header(ImageSpec& spec, int subimage,
             spec.attribute("colorInteropID", interop_id);
     }
 
+    // CIF Recommendation 04: an ID and a chromaticities attribute are two
+    // claims about one color space, and the reader that trusts the wrong one
+    // decodes wrongly. In an OpenEXR header the chromaticities state a linear
+    // encoding on the primaries they name, so they contradict an ID whose
+    // encoding this build establishes to be non-linear -- primaries carried
+    // in from a display-encoded container -- or linear on different
+    // primaries. Write only the ID then. With no ID that establishes the
+    // encoding, a gamma other than 1 beside the chromaticities (primaries
+    // read from a PNG, say) contradicts them in the same way. With no ID, an
+    // explicit oiio:Gamma of 1 is the only evidence that the pixels are
+    // linear; absent transfer evidence is not enough. The AP0 chromaticities
+    // an ST 2065-4 container requires beside lin_ap0_scene agree with it.
+    bool suppress_chromaticities = false;
+    const ParamValue* chroma     = spec.find_attribute("chromaticities");
+    string_view id               = spec.get_string_attribute("colorInteropID");
+    if (chroma && chroma->type().basetype == TypeDesc::FLOAT
+        && chroma->type().basevalues() == 8) {
+        const ColorSpaceInfo info
+            = id.empty()
+                  ? ColorSpaceInfo()
+                  : ColorConfig::default_colorconfig().derive_color_space_info(
+                        id);
+        // Published primaries are stated to six decimals at most, and any two
+        // distinct published gamuts are orders of magnitude further apart.
+        const cspan<float> stated = info.chromaticities();
+        const float* written      = (const float*)chroma->data();
+        bool different_gamut      = false;
+        for (size_t i = 0; stated.size() == 8 && i < 8; ++i)
+            different_gamut |= std::abs(stated[i] - written[i]) > 1.0e-4f;
+        const ColorTransferFunctionKind transfer
+            = ColorSpaceInfoAccess::transfer_function_kind(info);
+        suppress_chromaticities
+            = transfer != ColorTransferFunctionKind::Undetermined
+                  ? (transfer != ColorTransferFunctionKind::Linear
+                     || different_gamut)
+                  : spec.get_float_attribute("oiio:Gamma", 0.0f) != 1.0f;
+    }
+    // Dropped with no ID, they would leave a part that states nothing, or
+    // that inherits the first part's ID. It says "unknown" instead.
+    if (suppress_chromaticities && id.empty()) {
+        spec.attribute("colorInteropID", "unknown");
+    }
+
     // Deal with all other params
-    for (const auto& p : spec.extra_attribs)
+    for (const auto& p : spec.extra_attribs) {
+        if (suppress_chromaticities
+            && Strutil::iequals(p.name(), "chromaticities"))
+            continue;
         put_parameter(p.name().string(), p.type(), p.data(), header);
+    }
+    if (suppress_chromaticities)
+        spec.erase_attribute("chromaticities");
 
     // Now that the header's compression is settled, say how many scanlines
     // are packed into each of the chunks we are about to write, so that
@@ -1345,6 +1427,10 @@ OpenEXROutput::put_parameter(const std::string& name, TypeDesc type,
     if (Strutil::istarts_with(xname, "ICCProfile:")) {
         return false;
     }
+
+    // OpenEXR has no CICP attribute.
+    if (Strutil::iequals(xname, "CICP"))
+        return false;
 
     if (!xname.length())
         return false;  // Skip suppressed names

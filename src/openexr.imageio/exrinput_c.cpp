@@ -14,6 +14,8 @@
 #include <OpenImageIO/Imath.h>
 #include <OpenImageIO/platform.h>
 
+#include <limits>
+
 #include "exr_pvt.h"
 
 #include <OpenEXR/ImfCRgbaFile.h>
@@ -855,8 +857,13 @@ OpenEXRCoreInput::PartInfo::parse_header(OpenEXRCoreInput* in,
 
 #if OPENEXR_CODED_VERSION >= 30400
         case EXR_ATTR_BYTES: {
-            spec.attribute(oname, TypeDesc(TypeDesc::UINT8, attr->bytes->size),
-                           make_span(attr->bytes->data, attr->bytes->size));
+            // Native byte arrays include ICCProfile written by our 3.4+
+            // output path; preserve the payload and attribute name exactly.
+            const size_t size = attr->bytes->size;
+            if (size > 0 && size <= size_t(std::numeric_limits<int>::max())) {
+                spec.attribute(oname, TypeDesc(TypeDesc::UINT8, int(size)),
+                               make_span(attr->bytes->data, size));
+            }
             break;
         }
 #endif

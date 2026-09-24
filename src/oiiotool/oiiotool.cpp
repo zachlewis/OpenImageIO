@@ -781,6 +781,7 @@ resolver_source_name(pvt::ColorSpaceSource source)
     case Source::FileRulesFirst: return "FileRules first";
     case Source::InteropID: return "colorInteropID";
     case Source::CICP: return "CICP";
+    case Source::ICC: return "ICC";
     case Source::PNGsRGB: return "PNG sRGB";
     case Source::NumericMetadata: return "numeric metadata";
     case Source::FileRulesFallback: return "FileRules fallback";
@@ -5978,6 +5979,24 @@ input_file(Oiiotool& ot, cspan<const char*> argv)
             action_reorient(ot, argv);
         }
 
+        // Preserve a portable result established under an input-local context
+        // while that context is still in scope. This is standard metadata,
+        // rather than a private provenance attribute, and config-local names
+        // and process-local selectors deliberately publish nothing.
+        if (!autocc && !contextkey.empty()) {
+            ot.read();
+            for (int s = 0; s < ot.curimg->subimages(); ++s) {
+                for (int m = 0; m < ot.curimg->miplevels(s); ++m) {
+                    ImageBuf& image = (*ot.curimg)(s, m);
+                    pvt::finalize_resolved_color_metadata(
+                        image.specmod(), ot.colorconfig(),
+                        image.file_format_name(), image.name(), contextkey,
+                        contextvalue);
+                }
+            }
+            ot.curimg->update_spec_from_imagebuf();
+        }
+
         if (autocc) {
             ot.read();
             // This is process-local resolver state, never input provenance.
@@ -6575,12 +6594,18 @@ output_file(Oiiotool& ot, cspan<const char*> argv)
         // need to explicitly do that here.
     } else {
         // Non-texture case
+        const bool finalize_color_metadata
+            = Strutil::iequals(out->format_name(), "openexr");
         std::vector<ImageSpec> subimagespecs(ir->subimages());
         for (int s = 0, send = ir->subimages(); s < send; ++s) {
             ImageSpec spec = *ir->spec(s, 0);
             adjust_output_options(filename, spec, ir->nativespec(s), ot, s,
                                   send, supports_tiles, fileoptions,
                                   (*ir)[s].was_direct_read());
+            if (finalize_color_metadata)
+                pvt::finalize_resolved_color_metadata(
+                    spec, ot.colorconfig(), (*ir)(s, 0).file_format_name(),
+                    (*ir)(s, 0).name());
             spec.erase_attribute(pvt::autocc_terminal_unknown_attrib);
             // If it's not tiled and MIP-mapped, remove any "textureformat"
             if (!spec.tile_pixels() || ir->miplevels(s) <= 1)
@@ -6624,6 +6649,10 @@ output_file(Oiiotool& ot, cspan<const char*> argv)
                 adjust_output_options(filename, spec, ir->nativespec(s, m), ot,
                                       s, send, supports_tiles, fileoptions,
                                       (*ir)[s].was_direct_read());
+                if (finalize_color_metadata)
+                    pvt::finalize_resolved_color_metadata(
+                        spec, ot.colorconfig(), (*ir)(s, m).file_format_name(),
+                        (*ir)(s, m).name());
                 spec.erase_attribute(pvt::autocc_terminal_unknown_attrib);
                 if (s > 0 || m > 0) {  // already opened first subimage/level
                     if (!out->open(tmpfilename, spec, mode)) {

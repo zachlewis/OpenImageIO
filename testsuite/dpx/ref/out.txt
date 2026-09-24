@@ -2,6 +2,7 @@ Reading ../oiio-images/dpx/dpx_nuke_10bits_rgb.dpx
 ../oiio-images/dpx/dpx_nuke_10bits_rgb.dpx :  512 x  512, 3 channel, uint10 dpx
     SHA-1: D63D2EC8C60AB41B1C0F72A65AE8FF27DA8A620E
     channel list: R, G, B
+    colorInteropID: "unknown"
     DateTime: "2011:03:08 14:47:25"
     Orientation: 1 (normal)
     PixelAspectRatio: 1
@@ -44,6 +45,7 @@ Reading ../oiio-images/dpx/dpx_nuke_16bits_rgba.dpx
 ../oiio-images/dpx/dpx_nuke_16bits_rgba.dpx :  512 x  512, 4 channel, uint10 dpx
     SHA-1: E9FECE70CD875C5654F58DA9EC576399F089D855
     channel list: R, G, B, A
+    colorInteropID: "unknown"
     DateTime: "2011:03:08 14:47:01"
     Orientation: 1 (normal)
     PixelAspectRatio: 1
@@ -89,6 +91,7 @@ stereo.dpx           :   80 x   60, 3 channel, uint10 dpx
     2 subimages: 80x60 [u10,u10,u10], 80x60 [u10,u10,u10]
  subimage  0:   80 x   60, 3 channel, uint10 dpx
     channel list: R, G, B
+    colorInteropID: "unknown"
     ImageDescription: "view angle: left"
     Orientation: 1 (normal)
     PixelAspectRatio: 1
@@ -114,6 +117,7 @@ stereo.dpx           :   80 x   60, 3 channel, uint10 dpx
     Monochrome: Yes
  subimage  1:   80 x   60, 3 channel, uint10 dpx
     channel list: R, G, B
+    colorInteropID: "unknown"
     ImageDescription: "view angle: right"
     Orientation: 1 (normal)
     PixelAspectRatio: 1
@@ -143,6 +147,7 @@ Reading grey.dpx
 grey.dpx             :  512 x  512, 1 channel, uint10 dpx
     SHA-1: 9D2BC270F3E29585604A1FF8A7EE07436DF48333
     channel list: Y
+    colorInteropID: "unknown"
     Orientation: 1 (normal)
     PixelAspectRatio: 1
     dpx:Colorimetric: "User defined"
@@ -158,9 +163,12 @@ grey.dpx             :  512 x  512, 1 channel, uint10 dpx
     oiio:subimages: 1
 Comparing "grey.dpx" and "ref/grey.tif"
 PASS
-lin_ap0.dpx: Linear lin_rec709_scene
+lin_ap0.dpx: Linear unknown
+lin_ap0.png: <> unknown <> <>
 oiio-lin_p3dci_display.dpx: Linear
 g22_adobergb_display.dpx: Undefined
+plate_ACEScct_v01.dpx: ACEScg lin_ap1_scene
+grey.dpx: unknown unknown
 oiiotool ERROR: read : "src/crash-badusersize.dpx": Corrupt userbuf: 4160749568 bytes of user data at offset 2048 run past the 2054 byte file
 Full command line was:
 > oiiotool src/crash-badusersize.dpx -o test.tif
@@ -172,6 +180,7 @@ src/crash-1chan-10bit-filled-methodA.dpx :   80 x   60, 3 channel, uint10 dpx
     channel list: R, G, B
     full/display size: 2143289344 x 2143289344
     full/display origin: 0, 0
+    colorInteropID: "unknown"
     ImageDescription: "view angle: left"
     Orientation: 1 (normal)
     PixelAspectRatio: 1
@@ -199,6 +208,7 @@ src/crash-1chan-10bit-filled-methodA.dpx :   80 x   60, 3 channel, uint10 dpx
     channel list: channel0
     full/display size: 2143289344 x 2143289344
     full/display origin: 0, 0
+    colorInteropID: "unknown"
     ImageDescription: "view angle: left"
     Orientation: 1 (normal)
     PixelAspectRatio: 1
@@ -226,6 +236,7 @@ Reading eolpad.dpx
 eolpad.dpx           :   80 x   60, 3 channel, uint10 dpx
     SHA-1: 49544BAAEE31E26AF8B8A7495311AB39C997F989
     channel list: R, G, B
+    colorInteropID: "unknown"
     Orientation: 1 (normal)
     PixelAspectRatio: 1
     dpx:Colorimetric: "User defined"
@@ -245,3 +256,5 @@ Full command line was:
 oiiotool ERROR: read : "src/truncated-userdata.dpx": Corrupt userbuf: 2000 bytes of user data at offset 2048 run past the 2100 byte file
 Full command line was:
 > oiiotool --info -v -a --no-metamatch DateTime|Software|OriginatingProgram|ImageHistory --hash src/truncated-userdata.dpx
+dpx_parts.exr part 0: lin_ap1_scene <lin_ap1_scene>
+dpx_parts.exr part 1: unknown <>

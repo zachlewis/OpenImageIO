@@ -72,6 +72,8 @@ struct OIIO_API ColorSpaceInfoAccess {
     static string_view equality_id(const ColorSpaceInfo& info) noexcept;
     /// The authored Color Interop ID, otherwise one recognized by derivation.
     static string_view color_interop_id(const ColorSpaceInfo& info) noexcept;
+    /// The authored OCIO encoding, or one adopted by derivation.
+    static string_view encoding(const ColorSpaceInfo& info) noexcept;
     /// "scene" or "display", when established.
     static string_view image_state(const ColorSpaceInfo& info) noexcept;
     /// Whether evaluation of the field completed; its value may still be

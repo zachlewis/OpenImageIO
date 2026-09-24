@@ -430,26 +430,34 @@ DPXOutput::prep_subimage(int s, bool allocate)
     // determine descriptor
     m_desc = get_image_descriptor();
 
-    // transfer function
-    const float gamma = pvt::get_colorspace_rec709_gamma(spec_s);
-    if (is_colorspace_srgb(spec_s, false))
-        m_transfer = dpx::kITUR709;
-    else if (gamma == 1.0f)
-        m_transfer = dpx::kLinear;
-    else if (gamma != 0.0f)
-        m_transfer = dpx::kUserDefined;
-    else if (ColorConfig::default_colorconfig().equivalent(
-                 spec_s.get_string_attribute("oiio:ColorSpace"), "KodakLog"))
-        m_transfer = dpx::kLogarithmic;
-    else {
-        std::string dpxtransfer = spec_s.get_string_attribute("dpx:Transfer",
-                                                              "");
-        m_transfer              = get_characteristic_from_string(dpxtransfer);
+    // transfer and colorimetric: a color space writes only the codes its
+    // encoding establishes, since a conversion leaves the codes it read
+    // behind. With no color space, or "unknown", dpx:Transfer and
+    // dpx:Colorimetric are written as given, so a copy keeps them -- this
+    // case comes first, because an unclaimed image may still carry a CICP
+    // attribute and nothing has established what it encodes.
+    const string_view colorspace = spec_s.get_string_attribute(
+        "oiio:ColorSpace");
+    m_transfer = dpx::kUndefinedCharacteristic;
+    m_cmetr    = dpx::kUndefinedCharacteristic;
+    if (colorspace.empty() || Strutil::iequals(colorspace, "unknown")) {
+        m_transfer = get_characteristic_from_string(
+            spec_s.get_string_attribute("dpx:Transfer"));
+        m_cmetr = get_characteristic_from_string(
+            spec_s.get_string_attribute("dpx:Colorimetric", "User defined"));
+    } else {
+        const cspan<int> cicp = get_colorspace_cicp(spec_s, true);
+        if (cicp.size() == 4 && cicp[0] == 1 && cicp[1] == 1) {
+            m_transfer = dpx::kITUR709;
+            m_cmetr    = dpx::kITUR709;
+        } else if (pvt::get_colorspace_rec709_gamma(spec_s) == 1.0f) {
+            m_transfer = dpx::kLinear;
+        } else if (ColorSpaceInfoAccess::encoding(
+                       pvt::get_colorspace_info(spec_s, true))
+                   == "log") {
+            m_transfer = dpx::kLogarithmic;
+        }
     }
-
-    // colorimetric
-    m_cmetr = get_characteristic_from_string(
-        spec_s.get_string_attribute("dpx:Colorimetric", "User defined"));
 
     // select packing method
     std::string pck = spec_s.get_string_attribute("dpx:Packing",

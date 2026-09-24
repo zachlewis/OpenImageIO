@@ -326,36 +326,12 @@ DPXInput::seek_subimage(int subimage, int miplevel)
 
     m_spec.attribute("oiio:subimages", (int)m_dpx.header.ImageElementCount());
 
-    // image linearity
-    switch (m_dpx.header.Transfer(subimage)) {
-    case dpx::kLinear:
-        m_spec.attribute("oiio:ColorSpace", "lin_rec709_scene");
-        break;
-    case dpx::kLogarithmic:
-        m_spec.attribute("oiio:ColorSpace", "KodakLog");
-        break;
-    case dpx::kITUR709:
-        m_spec.attribute("oiio:ColorSpace", "srgb_rec709_scene");
-        break;
-    case dpx::kUserDefined:
-        if (!std::isnan(m_dpx.header.Gamma()) && m_dpx.header.Gamma() != 0) {
-            set_colorspace_rec709_gamma(m_spec, float(m_dpx.header.Gamma()));
-            break;
-        }
-        // intentional fall-through
-    /*case dpx::kPrintingDensity:
-        case dpx::kUnspecifiedVideo:
-        case dpx::kSMPTE274M:
-        case dpx::kITUR601:
-        case dpx::kITUR602:
-        case dpx::kNTSCCompositeVideo:
-        case dpx::kPALCompositeVideo:
-        case dpx::kZLinear:
-        case dpx::kZHomogeneous:
-        case dpx::kADX:
-        case dpx::kUndefinedCharacteristic:*/
-    default: break;
-    }
+    // DPX headers do not reliably identify a color space, so none is assumed
+    // from the transfer, colorimetric or gamma fields. Saying so is evidence,
+    // not a color space: resolution goes on through a FileRule or the
+    // filename, and the codes stay available as dpx:Transfer and
+    // dpx:Colorimetric.
+    m_spec.attribute("colorInteropID", "unknown");
     m_spec.attribute("dpx:Transfer", get_characteristic_string(
                                          m_dpx.header.Transfer(subimage)));
     // colorimetric characteristic

@@ -5120,6 +5120,85 @@ will be printed with the command `oiiotool --colorconfiginfo`.
 ```
 
 ```{eval-rst}
+.. option:: --colorspacesearch
+
+    Print, one name per line, color spaces in the current configuration whose
+    properties match the request. This command needs no image on the stack.
+    Data color spaces, and spaces the configuration puts in the ``is-unique``
+    category, have no shared properties to match and are never listed.
+
+    Four modifiers accept comma-separated terms: ``gamut=`` selects
+    primaries, ``transfer=`` selects transfer functions, ``encoding=``
+    selects encodings such as ``scene-linear`` or ``sdr-video``, and
+    ``state=`` selects ``scene``, ``display``, or ``all``. Image state is the
+    semantic state established from known identity or encoding evidence; it is
+    not inferred from OpenColorIO reference-space topology. A state query may
+    derive that evidence when needed. A gamut or transfer term may name a
+    local color space or a color interop ID. Transfer terms
+    also accept a published curve family, a NamedTransform, or OpenColorIO
+    transform text. Transform text contains braces, which oiiotool would
+    evaluate as an expression, so give ``--evaloff`` first, and quote the term
+    so that its colons stay part of it (see the last example).
+
+    A transfer term is compared with each candidate's measured curve, never
+    with its name or declared ID. It matches a candidate recognized as the
+    same published curve family (such as ``srgb`` or ``g24``); otherwise the
+    two measured curves must agree within a tolerance set by the candidate's
+    own ``encoding`` attribute: narrowest by default, wider for ``log``, and
+    widest for ``hdr-video`` and ``hdr-cinema``. A candidate without one uses
+    the term's encoding, if any. A different recognized family does not by
+    itself rule a candidate out.
+
+    A leading ``-`` excludes proven matches and retains values that could not
+    be determined. A leading ``~`` selects only values proven different and
+    rejects values that could not be determined.
+    A leading ``\`` escapes an operator. Exclusions are applied last. Commas
+    and colons inside quotes or ``{}``, ``[]``, or ``()`` groups remain part
+    of the term, wherever in the list the term is written, and quotes around
+    a whole term are removed.
+
+    ``only=`` restricts candidates to the listed names and ``exclude=``
+    removes names; both take names exactly as the configuration spells them,
+    not aliases or roles. A modifier with an empty value is ignored, so an
+    empty ``only=`` does not restrict the candidates. ``active=`` and
+    ``inactive=`` select the configuration lists, and ``contextsensitive=1``
+    includes context-dependent definitions.
+    ``authoredencoding=1`` accepts only authored encoding attributes;
+    ``exhaustive=1`` asks OpenColorIO to evaluate candidates outside the
+    normal bounded inspection. ``key=`` and ``value=`` supply the same context
+    override used by ``--colorconvert``.
+
+    ``properties=1`` appends, after each name, the established transfer
+    property and its power where it has one, the equality and color interop
+    IDs, the encoding, the image state, and whether the transfer property was
+    computed, is available, and was derived. An ID, encoding or state this
+    configuration does not establish prints as ``-``, and a transfer it does
+    not establish prints as ``undetermined``. This may evaluate transforms
+    that a name-only or encoding-only search did not need.
+
+    The transfer property printed here honors what the configuration
+    declares: a space whose ``encoding`` attribute states a linear encoding
+    is reported as ``declared-linear`` with a power of 1 and ``derived=0``,
+    even when its transform measures as another pure power.
+    ``declared-linear`` is a property assertion taken from the configuration,
+    not a measurement; ``linear`` is printed only where the property was
+    derived (``derived=1``), such as a curve measured to be linear.
+    ``transfer=`` remains a measurement axis, as described above, so a space
+    that declares a linear encoding its definition does not implement prints
+    ``declared-linear`` here, is not selected by a ``transfer=`` term naming
+    a linear space, and is selected by a ``~`` term naming one.
+
+    Examples:
+
+    .. literalinclude:: ../../testsuite/oiiotool-colorspacesearch/src/manual-examples.py
+        :language: bash
+        :start-after: BEGIN-oiiotool-colorspacesearch-examples
+        :end-before: END-oiiotool-colorspacesearch-examples
+
+    This command was added in OIIO 3.3.
+```
+
+```{eval-rst}
 .. option:: --colorconfig <filename>
 
     Instruct :program:`oiiotool` to read an OCIO configuration from a custom
@@ -5629,4 +5708,3 @@ section should not be expected to work with deep images.
     "nonfinite") are repaired.  The *strategy* may be either `black` or
     `error`.
 ```
-

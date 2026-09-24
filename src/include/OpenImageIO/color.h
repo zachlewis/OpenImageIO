@@ -91,8 +91,8 @@ public:
     /// power or is unknown. Piecewise curves such as sRGB's are never
     /// approximated by a gamma, so they report 0. A color space whose config
     /// declares a linear encoding is honored rather than measured: it reports
-    /// 1.0 even where its transforms are a curve no exponent describes. Only
-    /// a measured pure-power exponent replaces that declared 1.0.
+    /// 1.0 even where its transforms measure as a different pure power or as a
+    /// curve no exponent describes.
     float transfer_function_gamma() const noexcept;
 
 private:
@@ -526,8 +526,7 @@ public:
     /// cannot be derived is left unavailable rather than guessed from the
     /// color space's name. What the config *declares* is honored rather than
     /// measured: a color space declaring a linear encoding reports a transfer
-    /// function gamma of 1.0 unless measurement contradicts it with a
-    /// pure-power exponent of its own.
+    /// function gamma of 1.0 even if its transform measures as another power.
     ///
     /// @version 3.3
     OIIO_NODISCARD ColorSpaceInfo

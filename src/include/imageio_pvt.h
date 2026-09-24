@@ -10,6 +10,8 @@
 #ifndef OPENIMAGEIO_IMAGEIO_PVT_H
 #define OPENIMAGEIO_IMAGEIO_PVT_H
 
+#include <optional>
+
 #include <OpenImageIO/imageio.h>
 #include <OpenImageIO/thread.h>
 #include <OpenImageIO/timer.h>
@@ -17,6 +19,7 @@
 
 
 OIIO_NAMESPACE_3_1_BEGIN
+class ColorConfig;
 class ColorSpaceInfo;
 
 /// How much of a color space's decoding transfer function has been
@@ -72,6 +75,8 @@ struct OIIO_API ColorSpaceInfoAccess {
     static string_view equality_id(const ColorSpaceInfo& info) noexcept;
     /// The authored Color Interop ID, otherwise one recognized by derivation.
     static string_view color_interop_id(const ColorSpaceInfo& info) noexcept;
+    /// The authored OCIO encoding, or one adopted by derivation.
+    static string_view encoding(const ColorSpaceInfo& info) noexcept;
     /// "scene" or "display", when established.
     static string_view image_state(const ColorSpaceInfo& info) noexcept;
     /// Whether evaluation of the field completed; its value may still be
@@ -409,11 +414,138 @@ OIIO_API bool test_read_image(ImageInput& inp, int subimage, int miplevel,
 /// Read all subimage and MIP levels of the open file.
 OIIO_API bool test_read_all_images(ImageInput& inp,
                                    TypeDesc format = TypeUInt8);
+
+/// What a color space property search asks of a configuration.
+///
+/// Each of the four axes is a list of *hint terms*. An empty axis constrains
+/// nothing. Within an axis:
+///
+/// - A leading `-` makes the term an *exclusion*: it subtracts candidates
+///   proven to match, and leaves a candidate whose property could not be
+///   derived in play.
+/// - A leading `~` makes the term an *inverse*: it selects candidates proven
+///   to have a *different* property, and rejects ones whose property is
+///   unknown.
+/// - A leading `\` escapes one of `-`, `~` or `\` so a value may begin with
+///   one literally. A bare operator, a dangling escape, or an escape of any
+///   other character is an error, so a typo cannot silently become a value.
+/// - An axis carrying only exclusions starts selected and subtracts. Any
+///   other term makes selection opt-in. Exclusions are applied last and win,
+///   so `-x` beats `~x`.
+///
+/// A term's value is resolved in this order, and a name this configuration
+/// defines always wins: a local color space name, alias or role (expanded
+/// through the effective context when it spells a context variable); then a
+/// known Color Interop ID; then the axis's own literal vocabulary.
+///
+/// - `chromaticities` also accepts a gamut component of an interop ID, such
+///   as `rec709` or `ap1`, which stands for every published set of primaries
+///   spelled that way.
+/// - `transfer_functions` also accepts a curve family (`srgb`, `g24`, `log`
+///   style `crv_*` spellings), a NamedTransform this configuration or the
+///   bundled reference configuration defines, and raw OpenColorIO transform
+///   text. The text is parsed by OpenColorIO itself and read as a
+///   *from-reference* (encoding direction) transform, then evaluated in this
+///   configuration under the effective context, so `ColorSpaceTransform`
+///   links, roles and file search paths all resolve the way a conversion
+///   would resolve them.
+/// - `encodings` accepts any encoding string this configuration or the
+///   bundled reference configuration uses. A candidate carries a *set* of up
+///   to two encodings, so an inverse term selects only when the set is
+///   non-empty and no member matches.
+/// - `image_states` accepts `scene`, `display` or `all`. State is
+///   established by semantic identity/encoding evidence, not by whether OCIO
+///   stores the definition in its scene or display reference space. A
+///   candidate with unknown state matches neither an include nor an inverse
+///   term, but remains selected by an exclusion-only axis unless it is proven
+///   to match the excluded state.
+///
+/// Transfer facts are always empirical. Neither a declared interop ID, nor a
+/// name, nor a `scene-linear` encoding label establishes a candidate's curve:
+/// a space that declares itself sRGB and implements a 2.2 power matches a
+/// search for that power and not one for sRGB. A candidate that agrees with
+/// the term on a published curve family matches on that family; otherwise the
+/// two measurements are compared within the tolerance the candidate's encoding
+/// sets, or the term's encoding where the candidate has none.
+struct ColorSpaceSearchOptions {
+    /// Primaries the candidate must (or must not) carry.
+    std::vector<std::string> chromaticities;
+    /// Transfer function the candidate must (or must not) carry.
+    std::vector<std::string> transfer_functions;
+    /// Encoding the candidate must (or must not) carry.
+    std::vector<std::string> encodings;
+    /// Image state (`scene` or `display`) the candidate must carry.
+    std::vector<std::string> image_states;
+
+    /// Restrict the candidate universe to these canonical local names.
+    /// Unset leaves it unrestricted; an empty vector matches nothing. Names
+    /// are matched exactly as the configuration spells them; no alias, role
+    /// or identity resolution is performed here.
+    std::optional<std::vector<std::string>> only;
+    /// Remove these canonical local names from the candidate universe.
+    std::vector<std::string> exclude;
+
+    /// Consider color spaces the configuration leaves active.
+    bool include_active = true;
+    /// Consider color spaces the configuration lists inactive. With both
+    /// this and `include_active` false, nothing is considered.
+    bool include_inactive = false;
+    /// Consider color spaces whose definition varies with a context
+    /// variable. They are excluded by default because what such a space is
+    /// depends on a context the caller may not have supplied.
+    bool include_context_sensitive = false;
+    /// Probe candidates the bounded structural admission would not measure.
+    /// This reads what OpenColorIO builds rather than what the definition is
+    /// authored as, so it reaches spaces backed by external resources; a
+    /// definition it still cannot probe reports its properties as unknown
+    /// rather than fabricating them. A later bounded search still declines a
+    /// definition it would not have probed itself: admission is asked before
+    /// any measurement is read.
+    bool exhaustive = false;
+    /// Match encoding against explicitly authored encoding attributes
+    /// only. By default a candidate may also match through the encoding of
+    /// the reference definition it is identified with, both as the fallback
+    /// for an unset attribute and as a second acceptable value beside an
+    /// authored one -- which identifies the candidate, and so may derive.
+    /// Restricting the query to authored attributes reads the inventory and
+    /// stops.
+    bool authored_encoding_only = false;
+
+    /// Added to the configuration's own context, following the
+    /// comma-separated convention of `createColorProcessor()`.
+    std::string context_key;
+    std::string context_value;
+};
+
+/// Every color space in `config` whose properties the options select, as
+/// canonical local names. Data spaces, and spaces in the `is-unique`
+/// category, have no shared properties to match and are never candidates.
+///
+/// This reports what definitions *are*, not which of them may stand in
+/// for one another: two spaces returned by one search share those
+/// properties to the response tolerance `derive_color_space_info()`
+/// describes, and whether a conversion between them may be skipped
+/// remains what `equivalent()` alone answers.
+///
+/// Results are ordered deterministically: context-invariant spaces first,
+/// then active before inactive, then by name.
+///
+/// A malformed term, or one nothing can resolve, sets the configuration's
+/// error state and returns an empty vector -- as does a context this build
+/// could not acquire, which is never a verdict about the configuration and is
+/// attempted again on the next call. Facts derived for a search are retained
+/// on exactly the terms `get_color_interop_id()` states, so a repeated search
+/// reuses them.
+OIIO_API std::vector<std::string>
+find_color_spaces(const ColorConfig& config,
+                  const ColorSpaceSearchOptions& options = {});
 }  // namespace pvt
 OIIO_NAMESPACE_3_1_END
 
 OIIO_NAMESPACE_BEGIN
 namespace pvt {
+using v3_1::pvt::ColorSpaceSearchOptions;
+using v3_1::pvt::find_color_spaces;
 using v3_1::pvt::test_read_all_images;
 using v3_1::pvt::test_read_image;
 }  // namespace pvt

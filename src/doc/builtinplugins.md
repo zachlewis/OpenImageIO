@@ -319,7 +319,8 @@ control aspects of the writing itself:
 ```
 
 The writer does not infer a non-linear gamma for a non-Rec.709 color space
-from `oiio:ColorSpace`. This output path does not also derive and write that
+from `oiio:ColorSpace`, or take one from an `oiio:Gamma` beside
+`chromaticities` other than Rec.709's. This output path does not also derive and write that
 color space's matching primaries, so a gamma by itself would make a false
 Rec.709 claim.
 
@@ -1700,6 +1701,50 @@ The official OpenEXR site is <http://www.openexr.com/>.
 
 ```
 
+On reading, a header's `colorInteropID` becomes the image's
+`"oiio:ColorSpace"` label, except for the value `unknown`, which says that
+whoever wrote the file could not identify the pixels rather than anything
+about the pixels themselves. The label is then left unset and the attribute
+kept, so that a later color conversion resolves the source from the rest of
+the header (see Section {ref}`sec-metadata-color`) and only concludes
+`unknown` when nothing else in it helps. A part of a multi-part file with no
+`colorInteropID` of its own inherits the first part's as its label, which the
+part's own metadata, such as its `chromaticities`, still outranks when a
+conversion resolves its source; an inherited `unknown` is instead recorded as
+the part's own `colorInteropID`, the evidence it would be had the part stated
+it. With `openexr:ColorInteropIDPolicy` set to `strict`, `unknown` is checked
+as a missing ID is, in any part, because it makes no claim. OpenEXR requires
+a later part's `chromaticities` to equal the first part's, so a later part's
+that differ, or that the first part lacks, are not written; the part's own
+`colorInteropID` states its encoding instead, and a part with none is written
+with `colorInteropID` `unknown` rather than inherit the first part's.
+
+Following the ASWF Color Interop Forum's [OpenEXR
+recommendation](https://github.com/AcademySoftwareFoundation/ColorInterop/blob/main/Recommendations/04_OpenEXRFiles/OpenEXRFiles.md),
+a written file does not state its color space twice in contradicting ways. An
+OpenEXR `chromaticities` attribute states a linear encoding on the primaries
+it names, so it is written only when the encoding is known to be linear: an
+agreeing linear `colorInteropID`, or, when no ID establishes the transfer, an
+explicit `oiio:Gamma` of 1.0. This gamma-1 case deliberately preserves a
+linear encoding even when the primaries are not Rec.709. Chromaticities
+contradict a `colorInteropID` whose encoding is not linear
+-- primaries carried in from a display-encoded source such as a PNG `cHRM`
+chunk -- and equally a linear ID whose own primaries OpenImageIO establishes
+to be different ones. In both cases only the ID is written, even if the
+`ImageSpec` holds chromaticities. Chromaticities that state a linear ID's own
+primaries restate it and are written. This deliberately departs, for now,
+from the recommendation that `chromaticities` not be set beside a
+`colorInteropID` (other than for ST 2065-4): it gives readers that do not yet
+understand `colorInteropID` time to adopt it while they still find the
+primaries. A future change will stop writing `chromaticities` beside a
+`colorInteropID` by default. Without affirmative linear evidence,
+including when an ID's encoding is unknown, they are left out. A part whose
+chromaticities are left out for that reason and that has no
+`colorInteropID` is written with `colorInteropID` `unknown`, so that it
+neither reads as stating nothing nor inherits the first part's ID. The AP0
+`chromaticities` an ST 2065-4 container requires beside `lin_ap0_scene` are of
+the first kind.
+
 **Configuration settings for OpenEXR input**
 
 When opening an OpenEXR ImageInput with a *configuration* (see
@@ -1894,8 +1939,20 @@ files use the file extension {file}`.png`.
    * - ``CICP``
      - int[4]
      - CICP color space information (see Section :ref:`sec-metadata-color`).
-       Note that this attribute is only supported if OIIO was built against
+       Note that this attribute is only written if OIIO was built against
        libPNG 1.6.45 or newer.
+   * - ``png:sRGB``
+     - int
+     - The rendering intent from an actual sRGB chunk. This attribute is
+       absent when the reader merely defaults its color-space label to sRGB.
+   * - ``oiio:Gamma``
+     - float
+     - The decoding exponent from a gAMA chunk, retaining its wire precision
+       rather than rounding to the reader's color-space label.
+   * - ``chromaticities``
+     - float[8]
+     - RGBW xy coordinates from a cHRM chunk. These facts are preserved
+       independently of gamma and the reader's color-space label.
    * - ``ICCProfile``
      - uint8[]
      - The ICC color profile. A variety of other ``ICCProfile:*`` attributes
@@ -1997,23 +2054,38 @@ it. An sRGB image gets the `sRGB` chunk; a color space with a CICP code point
 gets `cICP` (libPNG 1.6.45 or newer). A color space with neither, but whose
 primaries and pure-power transfer function OpenImageIO knows -- ACEScg or
 linear DCI-P3, for example -- gets `cHRM` and `gAMA`, which carry both
-exactly. A Rec.709 gamma is written with `gAMA` alone, as is a linear color
-space whose primaries are unknown or lie outside what `cHRM` can hold, such
-as ACES2065-1's negative blue y. libPNG older than 1.6.44 refuses some
-chromaticities `cHRM` can hold, ACEScg's red among them, so with it ACEScg
-gets `gAMA` alone as well, and a pure power on those primaries gets no color
-chunk. `cHRM` is written only beside a transfer
-function the file also carries, and `gAMA` alone only for a Rec.709 gamma or
-a linear color space, so a color space whose transfer function or primaries
-the file cannot carry (ACEScc, ACEScct, a camera log encoding, or a D50
-display gamma, for example) is written with no color chunk at all. An
-embedded ICC profile states the primaries and the transfer function itself,
-so it suppresses `cHRM` and any `gAMA` taken from the color space's measured
-properties. With `OPENIMAGEIO_DEBUG` set, the writer says when it drops a
-color space's primaries or transfer function.
+exactly. This includes a Rec.709 pure gamma when no CICP code point carries
+that transfer. `gAMA` is written alone only when there are no known primaries
+to state or known primaries lie outside what `cHRM` can hold, such as
+ACES2065-1's negative blue y; it preserves the transfer without implying a
+gamut. libPNG older than 1.6.44 refuses some chromaticities `cHRM` can hold,
+ACEScg's red among them, so with it ACEScg gets `gAMA` alone as well. Where
+known primaries are lost, only a linear `gAMA` is written alone, so a pure
+power on them gets no color chunk. `cHRM` is written only beside a transfer
+function the file also carries, so a color space whose transfer function the
+file cannot carry (ACEScc, ACEScct, or a camera log encoding, for example) is
+written with no color chunk at all. An embedded ICC profile states the primaries and the
+transfer function itself, so it suppresses `cHRM` and any `gAMA` taken from
+the color space's measured properties. With `OPENIMAGEIO_DEBUG` set, the
+writer says when it drops a color space's primaries or transfer function.
 
-The PNG reader names a file with a `gAMA` chunk as a Rec.709 gamma, such as
-`g22_rec709_scene`, and does not read `cHRM`.
+The PNG reader records the color chunks it finds as `png:sRGB`, `oiio:Gamma`
+and `chromaticities`, as the file states them with any libPNG, and names
+the color space only where the file does: an
+`sRGB` chunk as `srgb_rec709_scene`, and `gAMA` beside a `cHRM` stating the
+Rec.709 primaries (to within 1e-4) as a Rec.709 gamma such as
+`g22_rec709_scene`. A `gAMA` chunk without `cHRM`, other primaries, or a
+`cHRM` with no `gAMA`, leaves `"oiio:ColorSpace"` unset. A color conversion
+resolves the recorded gamma by transfer function, display-referred first and
+then scene-referred, without treating the missing primaries as a file label
+(see Section {ref}`sec-metadata-color`). A file with no color
+chunk at all is still read as `srgb_rec709_scene`, unless its
+`colorInteropID` text is `unknown` (in any letter case), which leaves the
+label unset. The reader does not consult the color configuration for any of
+this. An image with no `"oiio:ColorSpace"` that carries `oiio:Gamma` or
+`chromaticities` is written with those values rather than as sRGB, and one
+whose `colorInteropID` is `unknown` gets no color chunk beyond them, so it
+reads back as it was written.
 
 **Note on premultiplication**
 
@@ -2583,7 +2655,8 @@ control aspects of the writing itself:
 ```
 
 The writer does not infer a non-linear gamma for a non-Rec.709 color space
-from `oiio:ColorSpace`. This output path does not also derive and write that
+from `oiio:ColorSpace`, or take one from an `oiio:Gamma` beside
+`chromaticities` other than Rec.709's. This output path does not also derive and write that
 color space's matching primaries, so a gamma by itself would make a false
 Rec.709 claim.
 
@@ -2841,7 +2914,8 @@ control aspects of the writing itself:
 ```
 
 The writer does not infer a non-linear gamma for a non-Rec.709 color space
-from `oiio:ColorSpace`. This output path does not also derive and write that
+from `oiio:ColorSpace`, or take one from an `oiio:Gamma` beside
+`chromaticities` other than Rec.709's. This output path does not also derive and write that
 color space's matching primaries, so a gamma by itself would make a false
 Rec.709 claim.
 
@@ -3382,4 +3456,3 @@ of the z-buffer. Zfile files use the file extension {file}`.zfile`.
 ```
 
 [st 2065-4]: https://pub.smpte.org/pub/st2065-4/
-

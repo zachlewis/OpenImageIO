@@ -159,6 +159,8 @@
 #include <OpenImageIO/imagebufalgo_util.h>
 #include <OpenImageIO/strutil.h>
 
+#include "imageio_pvt.h"
+
 using Imath::Color3f;
 
 
@@ -1138,9 +1140,16 @@ flip_impl(ImageBuf& dst, ImageBuf* exposuremap, FLIPResults* result,
     // lin_rec709_scene (linear Rec.709, D65).
     auto check_and_convert = [&](ImageBuf& img, const ImageBuf& orig) -> bool {
         std::string cs = orig.spec().get_string_attribute("oiio:ColorSpace");
-        if (cs.empty())
-            return true;  // untagged: assume already lin_rec709_scene
         const ColorConfig& cc = ColorConfig::default_colorconfig();
+        // Untagged: what its metadata establishes, if anything.
+        if (cs.empty())
+            cs = pvt::resolve_colorspace_source(
+                     cc, orig.spec(), orig.name(), "", "", "", "",
+                     pvt::FileRulesPrecedence::MetadataOnly,
+                     pvt::MissingColorSpace::Preserve)
+                     .name;
+        if (cs.empty())
+            return true;  // states nothing: assume already lin_rec709_scene
         if (cc.equivalent(cs, "lin_rec709_scene"))
             return true;  // already linear Rec.709
         ImageBuf converted;

@@ -70,8 +70,12 @@ public:
     bool autoorient;
     bool autocc;                   // automatically color correct
     bool autoccunpremult = false;  // does autocc unpremult/premult?
-    bool autopremult;              // auto premult unassociated alpha input
-    bool nativeread;               // force native data type reads
+    std::string autoccfailover;    // fallback source assignment for autocc
+    pvt::FileRulesPrecedence autoccfilerules
+        = pvt::FileRulesPrecedence::Fallback;
+    pvt::MissingColorSpace autoccmissing = pvt::MissingColorSpace::Preserve;
+    bool autopremult;  // auto premult unassociated alpha input
+    bool nativeread;   // force native data type reads
     bool printinfo_verbose;
     bool metamerge;  // Merge source input metadata into output
     int cachesize;
@@ -315,7 +319,8 @@ public:
     // extract the options and insert them into a ParamValueList. For example,
     // having attribute "a" with value "1" and attribute "pi" with value
     // "3.14".
-    static ParamValueList extract_options(string_view command);
+    static ParamValueList extract_options(string_view command,
+                                          string_view empty_option = {});
 
     // Error base case -- single unformatted string.
     void error(string_view command, string_view message = "") const;

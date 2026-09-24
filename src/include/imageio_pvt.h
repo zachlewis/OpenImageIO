@@ -402,6 +402,25 @@ namespace pvt {
 inline constexpr string_view autocc_terminal_unknown_attrib
     = "oiio:autoccTerminalUnknown";
 
+/// For writers: whether the label `name` agrees with the color metadata
+/// stored beside it, that is, none of it is known to contradict `name`. An
+/// ICC profile is not identified here, and a PNG sRGB chunk ("png:sRGB")
+/// overrides the gamma and chromaticities beside it.
+OIIO_API bool colorspace_label_agrees(const ColorConfig& config,
+                                      const ImageSpec& spec, string_view name);
+
+/// Attach the portable identity established by the shared resolver under the
+/// source container's rules. Existing explicit identity metadata wins. A
+/// config-local name or process-local selector supplies no portable ID. The
+/// optional context is applied to both resolution and identity derivation.
+/// `require_strong_source` accepts only a rule that establishes an identity
+/// itself -- the ACES flag, colorInteropID, cICP, ICC or complete numeric
+/// metadata -- so a weaker fact such as a PNG sRGB chunk publishes nothing.
+OIIO_API void finalize_resolved_color_metadata(
+    ImageSpec& spec, const ColorConfig& config, string_view source_format,
+    string_view source_filename, string_view context_key = {},
+    string_view context_value = {}, bool require_strong_source = false);
+
 /// Controls where OpenColorIO FileRules participate in input color-space
 /// resolution.
 enum class FileRulesPrecedence {
@@ -433,6 +452,7 @@ enum class ColorSpaceSource {
     FileRulesDefault,
     DefaultRole,
     TerminalPolicy,
+    ICC,
 };
 
 /// The outcome of metadata color-space resolution.
@@ -501,13 +521,19 @@ struct ResolverStep {
 /// contradictions or carriage losses. A null `trace` costs nothing: no step
 /// is built and no reason string is formatted. Rules after the one that
 /// terminates the executor are not reached and not recorded.
+///
+/// `synthesize` allows the ICC and numeric rules to mint a process-local
+/// `<synthetic>` selector for an encoding this configuration has no name for.
+/// A selector is a conversion endpoint and nothing else, so a caller that is
+/// not resolving a conversion source passes false, and those rules then
+/// answer only with a name the configuration can already spell.
 OIIO_API ColorSpaceResolution resolve_colorspace_source(
     const ColorConfig& config, const ImageSpec& spec, string_view filename = "",
     string_view assignment = "", string_view failover = "",
     string_view context_key = "", string_view context_value = "",
     FileRulesPrecedence file_rules   = FileRulesPrecedence::Fallback,
     MissingColorSpace missing        = MissingColorSpace::Preserve,
-    std::vector<ResolverStep>* trace = nullptr);
+    std::vector<ResolverStep>* trace = nullptr, bool synthesize = true);
 
 /// Test harness for reading an image, analogous to calling
 /// ImageInput::read_image(), but it doesn't return pixels and does as little
@@ -526,10 +552,12 @@ OIIO_NAMESPACE_3_1_END
 OIIO_NAMESPACE_BEGIN
 namespace pvt {
 using v3_1::pvt::autocc_terminal_unknown_attrib;
+using v3_1::pvt::colorspace_label_agrees;
 using v3_1::pvt::ColorSpaceResolution;
 using v3_1::pvt::ColorSpaceSource;
 using v3_1::pvt::ColorSpaceStatus;
 using v3_1::pvt::FileRulesPrecedence;
+using v3_1::pvt::finalize_resolved_color_metadata;
 using v3_1::pvt::MissingColorSpace;
 using v3_1::pvt::resolve_colorspace_source;
 using v3_1::pvt::ResolverStep;

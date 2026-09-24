@@ -153,13 +153,15 @@ terminal facts: unknown unknown chroma <> sRGB <>
 Computing diff of "terminal_reread.exr" vs "expected_terminal_facts.exr"
 PASS
 exr color claim: srgb_rec709_scene srgb_rec709_scene chroma <>
-chroma_rec709: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329>
-chroma_rec709_copy: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329>
-chroma_rec709_iconvert: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329>
-chroma_d60white: lin_rec709_scene chroma <>
-chroma_d65white: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.31271, 0.32902>
-chroma_ap0: lin_rec709_scene chroma <>
-chroma_unknown: unknown chroma <>
+chroma_rec709: <lin_rec709_scene> chroma <>
+chroma_rec709_copy: <lin_rec709_scene> chroma <>
+chroma_rec709_iconvert: <lin_rec709_scene> chroma <>
+chroma_d60white: <lin_rec709_scene> chroma <>
+chroma_d65white: <lin_rec709_scene> chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.31271, 0.32902>
+chroma_ap0: <lin_rec709_scene> chroma <>
+chroma_unknown: <unknown> chroma <>
+chroma_label_ap0: <unknown> chroma <>
+chroma_label_ap0_copy: <unknown> chroma <>
 assert over AP0: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329> aces <> mdcv <1000>
 aces_flag_ap0 core 0: lin_ap0_scene aces <1> chroma <0.7347, 0.2653, 0, 1, 0.0001, -0.077, 0.32168, 0.33767>
 aces_flag_ap0 core 1: lin_ap0_scene aces <1> chroma <0.7347, 0.2653, 0, 1, 0.0001, -0.077, 0.32168, 0.33767>

@@ -344,9 +344,9 @@ inherit_vs_numeric.exr part 1 core 0: <lin_ap1_scene> <>
   to lin_rec709_scene: 1,0,0
 inherit_vs_numeric.exr part 1 core 1: <lin_ap1_scene> <>
   to lin_rec709_scene: 1,0,0
-unknown_first_chroma.exr part 1 core 0: <> <unknown>
+unknown_first_chroma.exr part 1 core 0: <lin_rec709_scene> <lin_rec709_scene>
   to lin_rec709_scene: 1,0,0
-unknown_first_chroma.exr part 1 core 1: <> <unknown>
+unknown_first_chroma.exr part 1 core 1: <lin_rec709_scene> <lin_rec709_scene>
   to lin_rec709_scene: 1,0,0
 unknown_first.exr part 1 core 0: <> <unknown>
 oiiotool ERROR: colorconvert : Unknown color space name (from="unknown", to="lin_rec709_scene")
@@ -384,26 +384,18 @@ Full command line was:
 oiiotool ERROR: colorconvert : Unknown color space name (from="unknown", to="lin_rec709_scene")
 Full command line was:
 > oiiotool --oiioattrib openexr:core 1 -a missing_first.exr --tocolorspace lin_rec709_scene --subimage 2 -d half -o lin_1_2_missing_first.exr lin_1_2_missing_first.exr --echo "  to lin_rec709_scene: {TOP.AVGCOLOR}"
-png_later.exr part 1 core 0: <> <unknown>
-oiiotool ERROR: colorconvert : Unknown color space name (from="unknown", to="lin_rec709_scene")
-Full command line was:
-> oiiotool --oiioattrib openexr:core 0 -a png_later.exr --tocolorspace lin_rec709_scene --subimage 1 -d half -o lin_0_1_png_later.exr lin_0_1_png_later.exr --echo "  to lin_rec709_scene: {TOP.AVGCOLOR}"
-png_later.exr part 1 core 1: <> <unknown>
-oiiotool ERROR: colorconvert : Unknown color space name (from="unknown", to="lin_rec709_scene")
-Full command line was:
-> oiiotool --oiioattrib openexr:core 1 -a png_later.exr --tocolorspace lin_rec709_scene --subimage 1 -d half -o lin_1_1_png_later.exr lin_1_1_png_later.exr --echo "  to lin_rec709_scene: {TOP.AVGCOLOR}"
+png_later.exr part 1 core 0: <lin_ap1_scene> <lin_ap1_scene>
+  to lin_rec709_scene: 1.70508,-0.130249,-0.0240021
+png_later.exr part 1 core 1: <lin_ap1_scene> <lin_ap1_scene>
+  to lin_rec709_scene: 1.70508,-0.130249,-0.0240021
 chroma_later.exr part 1 core 0: <lin_ap1_scene> <lin_ap1_scene>
   to lin_rec709_scene: 1.70508,-0.130249,-0.0240021
 chroma_later.exr part 1 core 1: <lin_ap1_scene> <lin_ap1_scene>
   to lin_rec709_scene: 1.70508,-0.130249,-0.0240021
-adobe_png_later.exr part 1 core 0: <> <unknown>
-oiiotool ERROR: colorconvert : Unknown color space name (from="unknown", to="lin_rec709_scene")
-Full command line was:
-> oiiotool --oiioattrib openexr:core 0 -a adobe_png_later.exr --tocolorspace lin_rec709_scene --subimage 1 -d half -o lin_0_1_adobe_png_later.exr lin_0_1_adobe_png_later.exr --echo "  to lin_rec709_scene: {TOP.AVGCOLOR}"
-adobe_png_later.exr part 1 core 1: <> <unknown>
-oiiotool ERROR: colorconvert : Unknown color space name (from="unknown", to="lin_rec709_scene")
-Full command line was:
-> oiiotool --oiioattrib openexr:core 1 -a adobe_png_later.exr --tocolorspace lin_rec709_scene --subimage 1 -d half -o lin_1_1_adobe_png_later.exr lin_1_1_adobe_png_later.exr --echo "  to lin_rec709_scene: {TOP.AVGCOLOR}"
+adobe_png_later.exr part 1 core 0: <g22_adobergb_display> <g22_adobergb_display>
+  to lin_rec709_scene: 0.219604,0.219604,0.219604
+adobe_png_later.exr part 1 core 1: <g22_adobergb_display> <g22_adobergb_display>
+  to lin_rec709_scene: 0.219604,0.219604,0.219604
 gamma_later.exr part 1 core 0: <> <unknown>
 oiiotool ERROR: colorconvert : Unknown color space name (from="unknown", to="lin_rec709_scene")
 Full command line was:
@@ -416,14 +408,10 @@ labeled_later.exr part 1 core 0: <g22_rec709_scene> <g22_rec709_scene>
   to lin_rec709_scene: 0.217651,0.217651,0.217651
 labeled_later.exr part 1 core 1: <g22_rec709_scene> <g22_rec709_scene>
   to lin_rec709_scene: 0.217651,0.217651,0.217651
-adobe_png.exr part 0 core 0: <> <unknown>
-oiiotool ERROR: colorconvert : Unknown color space name (from="unknown", to="lin_rec709_scene")
-Full command line was:
-> oiiotool --oiioattrib openexr:core 0 -a adobe_png.exr --tocolorspace lin_rec709_scene --subimage 0 -d half -o lin_0_0_adobe_png.exr lin_0_0_adobe_png.exr --echo "  to lin_rec709_scene: {TOP.AVGCOLOR}"
-adobe_png.exr part 0 core 1: <> <unknown>
-oiiotool ERROR: colorconvert : Unknown color space name (from="unknown", to="lin_rec709_scene")
-Full command line was:
-> oiiotool --oiioattrib openexr:core 1 -a adobe_png.exr --tocolorspace lin_rec709_scene --subimage 0 -d half -o lin_1_0_adobe_png.exr lin_1_0_adobe_png.exr --echo "  to lin_rec709_scene: {TOP.AVGCOLOR}"
+adobe_png.exr part 0 core 0: <g22_adobergb_display> <g22_adobergb_display>
+  to lin_rec709_scene: 0.219604,0.219604,0.219604
+adobe_png.exr part 0 core 1: <g22_adobergb_display> <g22_adobergb_display>
+  to lin_rec709_scene: 0.219604,0.219604,0.219604
 oiiotool ERROR: colorconvert : Unknown color space name (from="unknown", to="Linear")
 Full command line was:
 > oiiotool --colorconfig default_linear.ocio -a unknown_first.exr --tocolorspace Linear --subimage 1 --echo "unknown_first.exr part 1 under default_linear: converted"
@@ -436,3 +424,12 @@ Full command line was:
 > oiiotool --pattern constant:color=1,0,0 4x4 3 -d half --eraseattrib oiio:ColorSpace --attrib colorInteropID unknown --attrib oiio:subimagename beauty -sattrib openexr:ColorInteropIDPolicy strict --pattern constant:color=0,1,0 4x4 3 -d half --attrib oiio:ColorSpace lin_ap1_scene --attrib oiio:subimagename specular --siappendall -o strict_unknown_first.exr
 strict_unknown_later.exr written
 strict_unknown_both.exr written
+oiiotool ERROR: -o : OpenEXR subimage 1 has color space "g22_adobergb_display", different from "lin_ap1_scene" in the first subimage
+Full command line was:
+> oiiotool --pattern constant:color=1,0,0 4x4 3 -d half --attrib oiio:ColorSpace lin_ap1_scene --attrib oiio:subimagename beauty -sattrib openexr:ColorInteropIDPolicy strict --pattern constant:color=0,1,0 4x4 3 -d half --iccread adobergb.icc --attrib oiio:subimagename icc --siappendall -o strict_icc_later.exr
+oiiotool ERROR: -o : OpenEXR subimage 1 has color space "lin_rec709_scene", different from "lin_ap1_scene" in the first subimage
+Full command line was:
+> oiiotool --pattern constant:color=1,0,0 4x4 3 -d half --attrib oiio:ColorSpace lin_ap1_scene --attrib oiio:subimagename beauty -sattrib openexr:ColorInteropIDPolicy strict --pattern constant:color=0,1,0 4x4 3 -d half --iccread adobergb.icc --attrib colorInteropID lin_rec709_scene --attrib oiio:subimagename stated --siappendall -o strict_stated_mismatch.exr
+icc_later.exr part 1: <g22_adobergb_display> <g22_adobergb_display>
+strict_withheld_later.exr part 1: <> <unknown>
+strict_stated_later.exr part 1: <lin_ap1_scene> <lin_ap1_scene>

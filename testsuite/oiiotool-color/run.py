@@ -725,10 +725,10 @@ command += oiiotool ("--autocc terminal_facts.exr -d float "
 command += oiiotool ("--fail 0 --warn 0 terminal_reread.exr "
                      "expected_terminal_facts.exr --diff")
 
-# CIF Recommendation 04: an OpenEXR file states its color space once. The
-# writer derives the ID from the color space, and the PNG chromaticities that
-# came in with the pixels describe a non-linear encoding, which OpenEXR
-# chromaticities cannot state, so they are not written beside it.
+# Color Interop Forum Recommendation 04: an OpenEXR file states its color
+# space once. The writer derives the ID from the color space, and the PNG
+# chromaticities that came in with the pixels describe a non-linear encoding,
+# which OpenEXR chromaticities cannot state, so they are not written beside it.
 command += oiiotool ("-i:autocc=0 srgb_chunk_adobe.png -d float "
                      "-o interop_id_only.exr")
 command += oiiotool ("interop_id_only.exr --echo \"exr color claim: "
@@ -736,30 +736,33 @@ command += oiiotool ("interop_id_only.exr --echo \"exr color claim: "
                      "<{TOP['chromaticities']}>\"")
 
 # Chromaticities that restate the ID's own linear encoding are not a second,
-# conflicting claim, so a plain OpenEXR copy keeps them, as it always has. Only
-# primaries that contradict the ID are dropped. An ID of "unknown" establishes
+# conflicting claim, so a plain OpenEXR copy keeps them, as it always has.
+# Primaries that contradict the ID are dropped. An ID of "unknown" establishes
 # no linear encoding, so its chromaticities are dropped too. A D60 white beside
 # Rec.709 primaries is a different gamut, while a D65 white stated to five
-# decimals is the same one.
+# decimals is the same one. A label is only a derived guess: contradictory
+# numeric evidence wins, and the writer records that the identity is unknown.
 REC709 = "0.64,0.33,0.30,0.60,0.15,0.06,0.3127,0.3290"
 REC709_D60 = "0.64,0.33,0.30,0.60,0.15,0.06,0.32168,0.33767"
 REC709_D65_5DP = "0.64,0.33,0.30,0.60,0.15,0.06,0.31271,0.32902"
 AP0 = "0.7347,0.2653,0,1,0.0001,-0.077,0.32168,0.33767"
 for name, tag, xy in [ ("chroma_rec709", "--iscolorspace lin_rec709_scene", REC709),
-                       ("chroma_d60white", "--iscolorspace lin_rec709_scene", REC709_D60),
-                       ("chroma_d65white", "--iscolorspace lin_rec709_scene", REC709_D65_5DP),
-                       ("chroma_ap0", "--iscolorspace lin_rec709_scene", AP0),
-                       ("chroma_unknown", "--attrib colorInteropID unknown", REC709) ] :
+                       ("chroma_d60white", "--attrib colorInteropID lin_rec709_scene", REC709_D60),
+                       ("chroma_d65white", "--attrib colorInteropID lin_rec709_scene", REC709_D65_5DP),
+                       ("chroma_ap0", "--attrib colorInteropID lin_rec709_scene", AP0),
+                       ("chroma_unknown", "--attrib colorInteropID unknown", REC709),
+                       ("chroma_label_ap0", "--iscolorspace lin_rec709_scene", AP0) ] :
     command += oiiotool ("--pattern constant:color=.25,.3,.4 2x2 3 " + tag
                          + " \"--attrib:type=float[8]\" chromaticities " + xy
                          + " -d half -o " + name + ".exr")
 command += oiiotool ("chroma_rec709.exr -o chroma_rec709_copy.exr")
 command += run_app (oiio_app("iconvert") + "chroma_rec709.exr chroma_rec709_iconvert.exr")
+command += oiiotool ("chroma_label_ap0.exr -o chroma_label_ap0_copy.exr")
 for name in [ "chroma_rec709", "chroma_rec709_copy", "chroma_rec709_iconvert",
               "chroma_d60white", "chroma_d65white", "chroma_ap0",
-              "chroma_unknown" ] :
+              "chroma_unknown", "chroma_label_ap0", "chroma_label_ap0_copy" ] :
     command += oiiotool (name + ".exr --echo \"" + name + ": "
-                         "{TOP.'colorInteropID'} chroma <{TOP['chromaticities']}>\"")
+                         "<{TOP['colorInteropID']}> chroma <{TOP['chromaticities']}>\"")
 
 # --iscolorspace calls set_colorspace, which makes the name authoritative:
 # the image's other color metadata is kept where it agrees, rewritten where

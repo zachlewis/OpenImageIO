@@ -345,6 +345,8 @@ macro (oiio_add_all_tests)
 
     oiio_add_tests (oiiotool-color
                     FOUNDVAR OpenColorIO_FOUND)
+    oiio_add_tests (oiiotool-color-icc
+                    FOUNDVAR OpenColorIO_FOUND)
 
     # Tests to run with HWY enabled.
     # Remember to add tests here as hwy enabled IBA functions are added

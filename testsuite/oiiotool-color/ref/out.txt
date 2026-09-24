@@ -9,6 +9,179 @@ nope: 0.5,0.5,0.5 half
 raw: 0.5,0.5,0.5 half
 acescg: 0.5,0.5,0.5 half
 srgb_tx: 0.735352,0.735352,0.735352 half
+Computing diff of "autocc_adobe_g22.exr" vs "expected_adobe_g22.exr"
+PASS
+Computing diff of "retagged_adobe.exr" vs "expected_adobe_g22.exr"
+PASS
+Computing diff of "autocc_adobe_g22_scene.exr" vs "expected_adobe_g22_scene.exr"
+PASS
+Computing diff of "autocc_misnamed.exr" vs "expected_adobe_g22.exr"
+PASS
+Computing diff of "autocc_chunk.exr" vs "expected_chunk.exr"
+PASS
+adobe_g22: ACEScg lin_ap1_scene
+rec709_g15: g15_rec709_scene
+asserted g15: chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329> gamma <1.49999>
+Computing diff of "autocc_rules_metadata.exr" vs "expected_adobe_g22.exr"
+PASS
+Computing diff of "autocc_rules_first.exr" vs "expected_chunk.exr"
+PASS
+Computing diff of "autocc_rules_input.exr" vs "expected_adobe_g22.exr"
+PASS
+Computing diff of "autocc_rules_reset.exr" vs "expected_adobe_g22.exr"
+PASS
+Computing diff of "autocc_rules_data.exr" vs "expected_rules_data.exr"
+PASS
+rules data: data data
+oiiotool ERROR: -i:autocc=1:filerules=bogus : Unknown filerules value "bogus" (expected metadata, first, or fallback)
+Full command line was:
+> oiiotool --nostderr -i:autocc=1:filerules=bogus adobe_g22.png
+Computing diff of "autocc_failover.exr" vs "expected_failover.exr"
+PASS
+failover: lin_ap1_scene lin_ap1_scene
+Computing diff of "dcdm_autocc.exr" vs "dcdm_explicit.exr"
+PASS
+Computing diff of "autocc_no_failover.exr" vs "expected_no_failover.exr"
+PASS
+Computing diff of "autocc_empty_failover.exr" vs "expected_no_failover.exr"
+PASS
+Computing diff of "autocc_invalid_failover.exr" vs "expected_no_failover.exr"
+PASS
+Computing diff of "autocc_input_failover.exr" vs "expected_input_failover.exr"
+PASS
+Resolver rule assignment: skipped
+Resolver rule ACES: skipped
+Resolver rule FileRules first: skipped
+Resolver rule colorInteropID: missed
+Resolver rule CICP: missed
+Resolver rule ICC: skipped
+Resolver rule PNG sRGB: skipped
+Resolver rule numeric metadata: skipped
+Resolver rule FileRules fallback: missed
+Resolver rule reader label: skipped
+Resolver rule failover: matched
+5
+1
+1
+1
+Computing diff of "trace_debug.exr" vs "trace_quiet.exr"
+PASS
+traced: lin_ap1_scene lin_ap1_scene
+untraced: lin_ap1_scene lin_ap1_scene
+Resolver rule CICP: matched
+Resolver rule CICP: approximate
+Computing diff of "cicp_rec601.exr" vs "cicp_240m.exr"
+PASS
+0
+Resolver rule numeric metadata: invalid
+1
+1
+Computing diff of "invalid_quiet.exr" vs "expected_invalid.exr"
+PASS
+Computing diff of "invalid_debug.exr" vs "invalid_quiet.exr"
+PASS
+malformed traced: lin_ap1_scene lin_ap1_scene
+malformed untraced: lin_ap1_scene lin_ap1_scene
+ordinary source: <> unknown
+ordinary source cased core=1: <> Unknown
+ordinary source cased core=0: <> Unknown
+no facts: <> <>
+Computing diff of "ordinary_failover.exr" vs "expected_ordinary_failover.exr"
+PASS
+Computing diff of "ordinary_absent.exr" vs "expected_ordinary_absent.exr"
+PASS
+ordinary absent: <> unknown
+Computing diff of "missing_default.exr" vs "expected_missing_default.exr"
+PASS
+  Metadata and FileRules for no_facts.exr resolve to "FileDefault" (FileRules default; resolved)
+Computing diff of "missing_data.exr" vs "expected_no_facts_absent.exr"
+PASS
+missing data: <data> data
+Computing diff of "missing_input_none.exr" vs "expected_no_facts_absent.exr"
+PASS
+Computing diff of "missing_reset.exr" vs "expected_no_facts_absent.exr"
+PASS
+oiiotool ERROR: -i:autocc=1:missing=bogus : Unknown missing value "bogus" (expected none or config)
+Full command line was:
+> oiiotool --nostderr -i:autocc=1:missing=bogus no_facts.exr
+Computing diff of "stated_unknown.exr" vs "expected_ordinary_absent.exr"
+PASS
+stated unknown: <> unknown
+oiiotool ERROR: -i:autocc=1:missing=config:key=DEFAULT_SOURCE:value=Missing : Config has no usable default assignment
+Full command line was:
+> oiiotool --nostderr --colorconfig missing_no_default.ocio -i:autocc=1:missing=config:key=DEFAULT_SOURCE:value=Missing no_facts.exr
+Computing diff of "configured_result.exr" vs "expected_configured_result.exr"
+PASS
+Computing diff of "terminal_Reference.exr" vs "expected_terminal_unknown.exr"
+PASS
+Computing diff of "terminal_again_Reference.exr" vs "expected_terminal_unknown.exr"
+PASS
+terminal unknown: <> unknown marker <>
+Computing diff of "caught_Reference.exr" vs "expected_caught_Reference.exr"
+PASS
+Computing diff of "nospace_failover.exr" vs "expected_terminal_unknown.exr"
+PASS
+failover mistake: <> unknown marker <>
+Computing diff of "undefined_var_failover.exr" vs "expected_terminal_unknown.exr"
+PASS
+failover undefined variable: <> unknown marker <>
+Computing diff of "autocc_shot_match.exr" vs "expected_shot_match.exr"
+PASS
+Computing diff of "autocc_rules_shot_match.exr" vs "expected_shot_match.exr"
+PASS
+shot match: 0.5,0.5,0.5
+resolved failover match: Reference unknown
+Computing diff of "autocc_failover_match.exr" vs "expected_failover_match.exr"
+PASS
+failover match: <> unknown
+Computing diff of "autocc_shot_offset.exr" vs "expected_shot_offset.exr"
+PASS
+Computing diff of "autocc_rules_shot_offset.exr" vs "expected_shot_offset.exr"
+PASS
+shot offset: 0.25,0.25,0.25
+resolved failover offset: Reference unknown
+Computing diff of "autocc_failover_offset.exr" vs "expected_failover_offset.exr"
+PASS
+failover offset: <> unknown
+shot default: 0.125,0.125,0.125
+display inverse: ACEScg lin_ap1_scene
+Computing diff of "display_inverse.exr" vs "display_inverse_scene.exr"
+PASS
+display data: Raw id <> 0.25,0.5,0.75
+same space: srgb_rec709_scene chroma <0.64, 0.33, 0.21, 0.71, 0.15, 0.06, 0.3127, 0.329> sRGB <0>
+terminal facts: unknown unknown chroma <> sRGB <>
+Computing diff of "terminal_reread.exr" vs "expected_terminal_facts.exr"
+PASS
+exr color claim: srgb_rec709_scene srgb_rec709_scene chroma <>
+chroma_rec709: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329>
+chroma_rec709_copy: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329>
+chroma_rec709_iconvert: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329>
+chroma_d60white: lin_rec709_scene chroma <>
+chroma_d65white: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.31271, 0.32902>
+chroma_ap0: lin_rec709_scene chroma <>
+chroma_unknown: unknown chroma <>
+assert over AP0: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329> aces <> mdcv <1000>
+aces_flag_ap0 core 0: lin_ap0_scene aces <1> chroma <0.7347, 0.2653, 0, 1, 0.0001, -0.077, 0.32168, 0.33767>
+aces_flag_ap0 core 1: lin_ap0_scene aces <1> chroma <0.7347, 0.2653, 0, 1, 0.0001, -0.077, 0.32168, 0.33767>
+aces_flag_rec709 core 0: lin_ap0_scene aces <1> chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329>
+aces_flag_rec709 core 1: lin_ap0_scene aces <1> chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329>
+assert twice: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329>
+assert over CICP: CICP <1, 8, 0, 1> icc <>
+assert without a code: CICP <>
+converted: CICP <> icc <>
+g22 adobe read: <> chroma <0.64, 0.33, 0.21, 0.71, 0.15, 0.06, 0.3127, 0.329>
+g22 adobe asserted: g22_adobergb_scene
+adobe_g22 read: <>
+unknown core 0 read: <> id unknown
+unknown core 1 read: <> id unknown
+Computing diff of "autocc_unknown.exr" vs "expected_unknown.exr"
+PASS
+unknown bare autocc: unknown id unknown
+notaspace core 0 read: <notaspace> id notaspace
+notaspace core 1 read: <notaspace> id notaspace
+Computing diff of "autocc_notaspace.exr" vs "expected_notaspace.exr"
+PASS
+notaspace bare autocc: unknown id unknown
 Comparing "colormap-inferno.tif" and "ref/colormap-inferno.tif"
 PASS
 Comparing "colormap-custom.tif" and "ref/colormap-custom.tif"

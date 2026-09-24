@@ -223,6 +223,14 @@ Testing construction from ROI:
 Testing set_colorspace:
   after set_colorspace('sRGB'): sRGB
   after set_colorspace(''): 
+  method None resolves: g22_rec709_scene 3
+  method '' clears the label only: <unset> 2
+  set label left alone: lin_ap0_scene
+  nothing portable resolves: <unset> 2
+  module None resolves: g22_rec709_scene 3
+  module '' clears the label only: <unset> 2
+  set label left alone: lin_ap0_scene
+  nothing portable resolves: <unset> 2
 
 Testing global attribute store/retrieve:
 get_string_attribute plugin_searchpath :  perfect

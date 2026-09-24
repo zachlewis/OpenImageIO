@@ -161,11 +161,14 @@ Oiiotool::clear_options()
     autoorient         = false;
     autocc             = false;
     autoccunpremult    = false;
-    autopremult        = true;
-    nativeread         = false;
-    metamerge          = false;
-    cachesize          = 4096;
-    autotile           = 0;  // was: 4096
+    autoccfailover.clear();
+    autoccfilerules = pvt::FileRulesPrecedence::Fallback;
+    autoccmissing   = pvt::MissingColorSpace::Preserve;
+    autopremult     = true;
+    nativeread      = false;
+    metamerge       = false;
+    cachesize       = 4096;
+    autotile        = 0;  // was: 4096
     // FIXME: Turned off autotile by default Jan 2018 after thinking that
     // it was possible to deadlock when doing certain parallel IBA functions
     // in combination with autotile. When the deadlock possibility is fixed,
@@ -612,7 +615,7 @@ Oiiotool::warning(string_view command, string_view explanation) const
 
 
 ParamValueList
-Oiiotool::extract_options(string_view command)
+Oiiotool::extract_options(string_view command, string_view empty_option)
 {
     using namespace Strutil;
     ParamValueList optlist;
@@ -634,7 +637,7 @@ Oiiotool::extract_options(string_view command)
                 value = parse_until(command, ":");
             }
         }
-        if (ok && name.size() && value.size()) {
+        if (ok && name.size() && (value.size() || name == empty_option)) {
             // We seem to have a name and value. Add to the optlist.
             optlist[name] = value;
         }
@@ -727,6 +730,124 @@ set_printinfo(Oiiotool& ot, cspan<const char*> argv)
 
 
 // --autocc
+static bool
+decode_filerules(Oiiotool& ot, string_view command, string_view value,
+                 pvt::FileRulesPrecedence& result)
+{
+    if (value == "metadata")
+        result = pvt::FileRulesPrecedence::MetadataOnly;
+    else if (value == "first")
+        result = pvt::FileRulesPrecedence::First;
+    else if (value == "fallback")
+        result = pvt::FileRulesPrecedence::Fallback;
+    else {
+        ot.errorfmt(
+            command,
+            "Unknown filerules value \"{}\" (expected metadata, first, or fallback)",
+            value);
+        return false;
+    }
+    return true;
+}
+
+
+
+static bool
+decode_missing(Oiiotool& ot, string_view command, string_view value,
+               pvt::MissingColorSpace& result)
+{
+    if (value == "none")
+        result = pvt::MissingColorSpace::Preserve;
+    else if (value == "config")
+        result = pvt::MissingColorSpace::ConfigPolicy;
+    else {
+        ot.errorfmt(command,
+                    "Unknown missing value \"{}\" (expected none or config)",
+                    value);
+        return false;
+    }
+    return true;
+}
+
+
+
+static string_view
+resolver_source_name(pvt::ColorSpaceSource source)
+{
+    using Source = pvt::ColorSpaceSource;
+    switch (source) {
+    case Source::Assignment: return "assignment";
+    case Source::ACES: return "ACES";
+    case Source::FileRulesFirst: return "FileRules first";
+    case Source::InteropID: return "colorInteropID";
+    case Source::CICP: return "CICP";
+    case Source::PNGsRGB: return "PNG sRGB";
+    case Source::NumericMetadata: return "numeric metadata";
+    case Source::FileRulesFallback: return "FileRules fallback";
+    case Source::ReaderLabel: return "reader label";
+    case Source::Failover: return "failover";
+    case Source::FileRulesDefault: return "FileRules default";
+    case Source::DefaultRole: return "default role";
+    case Source::TerminalPolicy: return "terminal policy";
+    default: return "none";
+    }
+}
+
+
+
+static string_view
+resolver_rule_name(pvt::ResolverStep::Rule rule)
+{
+    using Rule = pvt::ResolverStep::Rule;
+    switch (rule) {
+    case Rule::Assignment: return "assignment";
+    case Rule::ACES: return "ACES";
+    case Rule::FileRulesFirst: return "FileRules first";
+    case Rule::InteropID: return "colorInteropID";
+    case Rule::CICP: return "CICP";
+    case Rule::ICC: return "ICC";
+    case Rule::PNGsRGB: return "PNG sRGB";
+    case Rule::NumericMetadata: return "numeric metadata";
+    case Rule::FileRulesFallback: return "FileRules fallback";
+    case Rule::ReaderLabel: return "reader label";
+    case Rule::Failover: return "failover";
+    case Rule::FileRulesDefault: return "FileRules default";
+    case Rule::DefaultRole: return "default role";
+    case Rule::TerminalPolicy: return "terminal policy";
+    }
+    return "none";
+}
+
+
+
+static string_view
+resolver_outcome_name(pvt::ResolverStep::Outcome outcome)
+{
+    using Outcome = pvt::ResolverStep::Outcome;
+    switch (outcome) {
+    case Outcome::Matched: return "matched";
+    case Outcome::Approximate: return "approximate";
+    case Outcome::Missed: return "missed";
+    case Outcome::Invalid: return "invalid";
+    default: return "skipped";
+    }
+}
+
+
+
+static string_view
+resolver_status_name(pvt::ColorSpaceStatus status)
+{
+    using Status = pvt::ColorSpaceStatus;
+    switch (status) {
+    case Status::Resolved: return "resolved";
+    case Status::TerminalUnknown: return "terminal unknown";
+    default: return "no source";
+    }
+}
+
+
+
 static void
 set_autocc(Oiiotool& ot, cspan<const char*> argv)
 {
@@ -735,6 +856,15 @@ set_autocc(Oiiotool& ot, cspan<const char*> argv)
     auto options        = ot.extract_options(command);
     ot.autocc           = true;
     ot.autoccunpremult  = options.get_int("unpremult");
+    ot.autoccfailover   = options.get_string("failover");
+    ot.autoccfilerules  = pvt::FileRulesPrecedence::Fallback;
+    ot.autoccmissing    = pvt::MissingColorSpace::Preserve;
+    if (options.contains("filerules"))
+        decode_filerules(ot, command, options.get_string("filerules"),
+                         ot.autoccfilerules);
+    if (options.contains("missing"))
+        decode_missing(ot, command, options.get_string("missing"),
+                       ot.autoccmissing);
 }
 
 
@@ -1580,6 +1710,15 @@ public:
     {
         // Because this is an in-place operation, img[0] is the same as
         // img[1].
+        auto changes_color_assignment = [](string_view name) {
+            return name == "oiio:ColorSpace" || name == "colorInteropID";
+        };
+        bool clear_terminal = changes_color_assignment(attribname);
+        for (string_view attr : attribname_list)
+            clear_terminal |= changes_color_assignment(attr);
+        if (clear_terminal)
+            img[0]->specmod().erase_attribute(
+                pvt::autocc_terminal_unknown_attrib);
         if (value.empty()) {
             if (attribname_list.empty()) {
                 img[0]->specmod().erase_attribute(attribname);
@@ -2414,7 +2553,8 @@ public:
     bool impl(span<ImageBuf*> img) override
     {
         // Because this is an in-place operation, img[0] is the same as
-        // img[1].
+        // img[1]. set_colorspace makes the name authoritative over the
+        // image's other color metadata.
         img[0]->specmod().set_colorspace(colorspace);
         return true;
     }
@@ -2540,10 +2680,8 @@ OIIOTOOL_OP(ociolook, 1, [&](OiiotoolOp& op, span<ImageBuf*> img) {
     std::string contextvalue = op.options()["value"];
     bool inverse             = op.options().get_int("inverse");
     bool unpremult           = op.options().get_int("unpremult");
-    if (fromspace == "current" || fromspace == "")
-        fromspace = img[1]->spec().get_string_attribute("oiio:Colorspace");
-    if (tospace == "current" || tospace == "")
-        tospace = img[1]->spec().get_string_attribute("oiio:Colorspace");
+    // An absent from= or to= is settled by ImageBufAlgo::ociolook from the
+    // image's metadata under this config and context.
     return ImageBufAlgo::ociolook(*img[0], *img[1], lookname, fromspace,
                                   tospace, unpremult, inverse, contextkey,
                                   contextvalue, &ot.colorconfig());
@@ -2561,8 +2699,8 @@ OIIOTOOL_OP(ociodisplay, 1, [&](OiiotoolOp& op, span<ImageBuf*> img) {
     std::string looks        = op.options()["looks"];
     bool unpremult           = op.options().get_int("unpremult");
     bool inverse             = op.options().get_int("inverse");
-    if (fromspace == "current" || fromspace == "")
-        fromspace = img[1]->spec().get_string_attribute("oiio:Colorspace");
+    // An absent from= is settled by ImageBufAlgo::ociodisplay from the
+    // image's metadata under this config and context.
     return ImageBufAlgo::ociodisplay(*img[0], *img[1], displayname, viewname,
                                      fromspace, looks, unpremult, inverse,
                                      contextkey, contextvalue,
@@ -5614,17 +5752,57 @@ input_file(Oiiotool& ot, cspan<const char*> argv)
     } else {
         command = "-i";
     }
-    auto fileoptions     = ot.extract_options(command);
+    auto fileoptions     = ot.extract_options(command, "failover");
     int printinfo        = fileoptions.get_int("info", ot.printinfo);
     bool readnow         = fileoptions.get_int("now", 0);
     bool native          = fileoptions.get_int("native", int(ot.nativeread));
     bool autocc          = fileoptions.get_int("autocc", ot.autocc);
     bool autoccunpremult = fileoptions.get_int("unpremult", ot.autoccunpremult);
+    std::string autoccfailover = fileoptions.contains("failover")
+                                     ? std::string(
+                                           fileoptions.get_string("failover"))
+                                     : ot.autoccfailover;
+    auto autoccfilerules       = ot.autoccfilerules;
+    if (fileoptions.contains("filerules")
+        && !decode_filerules(ot, command, fileoptions.get_string("filerules"),
+                             autoccfilerules))
+        return 0;
+    auto autoccmissing = ot.autoccmissing;
+    if (fileoptions.contains("missing")
+        && !decode_missing(ot, command, fileoptions.get_string("missing"),
+                           autoccmissing))
+        return 0;
+    std::string numericstate = fileoptions.get_string("numericstate");
+    if (!numericstate.empty() && numericstate != "scene"
+        && numericstate != "display") {
+        ot.errorfmt(command,
+                    "Unknown numericstate value \"{}\" (expected scene or "
+                    "display)",
+                    numericstate);
+        return 0;
+    }
     std::string infoformat = fileoptions.get_string("infoformat",
                                                     ot.printinfo_format);
     TypeDesc input_dataformat(fileoptions.get_string("type"));
     std::string channel_set = fileoptions["ch"];
     bool get_thumbnail      = fileoptions.get_int("get_thumbnail", 0);
+    // The OCIO context this input is read under, in the comma-separated
+    // spelling --colorconvert uses. It governs both halves of `autocc`: which
+    // color space the file's metadata resolves to, and the conversion that
+    // follows. It is forwarded verbatim into that conversion below, which is
+    // an action option: a value there ends at the next ':' unless it is
+    // quoted, and is expression-expanded once more. So a value that survives
+    // quoting is spelled and forwarded exactly, and one containing a quote or
+    // a brace is reported rather than silently forwarded as a different
+    // context. Commas separate pairs and need nothing.
+    std::string contextkey   = fileoptions["key"];
+    std::string contextvalue = fileoptions["value"];
+    if (contextkey.find_first_of("\"{") != std::string::npos
+        || contextvalue.find_first_of("\"{") != std::string::npos) {
+        ot.error(command,
+                 "an OCIO context key or value may not contain '\"' or '{'");
+        return 0;
+    }
 
     for (int i = 0; i < std::ssize(argv); i++) {
         // FIXME: this loop is pointless, since there is ever only one arg
@@ -5752,6 +5930,15 @@ input_file(Oiiotool& ot, cspan<const char*> argv)
                         new_first_dims);
             }
         }
+        if (!numericstate.empty()) {
+            // The hint has to precede any implicit ImageBuf conversion too,
+            // so this input modifier makes the pixels available now.
+            if (!ot.read())
+                break;
+            ot.curimg->spec()->attribute("oiio:PNGNumericState", numericstate);
+            (*ot.curimg)().specmod().attribute("oiio:PNGNumericState",
+                                               numericstate);
+        }
         if ((printinfo || ot.printstats || ot.dumpdata || ot.hash)
             && !substitute) {
             print_info_options pio = ot.info_opts();
@@ -5792,35 +5979,106 @@ input_file(Oiiotool& ot, cspan<const char*> argv)
         }
 
         if (autocc) {
-            // Try to deduce the color space it's in
-            std::string colorspace(
-                ot.colorconfig().getColorSpaceFromFilepath(filename, "", true));
-            if (colorspace == "unknown")
-                colorspace.clear();
-            if (colorspace.size() && ot.debug)
-                OIIO::print("  From {}, we deduce color space \"{}\"\n",
-                            filename, colorspace);
-            if (colorspace.empty()) {
-                ot.read();
-                colorspace = ot.curimg->spec()->get_string_attribute(
-                    "oiio:ColorSpace");
-                if (ot.debug)
-                    OIIO::print(
-                        "  Metadata of {} indicates color space \"{}\"\n",
-                        colorspace, filename);
+            ot.read();
+            // This is process-local resolver state, never input provenance.
+            // Refuse any spelling a file managed to carry and set it only
+            // from this resolution's structured result.
+            ot.curimg->spec()->erase_attribute(
+                pvt::autocc_terminal_unknown_attrib);
+            (*ot.curimg)().specmod().erase_attribute(
+                pvt::autocc_terminal_unknown_attrib);
+            // One resolver execution either way: under --debug it also fills
+            // this local sink, and without it the resolver is handed nullptr
+            // and builds no step at all.
+            std::vector<pvt::ResolverStep> trace;
+            auto resolution = pvt::resolve_colorspace_source(
+                ot.colorconfig(), *ot.curimg->spec(), filename, "",
+                autoccfailover, contextkey, contextvalue, autoccfilerules,
+                autoccmissing, ot.debug ? &trace : nullptr);
+            std::string colorspace = std::move(resolution.name);
+            if (colorspace.empty()
+                && autoccmissing == pvt::MissingColorSpace::ConfigPolicy
+                && ot.colorconfig().has_error()) {
+                ot.error(command, ot.colorconfig().geterror());
+                return 0;
+            }
+            if (ot.debug) {
+                for (const auto& step : trace)
+                    OIIO::print("  Resolver rule {}: {}{}{} ({})\n",
+                                resolver_rule_name(step.rule),
+                                resolver_outcome_name(step.outcome),
+                                step.candidate.empty()
+                                    ? std::string()
+                                    : Strutil::fmt::format(" \"{}\"",
+                                                           step.candidate),
+                                step.resolved.empty()
+                                    ? std::string()
+                                    : Strutil::fmt::format(" -> \"{}\"",
+                                                           step.resolved),
+                                step.reason);
+                for (const auto& warning : resolution.metadata_warnings)
+                    OIIO::print("  Color metadata warning: {}\n", warning);
+                OIIO::print("  Metadata and FileRules for {} resolve to \"{}\" "
+                            "({}; {})\n",
+                            filename, colorspace,
+                            resolver_source_name(resolution.source),
+                            resolver_status_name(resolution.status));
             }
             std::string linearspace = ot.colorconfig().resolve("scene_linear");
-            if (colorspace.size()
-                && !ot.colorconfig().equivalent(colorspace, linearspace)) {
+            // A "data"/"bypass" identity without a configured data space is
+            // still not color, so leave its pixels alone.
+            const bool data = !resolution.terminal_unknown
+                              && (colorspace == "data" || colorspace == "bypass"
+                                  || ot.colorconfig().isData(colorspace));
+            // Whether two differently named spaces are the same encoding is a
+            // measurement, and the public equivalence test makes it in the
+            // configuration's own context. Under an override it would be
+            // answering a different question, so only an exact name match
+            // skips the conversion there; a conversion that turns out to be an
+            // identity costs the pixels nothing.
+            const bool same = !resolution.terminal_unknown
+                              && (contextkey.empty()
+                                      ? ot.colorconfig().equivalent(colorspace,
+                                                                    linearspace)
+                                      : colorspace == linearspace);
+            if (resolution.terminal_unknown) {
+                ImageSpec& spec = (*ot.curimg)().specmod();
+                // The config's policy states that nothing is known, and
+                // "unknown" takes the evidence it declined with it: written
+                // out, that evidence would resolve the next read to an
+                // encoding this one declined to assert.
+                ot.colorconfig().set_colorspace(spec, "unknown");
+                spec.attribute("colorInteropID", "unknown");
+                spec.attribute(pvt::autocc_terminal_unknown_attrib, 1);
+                ot.curimg->update_spec_from_imagebuf();
+            } else if (colorspace.size() && !data && !same) {
                 std::string cmd = "colorconvert:strict=0";
                 if (autoccunpremult)
                     cmd += ":unpremult=1";
+                // The same overrides, into the same conversion.
+                if (contextkey.size())
+                    cmd += Strutil::fmt::format(":key=\"{}\":value=\"{}\"",
+                                                contextkey, contextvalue);
                 const char* argv[] = { cmd.c_str(), colorspace.c_str(),
                                        linearspace.c_str() };
                 if (ot.debug)
                     OIIO::print("  Converting {} from {} to {}\n", filename,
                                 colorspace, linearspace);
                 action_colorconvert(ot, argv);
+            } else if (colorspace.size() && data
+                       && (autoccfilerules == pvt::FileRulesPrecedence::First
+                           || autoccmissing
+                                  == pvt::MissingColorSpace::ConfigPolicy)) {
+                // FileRules-first may deliberately override embedded color
+                // metadata with a data space. Pixels stay untouched, but the
+                // surviving tags must describe that decision to the next
+                // consumer rather than reassert the overridden encoding.
+                ImageSpec& spec = (*ot.curimg)().specmod();
+                ot.colorconfig().set_colorspace(spec, colorspace);
+                string_view id = spec.get_string_attribute("colorInteropID");
+                if (id != "data" && id != "bypass")
+                    spec.attribute("colorInteropID", "data");
+                ot.curimg->update_spec_from_imagebuf();
             } else if (ot.debug) {
                 OIIO::print("  no auto conversion necessary for {}->{}\n",
                             colorspace, linearspace);
@@ -6194,9 +6452,23 @@ output_file(Oiiotool& ot, cspan<const char*> argv)
         }
     }
     if (autocc) {
-        string_view linearspace = ot.colorconfig().resolve("scene_linear");
-        std::string currentspace
-            = ir->spec()->get_string_attribute("oiio:ColorSpace", linearspace);
+        std::string currentspace = ir->spec()->get_string_attribute(
+            "oiio:ColorSpace");
+        bool terminal_unknown = ir->spec()->get_int_attribute(
+            pvt::autocc_terminal_unknown_attrib);
+        if (currentspace.empty()) {
+            // An unlabeled image is what its metadata establishes, and is
+            // taken to be scene_linear only when it states nothing.
+            auto resolution = pvt::resolve_colorspace_source(
+                ot.colorconfig(), *ir->spec(), ir->name(), "", "", "", "",
+                pvt::FileRulesPrecedence::MetadataOnly,
+                pvt::MissingColorSpace::Preserve);
+            terminal_unknown |= resolution.terminal_unknown;
+            currentspace = resolution.name.empty()
+                               ? std::string(
+                                     ot.colorconfig().resolve("scene_linear"))
+                               : resolution.name;
+        }
         // Special cases where we know formats should be particular color
         // spaces
         if (outcolorspace.empty()
@@ -6209,7 +6481,8 @@ output_file(Oiiotool& ot, cspan<const char*> argv)
             && (Strutil::iends_with(filename, ".ppm")
                 || Strutil::iends_with(filename, ".pnm")))
             outcolorspace = string_view("Rec709");
-        if (outcolorspace.size() && currentspace != outcolorspace) {
+        if (!terminal_unknown && outcolorspace.size()
+            && currentspace != outcolorspace) {
             if (ot.debug)
                 std::cout << "  Converting from " << currentspace << " to "
                           << outcolorspace << " for output to " << filename
@@ -6279,7 +6552,17 @@ output_file(Oiiotool& ot, cspan<const char*> argv)
         //     mode = ImageBufAlgo::MakeTxEnvLatlFromLightProbe;
         if (ot.verbose || ot.debug)
             configspec.attribute("maketx:verbose", 1);
-        ok = ImageBufAlgo::make_texture(mode, (*ir)(0, 0), filename, configspec,
+        const ImageBuf* texture_source = &(*ir)(0, 0);
+        std::unique_ptr<ImageBuf> cleaned_texture_source;
+        if (texture_source->spec().get_int_attribute(
+                pvt::autocc_terminal_unknown_attrib)) {
+            cleaned_texture_source.reset(new ImageBuf(*texture_source));
+            cleaned_texture_source->specmod().erase_attribute(
+                pvt::autocc_terminal_unknown_attrib);
+            texture_source = cleaned_texture_source.get();
+        }
+        ok = ImageBufAlgo::make_texture(mode, *texture_source, filename,
+                                        configspec,
                                         ot.verbose || ot.debug ? &std::cout
                                                                : nullptr);
         if (!ok) {
@@ -6298,6 +6581,7 @@ output_file(Oiiotool& ot, cspan<const char*> argv)
             adjust_output_options(filename, spec, ir->nativespec(s), ot, s,
                                   send, supports_tiles, fileoptions,
                                   (*ir)[s].was_direct_read());
+            spec.erase_attribute(pvt::autocc_terminal_unknown_attrib);
             // If it's not tiled and MIP-mapped, remove any "textureformat"
             if (!spec.tile_pixels() || ir->miplevels(s) <= 1)
                 spec.erase_attribute("textureformat");
@@ -6340,6 +6624,7 @@ output_file(Oiiotool& ot, cspan<const char*> argv)
                 adjust_output_options(filename, spec, ir->nativespec(s, m), ot,
                                       s, send, supports_tiles, fileoptions,
                                       (*ir)[s].was_direct_read());
+                spec.erase_attribute(pvt::autocc_terminal_unknown_attrib);
                 if (s > 0 || m > 0) {  // already opened first subimage/level
                     if (!out->open(tmpfilename, spec, mode)) {
                         ot.error(command, out->geterror());
@@ -7043,7 +7328,7 @@ Oiiotool::getargs(int argc, char* argv[])
     ap.arg("--auto-orient", &ot.autoorient)
       .hidden(); // synonym for --autoorient
     ap.arg("--autocc")
-      .help("Automatically color convert based on filename (options: unpremult=)")
+      .help("Automatically color convert based on metadata and filename (options: failover=, filerules=metadata|first|fallback, missing=none|config, unpremult=)")
       .OTACTION(set_autocc);
     ap.arg("--noautocc %!", &ot.autocc)
       .help("Turn off automatic color conversion");
@@ -7132,8 +7417,8 @@ Oiiotool::getargs(int argc, char* argv[])
 
     ap.separator("Commands that read images:");
     ap.arg("-i %s:FILENAME")
-      .help("Input file (options: autocc=, ch=, get_thumbnail=, info=, "
-            "infoformat=, native=, now=, type=, unpremult=)")
+      .help("Input file (options: autocc=, ch=, failover=, filerules=metadata|first|fallback, get_thumbnail=, info=, "
+            "infoformat=, key=, missing=none|config, native=, now=, numericstate=scene|display, type=, unpremult=, value=)")
       .OTACTION(input_file);
     ap.arg("--iconfig %s:NAME %s:VALUE")
       .help("Sets input config attribute (options: type=...)")

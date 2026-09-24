@@ -827,7 +827,8 @@ public:
     // is withheld and only the measuring passes may establish an identity.
     //
     // `enrich` (set only by the public queries) also classifies the transfer
-    // curve; identity lookup and the writers never need that measurement.
+    // curve; identity lookup, metadata resolution and the writers never need
+    // that measurement.
     ColorSpaceInfo color_space_info(string_view colorspace, bool derive,
                                     bool measured_only = false,
                                     bool enrich        = false) const;
@@ -2328,6 +2329,37 @@ ColorConfig::Impl::configured_space(string_view name) const
 // Private seam, befriended by ColorConfig, that lets createDisplayTransform
 // and ImageBufAlgo::ociodisplay make the same display/view selection.
 struct ColorConfigAccess {
+    using Disposition = pvt::ColorSpaceStatus;
+    struct Source {
+        std::string name;
+        Disposition disposition      = Disposition::NoSource;
+        pvt::ColorSpaceSource source = pvt::ColorSpaceSource::Unspecified;
+        bool approximate             = false;
+    };
+
+    struct Request {
+        const ImageSpec& spec;
+        string_view format_name;
+        string_view filename;
+        pvt::FileRulesPrecedence file_rules;
+        pvt::MissingColorSpace missing;
+        string_view assignment;
+        string_view failover;
+        string_view context_key;
+        string_view context_value;
+        std::vector<pvt::ResolverStep>* trace = nullptr;
+    };
+
+    static Source resolve_source(const ColorConfig& config,
+                                 const Request& request);
+
+    // Whether the overrides select the configuration's own context. This is
+    // the effective-default test, not whether a key was spelled: an empty
+    // list, mismatched lists, and overrides whose values are already the
+    // configuration's are all its own context.
+    static bool default_context(const ColorConfig& config, string_view key,
+                                string_view value);
+
     // One display, view and source name for a display transform, chosen under
     // one context view, so that the processor and the tag its consumer writes
     // describe the same conversion.
@@ -2346,6 +2378,15 @@ struct ColorConfigAccess {
 
 
 
+bool
+ColorConfigAccess::default_context(const ColorConfig& config, string_view key,
+                                   string_view value)
+{
+    return config.getImpl()->context_view(key, value).get() == config.getImpl();
+}
+
+
+
 ColorConfigAccess::DisplayView
 ColorConfigAccess::select_display_view(const ColorConfig& config,
                                        ustring display, ustring view,
@@ -2356,11 +2397,11 @@ ColorConfigAccess::select_display_view(const ColorConfig& config,
     const auto seen                 = impl->context_view(key, value, source);
     const ColorConfig::Impl& lookup = seen ? *seen : *impl;
     DisplayView selected;
-    // The same source lookup createColorProcessor makes, under the same view,
-    // so a name selected under these overrides names the same local color
-    // space here. A view this build could not acquire is not a verdict, and
-    // an override then opts out of identification rather than borrowing the
-    // default context's evidence for it.
+    // The same source lookup createColorProcessor makes, under the same view:
+    // a name metadata resolution selected under these overrides names the same
+    // local color space here. A view this build could not acquire is not a
+    // verdict, and an override then opts out of identification rather than
+    // borrowing the default context's evidence for it.
     selected.source = ustring(
         lookup.resolve(source, nullptr, nullptr, seen != nullptr));
     selected.display = display;
@@ -7518,7 +7559,1287 @@ ColorConfig::get_cicp(string_view colorspace) const
 
 //////////////////////////////////////////////////////////////////////////
 //
+// Metadata resolution: one ordered path from file facts to a configured
+// color space. Readers extract facts; this is the only config lookup.
+
+namespace {
+
+constexpr string_view cicp_fallback_reason
+    = "CICP pair resolved through a fallback identity because its preferred "
+      "identity is unavailable in this configuration";
+
+// PNG's wire resolution. (Same table as the EXR reader's own fallback.)
+struct ExrChromaticities {
+    const char* identity;
+    float xy[8];
+};
+
+constexpr ExrChromaticities exr_chromaticities[] = {
+    { "lin_rec709_scene",
+      { 0.640f, 0.330f, 0.300f, 0.600f, 0.150f, 0.060f, 0.3127f, 0.3290f } },
+    { "lin_ap0_scene",
+      { 0.7347f, 0.2653f, 0.0f, 1.0f, 0.0001f, -0.0770f, 0.32168f, 0.33767f } },
+    { "lin_ap1_scene",
+      { 0.713f, 0.293f, 0.165f, 0.830f, 0.128f, 0.044f, 0.32168f, 0.33767f } },
+    { "lin_p3d65_scene",
+      { 0.680f, 0.320f, 0.265f, 0.690f, 0.150f, 0.060f, 0.3127f, 0.3290f } },
+    { "lin_rec2020_scene",
+      { 0.708f, 0.292f, 0.170f, 0.797f, 0.131f, 0.046f, 0.3127f, 0.3290f } },
+    { "lin_adobergb_scene",
+      { 0.640f, 0.330f, 0.210f, 0.710f, 0.150f, 0.060f, 0.3127f, 0.3290f } },
+};
+
+string_view
+exr_linear_identity(cspan<float> xy)
+{
+    if (xy.size() != 8)
+        return {};
+    for (const auto& entry : exr_chromaticities) {
+        bool match = true;
+        for (int i = 0; i < 8 && match; ++i)
+            match = std::isfinite(xy[i])
+                    && std::abs(xy[i] - entry.xy[i]) <= 0.001f;
+        if (match)
+            return entry.identity;
+    }
+    return {};
+}
+
+
+
+// PNG stores each chromaticity coordinate and the encoding exponent as an
+// integer in units of 1/100000. That wire resolution is the canonical
+// rounding for numeric matching: a neighboring value never acquires an
+// identity by tolerance, and Adobe RGB's 563/256 stays distinct from 2.2.
+struct WireEncoding {
+    std::array<int, 8> xy {};
+    int gamma = 0;  // PNG gAMA units: 100000 / decoding exponent
+
+    bool operator==(const WireEncoding& other) const
+    {
+        return gamma == other.gamma && xy == other.xy;
+    }
+};
+
+// The count of 1/100000 units a wire field holds. Finiteness is not enough to
+// round and narrow: a finite coordinate can still scale past what the field
+// can represent, and converting that to int is undefined. So the range is
+// checked in double, before any rounding happens.
+//
+// This is a representability bound and nothing more. It says which numbers
+// have a wire spelling, not which chromaticities are meaningful. Primaries
+// outside the spectral triangle -- negative coordinates, coordinates past one
+// -- are ordinary virtual primaries: AP0's blue sits at y = -0.077 and camera
+// native gamuts are routinely wider still. They stay in range and stay
+// supported.
+constexpr double max_wire_units = 2147483647.0;
+
+bool
+wire_gamma(float gamma, int& wire)
+{
+    if (!(gamma > 0.0f) || !std::isfinite(gamma))
+        return false;
+    const double gamma_units = 100000.0 / double(gamma);
+    if (!std::isfinite(gamma_units) || gamma_units > max_wire_units)
+        return false;
+    wire = int(std::lround(gamma_units));
+    return wire > 0;
+}
+
+bool
+wire_encoding(cspan<float> xy, float gamma, WireEncoding& wire)
+{
+    if (xy.size() != 8 || !wire_gamma(gamma, wire.gamma))
+        return false;
+    for (int i = 0; i < 8; ++i) {
+        const double units = double(xy[i]) * 100000.0;
+        if (!std::isfinite(units) || std::abs(units) > max_wire_units)
+            return false;
+        wire.xy[i] = int(std::lround(units));
+    }
+    return true;
+}
+
+
+
+// The reference encodings a numeric fact may name, quantized once from the
+// internal reference's own definitions. The candidates are the same list the
+// property derivation reads its primaries from, so a numeric match here says
+// exactly what a derived identity says. A piecewise transfer has no pure
+// gamma and drops out of the list. Scene entries precede their display
+// counterparts, as in that list and in the CICP table.
+struct ReferenceEncoding {
+    std::string identity;
+    WireEncoding wire;
+};
+
+const std::vector<ReferenceEncoding>&
+reference_encodings()
+{
+    // Local-static initialization is thread-safe and retries if native
+    // reference acquisition throws.
+    static const std::vector<ReferenceEncoding> encodings = [] {
+        std::vector<ReferenceEncoding> result;
+        auto reference = internal_reference();
+        for (const char* id : analytic_candidates) {
+            std::array<float, 8> xy {};
+            bool has_xy = false;
+            float gamma = 0.0f;
+            ReferenceEncoding entry;
+            if (reference_properties(reference, id, xy, has_xy, gamma) && has_xy
+                && wire_encoding(xy, gamma, entry.wire)) {
+                entry.identity = id;
+                result.push_back(std::move(entry));
+            }
+        }
+        return result;
+    }();
+    return encodings;
+}
+
+
+
+// The containers whose own rules the resolver honors: PNG declares cICP
+// supreme over its legacy chunks, and EXR chromaticities describe a linear
+// encoding. Everything else is read the generic way.
+enum class Container { Other, PNG, EXR };
+
+enum class NumericState { Scene, Display };
+
+// A reader names the format it actually decoded, and that name is the answer
+// whenever there is one. A suffix is only a guess about a file nobody has
+// opened yet, so it is consulted only when no reader spoke.
+Container
+container_of(string_view format_name, string_view filename)
+{
+    if (!format_name.empty())
+        return format_name == "png"       ? Container::PNG
+               : format_name == "openexr" ? Container::EXR
+                                          : Container::Other;
+    if (Strutil::iends_with(filename, ".png")
+        || Strutil::iends_with(filename, ".apng"))
+        return Container::PNG;
+    if (Strutil::iends_with(filename, ".exr")
+        || Strutil::iends_with(filename, ".sxr")
+        || Strutil::iends_with(filename, ".mxr"))
+        return Container::EXR;
+    return Container::Other;
+}
+
+// Advisory checks over the metadata already handed to the resolver. They do
+// not consult a config, resolve a name, or derive a color property.
+std::vector<std::string>
+metadata_warnings(const ImageSpec& spec, string_view format_name,
+                  string_view filename)
+{
+    std::vector<std::string> warnings;
+    const string_view id = spec.get_string_attribute("colorInteropID");
+    const ParamValue* xy = spec.find_attribute("chromaticities",
+                                               TypeDesc(TypeDesc::FLOAT, 8));
+    const ParamValue* cicp_value
+        = spec.find_attribute("CICP", TypeDesc(TypeDesc::INT, 4));
+    const bool gamma      = spec.find_attribute("oiio:Gamma") != nullptr;
+    const bool icc        = spec.find_attribute("ICCProfile") != nullptr;
+    const auto matches_xy = [xy](const std::array<float, 8>& expected) {
+        if (!xy)
+            return true;
+        const auto actual = xy->as_cspan<float>();
+        for (int i = 0; i < 8; ++i)
+            if (!std::isfinite(actual[i])
+                || std::abs(actual[i] - expected[i]) > 1.0e-3f)
+                return false;
+        return true;
+    };
+    const std::array<float, 8> ap0 = { .7347f, .2653f, 0.0f,    1.0f,
+                                       .0001f, -.077f, .32168f, .33767f };
+
+    if (!id.empty() && !valid_interop_id(id))
+        warnings.emplace_back(
+            "the color interop ID fails the CIF Annex B grammar");
+    if (id == "data") {
+        if (xy)
+            warnings.emplace_back(
+                "the bundle is tagged 'data' but carries chromaticities");
+        if (gamma)
+            warnings.emplace_back(
+                "the bundle is tagged 'data' but carries a gamma");
+        if (cicp_value)
+            warnings.emplace_back(
+                "the bundle is tagged 'data' but carries a CICP tuple");
+        if (icc)
+            warnings.emplace_back(
+                "the bundle is tagged 'data' but carries an ICC profile");
+    }
+    if (spec.get_int_attribute("acesImageContainerFlag") == 1 && !id.empty()
+        && id != "lin_ap0_scene")
+        warnings.emplace_back(
+            "acesImageContainerFlag requires lin_ap0_scene but the color "
+            "interop ID differs");
+    if (spec.get_int_attribute("acesImageContainerFlag") == 1 && xy
+        && !matches_xy(ap0))
+        warnings.emplace_back(
+            "acesImageContainerFlag requires AP0 chromaticities but they "
+            "differ");
+    if (cicp_value) {
+        const cspan<int> cicp = cicp_value->as_cspan<int>();
+        if (cicp[0] == 2 && cicp[1] == 2)
+            warnings.emplace_back(
+                "the CICP tuple has unspecified primaries and transfer");
+        if (!id.empty() && valid_interop_id(id) && cicp[0] != 2
+            && cicp[1] != 2) {
+            const CICPPair supplied = normalized_cicp_pair(cicp[0], cicp[1]);
+            bool agrees = false, comparable = false;
+            for (const auto& entry : color_interop_ids) {
+                if (id != entry.interop_id
+                    && (!entry.legacy_alias || id != entry.legacy_alias))
+                    continue;
+                comparable              = entry.has_cicp;
+                const CICPPair expected = normalized_cicp_pair(entry.cicp[0],
+                                                               entry.cicp[1]);
+                agrees = comparable && expected.primaries == supplied.primaries
+                         && expected.transfer == supplied.transfer;
+                break;
+            }
+            if (comparable && !agrees)
+                warnings.emplace_back(
+                    "the CICP tuple and color interop ID identify different "
+                    "color spaces");
+        }
+        if (container_of(format_name, filename) == Container::EXR)
+            warnings.emplace_back(
+                "OpenEXR cannot carry the four-integer CICP attribute; the "
+                "tuple would be dropped");
+    }
+    if (xy && !id.empty()) {
+        std::array<float, 8> expected {};
+        bool reserved = false;
+        string_view reserved_id;
+        for (const auto& entry : color_interop_ids) {
+            if (id == entry.interop_id
+                || (entry.legacy_alias && id == entry.legacy_alias)) {
+                reserved_id = entry.interop_id;
+                break;
+            }
+        }
+        if (reserved_id == "lin_ap0_scene") {
+            expected = ap0;
+            reserved = true;
+        } else if (Strutil::ends_with(reserved_id, "_ap1_scene")) {
+            expected = { .713f, .293f, .165f,   .830f,
+                         .128f, .044f, .32168f, .33767f };
+            reserved = true;
+        } else if (reserved_id.find("_adobergb_") != string_view::npos) {
+            expected = { .64f, .33f, .21f, .71f, .15f, .06f, .3127f, .3290f };
+            reserved = true;
+        } else if (reserved_id.find("_rec709_") != string_view::npos) {
+            expected = { .64f, .33f, .30f, .60f, .15f, .06f, .3127f, .3290f };
+            reserved = true;
+        } else if (reserved_id.find("_rec2020_") != string_view::npos) {
+            expected = { .708f, .292f, .170f,  .797f,
+                         .131f, .046f, .3127f, .3290f };
+            reserved = true;
+        } else if (reserved_id.find("_p3d65_") != string_view::npos) {
+            expected = { .68f, .32f, .265f, .69f, .15f, .06f, .3127f, .3290f };
+            reserved = true;
+        }
+        if (reserved && !matches_xy(expected))
+            warnings.emplace_back(
+                "the chromaticities are not those reserved for the color "
+                "interop ID");
+    }
+
+    return warnings;
+}
+
+
+
+// The context-sensitive half of resolution, bound once per call by
+// resolve_source. Exactly two questions depend on the effective context,
+struct Resolution {
+    const ColorConfig& config;
+    std::function<std::string(string_view)> space;
+    std::function<ColorSpaceInfo(string_view)> properties;
+    // The effective context, including the configuration's own. Only an
+    // authored spelling that the configuration does not own is expanded.
+    OCIO::ConstContextRcPtr context;
+
+    // One expansion convention for every assignment source. The literal
+    // spelling always answers first, preserving ordinary configured-name
+    // ownership, and only a spelling nothing defines is expanded. Empty when
+    // there is no variable reference or the expansion changed nothing.
+    // OpenColorIO returns a file rule's authored spelling unexpanded
+    // (getColorSpaceFromFilepath takes no context), so a rule's result arrives
+    // here exactly as an explicit assignment or a name in metadata does.
+    std::string expand(string_view name) const
+    {
+        if (!context || name.find_first_of("$%") == string_view::npos)
+            return {};
+        const char* resolved = context->resolveStringVar(
+            std::string(name).c_str());
+        return !resolved || name == string_view(resolved) ? std::string()
+                                                          : resolved;
+    }
+
+    // Whether the effective context resolves this spelling away entirely. A
+    // spelling that resolves to nothing named nothing, which is a different
+    // fact from naming something this configuration cannot use.
+    bool resolves_to_nothing(string_view name) const
+    {
+        if (name.empty())
+            return true;
+        if (!context || name.find_first_of("$%") == string_view::npos)
+            return false;
+        const char* resolved = context->resolveStringVar(
+            std::string(name).c_str());
+        return !resolved || !resolved[0];
+    }
+};
+
+
+
+// The configured data space for a "data" or "bypass" utility identity: the
+// space carrying the token itself, then the other token, then any data space.
+// The utility identity stays terminal and is returned verbatim without one.
+std::string
+data_space(const Resolution& res, string_view token)
+{
+    const string_view other = token == "data" ? "bypass" : "data";
+    for (string_view candidate : { token, other }) {
+        const char* name = res.config.getColorSpaceNameByRole(candidate);
+        if (name && res.config.isData(name))
+            return name;
+    }
+    // Use the first data space in catalog order.
+    for (const auto& name : res.config.getColorSpaceNames())
+        if (res.config.isData(name))
+            return name;
+    return std::string(token);
+}
+
+
+
+// Resolve one identity claim as spelled: a configured space first, otherwise
+// the identity itself when it is a known Color Interop ID (a later conversion
+// can still recognize it), otherwise empty. "unknown" never resolves.
+std::string
+claim_spelling(const Resolution& res, string_view id)
+{
+    if (id.empty())
+        return {};
+    if (Strutil::iequals(id, "data") || Strutil::iequals(id, "bypass"))
+        return data_space(res, Strutil::lower(id));
+    if (auto local = res.space(id); !local.empty())
+        return local;
+    // configured_space deliberately returns only active-config endpoints. A
+    // once-qualified portable identity may instead name the private reference
+    // endpoint used by conversion. Canonicalize that fixed reference fact here
+    // without borrowing identification performed in the config's default
+    // context; res.space already had the effective-context opportunity.
+    const auto colon = id.find(':');
+    if (colon != string_view::npos && valid_interop_id(id)) {
+        std::string canonical = requested_identity(id);
+        if (canonical.empty())
+            canonical = requested_identity(id.substr(colon + 1));
+        if (!canonical.empty())
+            return canonical;
+    }
+    if (Strutil::iequals(id, "unknown"))
+        return {};
+    for (const ColorInteropID& interop : color_interop_ids)
+        if (Strutil::iequals(id, interop.interop_id)
+            || (interop.legacy_alias
+                && Strutil::iequals(id, interop.legacy_alias)))
+            return interop.interop_id;
+    return {};
+}
+
+
+
+// Every assignment source -- an explicit assignment, a name in the file's
+// metadata, a file rule's result, the caller's failover -- is resolved the
+// same way, and expanded the same way when this configuration defines nothing
+// by that spelling.
+std::string
+claim_identity(const Resolution& res, string_view id)
+{
+    if (auto result = claim_spelling(res, id); !result.empty())
+        return result;
+    const std::string expanded = res.expand(id);
+    return expanded.empty() ? std::string() : claim_spelling(res, expanded);
+}
+
+
+
+// The identity a CICP tuple names. An exact "cicp:P-T-M-R" alias wins for any
+// tuple, as authored and before any equivalence is considered, so a
+// configuration keeps the last word on its own spellings -- including the
+// narrow-range and YCbCr tuples nothing below will claim. Only an RGB
+// (matrix 0), full-range tuple maps by primaries and transfer, in the table's
+// preference order; other tuples make no claim here. P3-D65 with ST 428-1
+// selects the read-only DCDM endpoint before that ordinary table.
+//
+// `note` reports the equivalence a successful table lookup depended on, for a
+// caller that traces. An exact alias never sets it: nothing was normalized.
+std::string
+claim_cicp(const Resolution& res, cspan<int> cicp, string_view* note = nullptr,
+           bool* approximate = nullptr)
+{
+    if (approximate)
+        *approximate = false;
+    if (cicp.size() != 4)
+        return {};
+    if (auto exact = res.space(Strutil::fmt::format("cicp:{}-{}-{}-{}", cicp[0],
+                                                    cicp[1], cicp[2], cicp[3]));
+        !exact.empty())
+        return exact;
+    if (cicp[2] != 0 || cicp[3] != 1)
+        return {};
+    string_view equivalence;
+    const CICPPair pair = normalized_cicp_pair(cicp[0], cicp[1], &equivalence);
+    if (string_view exact = exact_cicp_input_identity(pair); !exact.empty()) {
+        if (auto local = claim_identity(res, exact); !local.empty())
+            return local;
+        return std::string(exact);
+    }
+    std::string identity;
+    int candidate = 0;
+    for (const ColorInteropID& interop : color_interop_ids) {
+        if (!interop.has_cicp || interop.cicp[0] != pair.primaries
+            || interop.cicp[1] != pair.transfer)
+            continue;
+        if (auto local = res.space(interop.interop_id); !local.empty()) {
+            identity = std::move(local);
+            if (approximate)
+                *approximate = cicp[0] == int(CICPPrimaries::SMPTE240M)
+                               || candidate > 0;
+            if (note && candidate > 0 && equivalence.empty())
+                *note = cicp_fallback_reason;
+            break;
+        }
+        if (identity.empty())
+            identity = interop.interop_id;
+        ++candidate;
+    }
+    if (approximate && !identity.empty()
+        && cicp[0] == int(CICPPrimaries::SMPTE240M))
+        *approximate = true;
+    if (note && !identity.empty() && !equivalence.empty())
+        *note = equivalence;
+    return identity;
+}
+
+
+
+// Chromaticities as integer millionths after the shared chromaticity
+// rounding. Non-finite or unrepresentable coordinates fail.
+bool
+normalize_exr_chromaticities(cspan<float> xy, std::array<int, 8>& normalized)
+{
+    if (xy.size() != 8)
+        return false;
+    for (int i = 0; i < 8; ++i) {
+        if (!std::isfinite(xy[i]))
+            return false;
+        const double value = round_chromaticity_coord(xy[i]);
+        if (!std::isfinite(value)
+            || value < double(std::numeric_limits<int>::min()) / 1.0e6
+            || value > double(std::numeric_limits<int>::max()) / 1.0e6)
+            return false;
+        normalized[i] = int(std::llround(value * 1.0e6));
+    }
+    return true;
+}
+
+
+// EXR chromaticities imply a linear scene encoding. Compare through the
+// existing six-decimal gamut normalization, match only configured linear scene
+// spaces in the effective view, and otherwise admit the same validated gamut
+// matrix used by numeric PNG synthesis. Negative and out-of-triangle values
+// remain meaningful virtual primaries.
+std::string
+claim_exr_chromaticities(const Resolution& res,
+                         const OCIO::ConstConfigRcPtr& native, cspan<float> xy)
+{
+    if (disable_ocio || disable_builtin_configs || !native)
+        return {};
+    std::array<int, 8> normalized;
+    if (!normalize_exr_chromaticities(xy, normalized))
+        return {};
+    for (const auto& name : res.config.getColorSpaceNames()) {
+        auto cs = native->getColorSpace(name.c_str());
+        if (!cs || cs->isData()
+            || cs->getReferenceSpaceType() != OCIO::REFERENCE_SPACE_SCENE)
+            continue;
+        ColorSpaceInfo info = res.properties(name);
+        if (info.transfer_function_gamma() != 1.0f)
+            continue;
+        auto candidate_xy = info.chromaticities();
+        std::array<int, 8> candidate;
+        if (!normalize_exr_chromaticities(candidate_xy, candidate))
+            continue;
+        if (candidate == normalized)
+            return name;
+    }
+    return {};
+}
+
+
+
+// Chromaticities with a pure-power gamma: an exact wire match against the
+// reference encodings resolves like a declared identity, then a configured
+// space whose derived properties are numerically identical (a renamed local
+// space), and otherwise the reference identity itself so that a later
+// conversion can still supply the missing counterpart. Facts that name none
+// of those resolve to nothing. PNG gamma alone selects the first configured
+// space, in config order, whose transfer matches, display-referred first and
+// then scene-referred; the file states no primaries, so that space's primaries
+// are assumed. Chromaticities alone imply a linear encoding only for EXR
+// (Annex A).
+std::string
+claim_numeric(const Resolution& res, const OCIO::ConstConfigRcPtr& native,
+              cspan<float> xy, float gamma, Container container,
+              NumericState state)
+{
+    const bool gamma_only = xy.empty();
+    if (!gamma_only && xy.size() != 8)
+        return {};
+    if (gamma_only) {
+        int wanted_gamma = 0;
+        if (!wire_gamma(gamma, wanted_gamma) || disable_ocio
+            || disable_builtin_configs || !native)
+            return {};
+        const auto wanted = state == NumericState::Scene
+                                ? OCIO::REFERENCE_SPACE_SCENE
+                                : OCIO::REFERENCE_SPACE_DISPLAY;
+        for (const auto& name : res.config.getColorSpaceNames()) {
+            auto configured     = native->getColorSpace(name.c_str());
+            int candidate_gamma = 0;
+            if (!configured || configured->isData()
+                || configured->getReferenceSpaceType() != wanted
+                || !wire_gamma(res.properties(name).transfer_function_gamma(),
+                               candidate_gamma))
+                continue;
+            if (candidate_gamma == wanted_gamma)
+                return name;
+        }
+        return state == NumericState::Display
+                   ? claim_numeric(res, native, {}, gamma, container,
+                                   NumericState::Scene)
+                   : std::string();
+    }
+    if (!(gamma > 0.0f)) {
+        if (container != Container::EXR)
+            return {};
+        if (std::string identity = claim_identity(res, exr_linear_identity(xy));
+            !identity.empty())
+            return identity;
+        return claim_exr_chromaticities(res, native, xy);
+    }
+    WireEncoding wire;
+    if (!wire_encoding(xy, gamma, wire) || disable_ocio
+        || disable_builtin_configs)
+        return {};
+    std::string identity;
+    const bool constrained = container == Container::PNG;
+    try {
+        const auto wanted = state == NumericState::Scene
+                                ? OCIO::REFERENCE_SPACE_SCENE
+                                : OCIO::REFERENCE_SPACE_DISPLAY;
+        for (const auto& entry : reference_encodings()) {
+            if (!(entry.wire == wire))
+                continue;
+            auto reference = internal_reference()->getColorSpace(
+                entry.identity.c_str());
+            if (!reference
+                || (constrained && reference->getReferenceSpaceType() != wanted))
+                continue;
+            // An authored identity or alias declares the image state even
+            // when the config stores that space on OCIO's scene reference
+            // side (a common studio-config arrangement). The internal
+            // reference candidate above chooses the requested state; honor
+            // the configured spelling that resolves it directly.
+            if (auto local = res.space(entry.identity); !local.empty())
+                return local;
+            if (identity.empty())
+                identity = entry.identity;
+        }
+    } catch (const std::exception& e) {
+        DBG("resolve_colorspace: reference encodings unavailable: {}\n",
+            e.what());
+        return {};
+    }
+    // The wire facts and the reference encodings they are compared against are
+    // the same under every context. Which local space carries them is not: a
+    // definition an override redirects has different properties, so the
+    // candidates are derived under this call's context.
+    // Derive every configured space on the first numeric miss; results are
+    // process-shared, so later files pay only a cheap lookup.
+    for (const auto& name : res.config.getColorSpaceNames()) {
+        auto configured   = native->getColorSpace(name.c_str());
+        const auto wanted = state == NumericState::Scene
+                                ? OCIO::REFERENCE_SPACE_SCENE
+                                : OCIO::REFERENCE_SPACE_DISPLAY;
+        if (!configured || configured->isData()
+            || (constrained && configured->getReferenceSpaceType() != wanted))
+            continue;
+        ColorSpaceInfo info = res.properties(name);
+        WireEncoding candidate;
+        if (wire_encoding(info.chromaticities(), info.transfer_function_gamma(),
+                          candidate)
+            && candidate == wire)
+            return name;
+    }
+    // PNG prefers a display-referred reading but does not state one. When
+    // this configuration defines only a scene-referred space with the same
+    // primaries and gamma, that space is a better answer than a reference
+    // identity it does not define, or than none.
+    if (constrained && state == NumericState::Display) {
+        std::string scene = claim_numeric(res, native, xy, gamma, container,
+                                          NumericState::Scene);
+        if (!scene.empty() && (identity.empty() || !res.space(scene).empty()))
+            return scene;
+    }
+    return identity;
+}
+
+}  // namespace
+
+
+
+pvt::ColorSpaceResolution
+pvt::resolve_colorspace_source(const ColorConfig& config, const ImageSpec& spec,
+                               string_view filename, string_view assignment,
+                               string_view failover, string_view context_key,
+                               string_view context_value,
+                               pvt::FileRulesPrecedence file_rules,
+                               pvt::MissingColorSpace missing,
+                               std::vector<ResolverStep>* trace)
+{
+    auto result = ColorConfigAccess::resolve_source(config, { spec,
+                                                              {},
+                                                              filename,
+                                                              file_rules,
+                                                              missing,
+                                                              assignment,
+                                                              failover,
+                                                              context_key,
+                                                              context_value,
+                                                              trace });
+    // A label this configuration cannot use has never been an answer here.
+    const bool terminal = result.disposition
+                          == ColorSpaceStatus::TerminalUnknown;
+    const bool named    = terminal
+                          || result.disposition == ColorSpaceStatus::Resolved;
+    return { named ? std::move(result.name) : std::string(),
+             terminal,
+             result.source,
+             result.disposition,
+             result.approximate,
+             trace ? metadata_warnings(spec, {}, filename)
+                   : std::vector<std::string>() };
+}
+
+
+
+// The one reason PNG's cICP supremacy gives: the failed full RGB claim and
+// every legacy chunk it hides share it, so a trace reader sees one fact.
+static constexpr string_view cicp_suppression_reason
+    = "full RGB CICP claim OIIO cannot identify; the container's legacy color "
+      "chunks are suppressed";
+
+
+
+// Bounded printable evidence for the numeric metadata rule: the eight
+// chromaticity values as read and the gamma the claim was given. Only ever
+// called when a caller asked for a trace.
+static std::string
+numeric_evidence(const ImageSpec& spec, cspan<float> xy)
+{
+    if (xy.empty())
+        return Strutil::fmt::format("gamma {:g}",
+                                    spec.get_float_attribute("oiio:Gamma"));
+    return Strutil::fmt::format("chromaticities {}, gamma {:g}",
+                                Strutil::join(xy, ","),
+                                spec.get_float_attribute("oiio:Gamma"));
+}
+
+
+
+// Classify only clear input errors here. Finite values rejected by the
+// normalization or gamut machinery are supported-range misses.
+static bool
+malformed_numeric(cspan<float> xy, float gamma, bool gamma_supplied)
+{
+    for (float coordinate : xy)
+        if (!std::isfinite(coordinate))
+            return true;
+    return gamma_supplied && (!std::isfinite(gamma) || gamma < 0.0f);
+}
+
+
+
+static constexpr string_view cicp_malformed_reason
+    = "CICP attribute is not four integers, so it states no tuple";
+static constexpr string_view chromaticities_malformed_reason
+    = "chromaticities attribute is not eight floats, so it states no gamut";
+static constexpr string_view numeric_malformed_reason
+    = "non-finite chromaticity or negative/non-finite supplied gamma";
+
+
+
+ColorConfigAccess::Source
+ColorConfigAccess::resolve_source(const ColorConfig& config,
+                                  const Request& request)
+{
+    const ImageSpec& spec = request.spec;
+    auto resolved         = [](std::string name, pvt::ColorSpaceSource source,
+                               bool approximate = false) {
+        return Source { std::move(name), Disposition::Resolved, source,
+                        approximate };
+    };
+
+    // Every record site is guarded by the sink itself, so a caller that wants
+    // no trace pays for no candidate string, no reason and no step. `reason`
+    // is always a literal: the step keeps a view of it, not a copy.
+    using Rule                                  = pvt::ResolverStep::Rule;
+    using Outcome                               = pvt::ResolverStep::Outcome;
+    std::vector<pvt::ResolverStep>* const trace = request.trace;
+    auto record = [trace](Rule rule, Outcome outcome, string_view candidate,
+                          std::string resolved_name, string_view reason) {
+        trace->push_back({ rule, outcome, std::string(candidate),
+                           std::move(resolved_name), reason });
+    };
+
+    // One effective context for the whole call. Acquiring the view of this
+    // configuration under it is native acquisition, and a failure to acquire
+    // is never a verdict: nothing is retained and the next call tries again.
+    // Answering from the configuration's own context instead would let
+    // default-context evidence stand in for the caller's.
+    // The caller's own spellings are offered as names that may read a
+    // variable, so an override the configuration never reads still reaches
+    // the assignment or failover written to use it. Held for as long as the
+    // lookups below, which the sibling owns.
+    const auto seen = config.getImpl()->context_view(
+        request.context_key, request.context_value,
+        Strutil::fmt::format("{} {}", request.assignment, request.failover));
+    if (!seen)
+        return {};
+    const ColorConfig::Impl* view = seen.get();
+    const Resolution res {
+        config,
+        [view](string_view name) { return view->configured_space(name); },
+        [view](string_view name) { return view->color_space_info(name, true); },
+        view->config_ ? view->config_->getCurrentContext()
+                      : OCIO::ConstContextRcPtr(),
+    };
+    const OCIO::ConstConfigRcPtr native = view->config_;
+    auto claim_file_rules = [&](Rule rule,
+                                pvt::ColorSpaceSource source) -> Source {
+        if (request.filename.empty()) {
+            if (trace)
+                record(rule, Outcome::Skipped, {}, {},
+                       "no filename for FileRules to match");
+            return {};
+        }
+        const string_view candidate
+            = config.getColorSpaceFromFilepath(request.filename, "", true);
+        if (auto result = claim_identity(res, candidate); !result.empty()) {
+            if (trace)
+                record(rule, Outcome::Matched, candidate, result,
+                       "FileRules name a space this configuration can use");
+            return resolved(std::move(result), source);
+        }
+        if (trace)
+            record(rule, Outcome::Missed, candidate, {},
+                   "FileRules name nothing this configuration can use");
+        return {};
+    };
+    auto configured_assignment = [&](string_view assignment) {
+        if (auto result = res.space(assignment); !result.empty())
+            return result;
+        const std::string expanded = res.expand(assignment);
+        return expanded.empty() ? std::string() : res.space(expanded);
+    };
+    // Nothing is known. A color space this configuration names or aliases
+    // "unknown" is the config author's catch-space and answers first;
+    // otherwise the literal, which conversion refuses as a source.
+    auto unknown_result = [&](pvt::ColorSpaceSource source, string_view reason,
+                              bool catchable = true) -> Source {
+        if (auto caught = catchable ? res.space("unknown") : std::string();
+            !caught.empty()) {
+            if (trace)
+                record(Rule::TerminalPolicy, Outcome::Matched, "unknown",
+                       caught, reason);
+            return resolved(std::move(caught), source);
+        }
+        if (trace)
+            record(Rule::TerminalPolicy, Outcome::Matched, {}, "unknown",
+                   reason);
+        return { "unknown", Disposition::TerminalUnknown, source };
+    };
+    auto finish_miss = [&](bool terminal, bool said_unknown,
+                           bool catchable = true) -> Source {
+        if (auto result = claim_identity(res, request.failover);
+            !result.empty()) {
+            if (trace)
+                record(Rule::Failover, Outcome::Matched, request.failover,
+                       result, "failover yields a usable encoding");
+            return resolved(std::move(result), pvt::ColorSpaceSource::Failover);
+        }
+        // A caller's own spelling that missed with something non-empty behind
+        // it named a space this configuration does not define, which is a
+        // mistake and not the config author's to catch. One the context
+        // resolved away named nothing, and stays catchable.
+        const bool failover_named = !request.failover.empty()
+                                    && !res.resolves_to_nothing(
+                                        request.failover);
+        if (failover_named)
+            catchable = false;
+        if (trace)
+            record(Rule::Failover,
+                   request.failover.empty() ? Outcome::Skipped
+                                            : Outcome::Missed,
+                   request.failover, {},
+                   request.failover.empty() ? "no failover requested"
+                   : failover_named
+                       ? "failover names nothing this configuration "
+                         "can use"
+                       : "failover resolves to nothing");
+        // Some source said "unknown", or named something this configuration
+        // cannot use. That is evidence, and once every other rule is
+        // exhausted it is the answer, whatever the configuration's strict
+        // parsing setting says. A default assignment would overwrite a
+        // statement the file actually made.
+        if (terminal || said_unknown)
+            return unknown_result(terminal
+                                      ? pvt::ColorSpaceSource::CICP
+                                      : pvt::ColorSpaceSource::TerminalPolicy,
+                                  terminal
+                                      ? cicp_suppression_reason
+                                      : "a color space was stated and nothing "
+                                        "here can use it",
+                                  catchable);
+        // No information at all. The caller decides whether the
+        // configuration's own policy fills it in.
+        if (request.missing == pvt::MissingColorSpace::Preserve) {
+            if (trace)
+                record(Rule::TerminalPolicy, Outcome::Skipped, {}, {},
+                       "missing color space policy preserves what was found");
+            return {};
+        }
+        if (native && native->isStrictParsingEnabled())
+            return unknown_result(pvt::ColorSpaceSource::TerminalPolicy,
+                                  "strict parsing makes unknown terminal",
+                                  catchable);
+
+        if (native) {
+            try {
+                auto rules = native->getFileRules();
+                if (rules && rules->getNumEntries()) {
+                    string_view candidate = rules->getColorSpace(
+                        rules->getNumEntries() - 1);
+                    if (auto result = configured_assignment(candidate);
+                        !result.empty()) {
+                        if (trace)
+                            record(Rule::FileRulesDefault, Outcome::Matched,
+                                   candidate, result,
+                                   "last FileRules entry is usable");
+                        return resolved(std::move(result),
+                                        pvt::ColorSpaceSource::FileRulesDefault);
+                    }
+                    if (trace)
+                        record(Rule::FileRulesDefault, Outcome::Missed,
+                               candidate, {},
+                               "last FileRules entry is not usable");
+                } else if (trace) {
+                    record(Rule::FileRulesDefault, Outcome::Skipped, {}, {},
+                           "config has no FileRules entries");
+                }
+                if (auto result = configured_assignment(OCIO::ROLE_DEFAULT);
+                    !result.empty()) {
+                    if (trace)
+                        record(Rule::DefaultRole, Outcome::Matched,
+                               OCIO::ROLE_DEFAULT, result,
+                               "default role is usable");
+                    return resolved(std::move(result),
+                                    pvt::ColorSpaceSource::DefaultRole);
+                }
+                if (trace)
+                    record(Rule::DefaultRole, Outcome::Missed,
+                           OCIO::ROLE_DEFAULT, {},
+                           "default role is not usable");
+            } catch (const OCIO::Exception& e) {
+                config.getImpl()->error("OCIO default assignment failed: {}",
+                                        e.what());
+                return {};
+            }
+        } else if (trace) {
+            record(Rule::DefaultRole, Outcome::Skipped, {}, {},
+                   "no native OCIO configuration to ask");
+        }
+        config.getImpl()->error("Config has no usable default assignment");
+        return {};
+    };
+
+    // An explicit assignment is the caller's decision: a miss falls to the
+    // failover, never to file metadata.
+    if (!request.assignment.empty()) {
+        if (auto result = claim_identity(res, request.assignment);
+            !result.empty()) {
+            if (trace)
+                record(Rule::Assignment, Outcome::Matched, request.assignment,
+                       result, "assignment yields a usable encoding");
+            return resolved(std::move(result),
+                            pvt::ColorSpaceSource::Assignment);
+        }
+        // An assignment is judged only after the effective context has had
+        // its say. One that resolves to nothing named nothing, so the
+        // terminal may be the config author's catch-space; one that resolves
+        // to a name this configuration cannot use is a mistake, and stays the
+        // error it has always been rather than being caught.
+        const bool nothing = res.resolves_to_nothing(request.assignment);
+        if (trace)
+            record(Rule::Assignment, Outcome::Missed, request.assignment, {},
+                   nothing ? "assignment resolves to nothing"
+                           : "assignment names nothing this configuration "
+                             "can use");
+        return finish_miss(false, true, nothing);
+    }
+    if (trace)
+        record(Rule::Assignment, Outcome::Skipped, {}, {},
+               "caller named no color space");
+
+    if (spec.get_int_attribute("acesImageContainerFlag") == 1) {
+        if (auto result = claim_identity(res, "lin_ap0_scene");
+            !result.empty()) {
+            if (trace)
+                record(Rule::ACES, Outcome::Matched, "lin_ap0_scene", result,
+                       "acesImageContainerFlag is set");
+            return resolved(std::move(result), pvt::ColorSpaceSource::ACES);
+        }
+        if (trace)
+            record(Rule::ACES, Outcome::Missed, "lin_ap0_scene", {},
+                   "acesImageContainerFlag is set but AP0 is not usable");
+    } else if (trace) {
+        record(Rule::ACES, Outcome::Skipped, {}, {},
+               "no acesImageContainerFlag");
+    }
+
+    if (request.file_rules == pvt::FileRulesPrecedence::First) {
+        if (auto result = claim_file_rules(
+                Rule::FileRulesFirst, pvt::ColorSpaceSource::FileRulesFirst);
+            result.disposition == Disposition::Resolved)
+            return result;
+    } else if (trace) {
+        record(Rule::FileRulesFirst, Outcome::Skipped, {}, {},
+               "FileRules do not take precedence over metadata here");
+    }
+
+    const string_view interop_id = spec.get_string_attribute("colorInteropID");
+    if (auto result = claim_identity(res, interop_id); !result.empty()) {
+        if (trace)
+            record(Rule::InteropID, Outcome::Matched, interop_id, result,
+                   "colorInteropID yields a usable encoding");
+        return resolved(std::move(result), pvt::ColorSpaceSource::InteropID);
+    }
+    if (trace)
+        record(Rule::InteropID,
+               interop_id.empty() ? Outcome::Skipped : Outcome::Missed,
+               interop_id, {},
+               interop_id.empty()
+                   ? "no colorInteropID"
+                   : "colorInteropID is not usable by this configuration");
+    // A file's "unknown", or an ID this configuration cannot use, is evidence
+    // that does not help. Resolution goes on, and the terminal below answers
+    // "unknown" if nothing else does.
+    bool said_unknown = !interop_id.empty();
+
+    const Container container = container_of(request.format_name,
+                                             request.filename);
+    bool suppress_in_file     = false;
+    if (const ParamValue* p = spec.find_attribute("CICP",
+                                                  TypeDesc(TypeDesc::INT, 4))) {
+        cspan<int> cicp = p->as_cspan<int>();
+        // A literal either way, so a caller that wants no trace still pays
+        // nothing to format: the claim reports which reason applies and the
+        // record below picks it up.
+        string_view cicp_reason = "CICP tuple identifies a usable encoding";
+        bool approximate        = false;
+        if (auto result = claim_cicp(res, cicp, trace ? &cicp_reason : nullptr,
+                                     &approximate);
+            !result.empty()) {
+            if (trace)
+                record(Rule::CICP,
+                       approximate ? Outcome::Approximate : Outcome::Matched,
+                       Strutil::join(cicp, "/"), result, cicp_reason);
+            return resolved(std::move(result), pvt::ColorSpaceSource::CICP,
+                            approximate);
+        }
+        // PNG declares cICP supreme over its legacy color chunks: a full RGB
+        // claim OIIO cannot identify still hides them, while FileRules and
+        // the failover remain available. Unspecified or partial tuples make
+        // no claim and fall through.
+        suppress_in_file = container == Container::PNG && cicp.size() == 4
+                           && cicp[0] != 2 && cicp[1] != 2 && cicp[2] == 0;
+        if (trace)
+            record(Rule::CICP, Outcome::Missed, Strutil::join(cicp, "/"), {},
+                   suppress_in_file ? cicp_suppression_reason
+                                    : "CICP tuple identifies nothing this "
+                                      "configuration can use");
+    } else if (trace) {
+        // The untyped lookup distinguishes malformed from absent evidence.
+        const bool present = spec.find_attribute("CICP") != nullptr;
+        record(Rule::CICP, present ? Outcome::Invalid : Outcome::Skipped, {},
+               {}, present ? cicp_malformed_reason : "no CICP tuple");
+    }
+
+    // Numeric claims compare against the native configuration so renamed
+    // spaces can be recognized under the effective context.
+    if (!suppress_in_file) {
+        if (spec.find_attribute("ICCProfile")) {
+            if (trace)
+                record(Rule::ICC, Outcome::Skipped, {}, {},
+                       "ICC profiles are not used to select a color space");
+        } else if (trace) {
+            record(Rule::ICC, Outcome::Skipped, {}, {}, "no ICC profile");
+        }
+        // PNG's sRGB chunk is a raw fact the reader records as "png:sRGB".
+        // It outranks gAMA/cHRM in the container's own precedence; a reader
+        // label alone is not proof of the chunk. OIIO keeps its established
+        // scene-referred reading of it.
+        if (spec.find_attribute("png:sRGB")) {
+            if (auto result = claim_identity(res, "srgb_rec709_scene");
+                !result.empty()) {
+                if (trace)
+                    record(Rule::PNGsRGB, Outcome::Matched, "srgb_rec709_scene",
+                           result, "PNG sRGB chunk is present");
+                return resolved(std::move(result),
+                                pvt::ColorSpaceSource::PNGsRGB);
+            }
+            if (trace)
+                record(Rule::PNGsRGB, Outcome::Missed, "srgb_rec709_scene", {},
+                       "PNG sRGB chunk is present but sRGB is not usable");
+        } else if (trace) {
+            record(Rule::PNGsRGB, Outcome::Skipped, {}, {},
+                   "no PNG sRGB chunk");
+        }
+        if (const ParamValue* xy = spec.find_attribute("chromaticities",
+                                                       TypeDesc(TypeDesc::FLOAT,
+                                                                8))) {
+            if (auto result = claim_numeric(
+                    res, native, xy->as_cspan<float>(),
+                    spec.get_float_attribute("oiio:Gamma"), container,
+                    spec.get_string_attribute("oiio:PNGNumericState") != "scene"
+                        ? NumericState::Display
+                        : NumericState::Scene);
+                !result.empty()) {
+                if (trace)
+                    record(Rule::NumericMetadata, Outcome::Matched,
+                           numeric_evidence(spec, xy->as_cspan<float>()),
+                           result,
+                           "numeric color metadata yields a usable encoding");
+                return resolved(std::move(result),
+                                pvt::ColorSpaceSource::NumericMetadata);
+            }
+            // Chromaticities nothing here can use are evidence that does not
+            // help, like an unusable ID: they end as "unknown", never as a
+            // default that ignores them.
+            said_unknown = true;
+            if (trace) {
+                const bool malformed
+                    = malformed_numeric(xy->as_cspan<float>(),
+                                        spec.get_float_attribute("oiio:Gamma"),
+                                        spec.find_attribute("oiio:Gamma"));
+                record(Rule::NumericMetadata,
+                       malformed ? Outcome::Invalid : Outcome::Missed,
+                       numeric_evidence(spec, xy->as_cspan<float>()), {},
+                       malformed ? numeric_malformed_reason
+                                 : "chromaticities and gamma identify nothing "
+                                   "this configuration can use");
+            }
+        } else if (spec.find_attribute("oiio:Gamma")) {
+            const float gamma = spec.get_float_attribute("oiio:Gamma");
+            if (auto result = claim_numeric(
+                    res, native, {}, gamma, container,
+                    container == Container::PNG
+                            && spec.get_string_attribute("oiio:PNGNumericState")
+                                   != "scene"
+                        ? NumericState::Display
+                        : NumericState::Scene);
+                !result.empty()) {
+                if (trace)
+                    record(Rule::NumericMetadata, Outcome::Matched,
+                           numeric_evidence(spec, {}), result,
+                           "numeric color metadata yields a usable encoding");
+                return resolved(std::move(result),
+                                pvt::ColorSpaceSource::NumericMetadata);
+            }
+            said_unknown = true;
+            if (trace)
+                record(Rule::NumericMetadata,
+                       malformed_numeric({}, gamma, true) ? Outcome::Invalid
+                                                          : Outcome::Missed,
+                       numeric_evidence(spec, {}), {},
+                       malformed_numeric({}, gamma, true)
+                           ? numeric_malformed_reason
+                           : "gamma identifies no transfer this configuration "
+                             "can use");
+        } else if (trace) {
+            // Same distinction the cICP rule makes: eight floats or no gamut.
+            const bool present = spec.find_attribute("chromaticities")
+                                 != nullptr;
+            record(Rule::NumericMetadata,
+                   present ? Outcome::Invalid : Outcome::Skipped, {}, {},
+                   present ? chromaticities_malformed_reason
+                           : "no chromaticities");
+        }
+    } else if (trace) {
+        // Truthful about what the container's own precedence hid, which is
+        // the fact an operator cannot otherwise see.
+        for (Rule rule : { Rule::ICC, Rule::PNGsRGB, Rule::NumericMetadata })
+            record(rule, Outcome::Skipped, {}, {}, cicp_suppression_reason);
+    }
+
+    // Non-default FileRules, including OIIO's convention of a color space
+    // name embedded in the filename. Rule matching is native and reads no
+    // context; the spelling a rule yields is resolved and expanded like every
+    // other assignment source. A caller holding an already-converted buffer
+    // turns this step off: a rule matching the name that buffer kept would
+    // outrank, and undo, the label the conversion wrote.
+    if (request.file_rules == pvt::FileRulesPrecedence::Fallback) {
+        if (auto result
+            = claim_file_rules(Rule::FileRulesFallback,
+                               pvt::ColorSpaceSource::FileRulesFallback);
+            result.disposition == Disposition::Resolved)
+            return result;
+    } else if (trace) {
+        record(Rule::FileRulesFallback, Outcome::Skipped, {}, {},
+               request.file_rules == pvt::FileRulesPrecedence::First
+                   ? "FileRules already took precedence over metadata"
+                   : "FileRules are off for this resolution");
+    }
+
+    // The reader's own label, format defaults included, ranks below the
+    // config's FileRules as it always has for oiiotool, and above the failover.
+    if (!suppress_in_file) {
+        string_view label = spec.get_string_attribute("oiio:ColorSpace");
+        if (auto result = claim_identity(res, label); !result.empty()) {
+            if (trace)
+                record(Rule::ReaderLabel, Outcome::Matched, label, result,
+                       "the reader's label yields a usable encoding");
+            return resolved(std::move(result),
+                            pvt::ColorSpaceSource::ReaderLabel);
+        }
+        if (trace)
+            record(Rule::ReaderLabel,
+                   label.empty() ? Outcome::Skipped : Outcome::Missed, label,
+                   {},
+                   label.empty() ? "the reader left no label"
+                                 : "the reader's label is not usable by this "
+                                   "configuration");
+        // Reached and not usable by this configuration: the same evidence a
+        // colorInteropID nothing can use is.
+        said_unknown |= !label.empty();
+    } else if (trace) {
+        record(Rule::ReaderLabel, Outcome::Skipped, {}, {},
+               cicp_suppression_reason);
+    }
+
+    return finish_miss(suppress_in_file, said_unknown);
+}
+
+
+
+//////////////////////////////////////////////////////////////////////////
+//
 // Image Processing Implementations
+
+
+// The source encoding of `src` when a consumer names none: what the shared
+// metadata resolver establishes under the consumer's own config and the
+// context its processor is built with.
+//
+// The container comes from the reader that produced the buffer, so a direct
+// PNG or EXR is read by its own container's rules here exactly as it is when
+// the same file is resolved by name. The buffer's name is not offered as a
+// filename and FileRules are off: a rule matching the name a previous
+// conversion left behind outranks, and would undo, the label it wrote.
+//
+// An image that states nothing at all is the configuration's decision, not
+// this function's: strict parsing answers "unknown", and otherwise the
+// config's default file rule and then its `default` role do. An image that
+// states something nothing here can use answers "unknown", which the caller
+// refuses as a source.
+static std::string
+implicit_source(const ImageBuf& src, const ColorConfig& colorconfig,
+                string_view context_key, string_view context_value,
+                pvt::MissingColorSpace missing
+                = pvt::MissingColorSpace::ConfigPolicy)
+{
+    auto resolved = ColorConfigAccess::resolve_source(
+        colorconfig, { src.spec(),
+                       src.file_format_name(),
+                       {},
+                       pvt::FileRulesPrecedence::MetadataOnly,
+                       missing,
+                       {},
+                       {},
+                       context_key,
+                       context_value });
+    return std::move(resolved.name);
+}
+
+
+
+// Remove metadata that describes a prior source color space.
+static void
+clear_colorspace_source_metadata(ImageSpec& spec)
+{
+    // Mastering display metadata is deliberately not listed. The
+    // set_colorspace() that follows removes ICC profiles and oiiotool's
+    // marker itself, and keeps "Exif:ColorSpace" only where it agrees.
+    for (const char* attr :
+         { "oiio:ColorSpace", "colorInteropID", "CICP", "chromaticities",
+           "oiio:Chromaticities", "acesImageContainerFlag", "png:sRGB",
+           "oiio:PNGNumericState", "oiio:Gamma", "tiff:ColorSpace",
+           "tiff:PhotometricInterpretation" })
+        spec.extra_attribs.remove(attr, TypeUnknown, false);
+}
+
+
+
+// After a real conversion of the `converted` region of `dst`, describe the
+// pixels as `destination`. The facts that described the source encoding go,
+// the selected config tags the destination, and a portable identity is
+// attached only when the whole color image was converted under the default
+// context. Mixed output has no single identity and is tagged unknown.
+static void
+tag_converted(ImageBuf& dst, const ColorConfig& colorconfig, ROI converted,
+              string_view destination, bool default_context)
+{
+    converted = roi_intersection(converted, dst.roi());
+    if (converted.npixels() <= 0 || converted.nchannels() <= 0)
+        return;
+    ROI rgb             = dst.roi();
+    rgb.chend           = std::min(3, rgb.chend);
+    const bool complete = converted.contains(rgb);
+    auto& spec          = dst.specmod();
+    // None of the source's color metadata describes the result.
+    clear_colorspace_source_metadata(spec);
+    // A display view with no display color space names no destination.
+    if (destination.empty())
+        spec.erase_attribute("Exif:ColorSpace");
+    colorconfig.set_colorspace(spec, complete ? destination : "unknown");
+    // get_color_interop_id uses the config's default context. Do not use
+    // that inference to identify pixels converted with context overrides.
+    string_view id = complete && default_context
+                         ? colorconfig.get_color_interop_id(destination)
+                         : string_view();
+    // The standard unknown ID prevents a writer from guessing using a
+    // different config. Mixed-space output has no single destination ID.
+    spec.attribute("colorInteropID", id.empty() ? "unknown" : id);
+}
+
 
 
 bool
@@ -7529,23 +8850,28 @@ ImageBufAlgo::colorconvert(ImageBuf& dst, const ImageBuf& src, string_view from,
                            int nthreads)
 {
     OIIO::pvt::LoggedTimer logtime("IBA::colorconvert");
+    if (!colorconfig)
+        colorconfig = &ColorConfig::default_colorconfig();
+    std::string implicit;
     if (from.empty() || from == "current") {
-        from = src.spec().get_string_attribute("oiio:Colorspace",
-                                               "scene_linear");
+        implicit = implicit_source(src, *colorconfig, context_key,
+                                   context_value);
+        from     = implicit;
     }
-    if (from.empty() || from == "unknown" || to.empty() || to == "unknown") {
+    auto missing_name = [&](string_view name) {
+        return name.empty()
+               || (Strutil::iequals(name, "unknown")
+                   && colorconfig->getColorSpaceIndex(name) < 0);
+    };
+    if (missing_name(from) || missing_name(to)) {
         dst.errorfmt("Unknown color space name (from=\"{}\", to=\"{}\")", from,
                      to);
         return false;
     }
 
-    if (!colorconfig)
-        colorconfig = &ColorConfig::default_colorconfig();
-
     ColorProcessorHandle processor
-        = colorconfig->createColorProcessor(colorconfig->resolve(from),
-                                            colorconfig->resolve(to),
-                                            context_key, context_value);
+        = colorconfig->createColorProcessor(from, to, context_key,
+                                            context_value);
     if (!processor) {
         if (colorconfig->has_error())
             dst.errorfmt("{}", colorconfig->geterror());
@@ -7556,15 +8882,26 @@ ImageBufAlgo::colorconvert(ImageBuf& dst, const ImageBuf& src, string_view from,
         return false;
     }
 
+    // Own names that may refer to metadata changed by an in-place conversion.
+    const bool source_data = colorconfig->isData(from);
+    const std::string destination(source_data ? from : to);
+    // Whether the pixels were converted under the configuration's own context,
+    // which is a question about the context the processor used, not about how
+    // the key and value arguments were spelled.
+    const bool default_context
+        = ColorConfigAccess::default_context(*colorconfig, context_key,
+                                             context_value);
+    const bool preserve_metadata = source_data
+                                   || (from == to && processor->isNoOp());
+    ROI converted = roi.defined() ? roi_intersection(roi, src.roi())
+                                  : src.roi();
     logtime.stop(-1);  // transition to other colorconvert
     bool ok = colorconvert(dst, src, processor.get(), unpremult, roi, nthreads);
-    if (ok) {
-        // Coming from a non-color space preserves the original space
-        // DBG("done, setting output colorspace to {}\n", to);
-        if (colorconfig->isData(from))
-            to = from;
-        dst.specmod().set_colorspace(to);
-    }
+    if (ok && source_data)
+        dst.specmod().attribute("oiio:ColorSpace", destination);
+    if (ok && !preserve_metadata)
+        tag_converted(dst, *colorconfig, converted, destination,
+                      default_context);
     return ok;
 }
 
@@ -7840,22 +9177,32 @@ ImageBufAlgo::ociolook(ImageBuf& dst, const ImageBuf& src, string_view looks,
                        const ColorConfig* colorconfig, ROI roi, int nthreads)
 {
     OIIO::pvt::LoggedTimer logtime("IBA::ociolook");
-    if (from.empty() || from == "current") {
-        auto linearspace = colorconfig->resolve("scene_linear");
-        from = src.spec().get_string_attribute("oiio:Colorspace", linearspace);
+    if (!colorconfig)
+        colorconfig = &ColorConfig::default_colorconfig();
+    // The image's own encoding, which its metadata establishes as it does for
+    // colorconvert(). An image that states nothing is still taken to be
+    // scene_linear here.
+    std::string current;
+    if (from.empty() || from == "current" || to.empty() || to == "current") {
+        current = implicit_source(src, *colorconfig, key, value,
+                                  pvt::MissingColorSpace::Preserve);
+        if (current.empty())
+            current = colorconfig->resolve("scene_linear");
     }
-    if (to.empty() || to == "current") {
-        auto linearspace = colorconfig->resolve("scene_linear");
-        to = src.spec().get_string_attribute("oiio:Colorspace", linearspace);
-    }
-    if (from.empty() || to.empty()) {
-        dst.errorfmt("Unknown color space name");
+    if (from.empty() || from == "current")
+        from = current;
+    if (to.empty() || to == "current")
+        to = current;
+    if (from.empty() || to.empty()
+        || ((Strutil::iequals(from, "unknown")
+             || Strutil::iequals(to, "unknown"))
+            && colorconfig->getColorSpaceIndex("unknown") < 0)) {
+        dst.errorfmt("Unknown color space name (from=\"{}\", to=\"{}\")", from,
+                     to);
         return false;
     }
     ColorProcessorHandle processor;
     {
-        if (!colorconfig)
-            colorconfig = &ColorConfig::default_colorconfig();
         processor = colorconfig->createLookTransform(looks,
                                                      colorconfig->resolve(from),
                                                      colorconfig->resolve(to),
@@ -7903,47 +9250,68 @@ ImageBufAlgo::ociodisplay(ImageBuf& dst, const ImageBuf& src,
                           const ColorConfig* colorconfig, ROI roi, int nthreads)
 {
     OIIO::pvt::LoggedTimer logtime("IBA::ociodisplay");
-    ColorProcessorHandle processor;
-    {
-        if (!colorconfig)
-            colorconfig = &ColorConfig::default_colorconfig();
-        if (from.empty() || from == "current") {
-            auto linearspace = colorconfig->resolve("scene_linear");
-            from = src.spec().get_string_attribute("oiio:ColorSpace",
-                                                   linearspace);
-        }
-        if (from.empty()) {
-            dst.errorfmt("Unknown color space name");
-            return false;
-        }
-        processor
-            = colorconfig->createDisplayTransform(display, view,
-                                                  colorconfig->resolve(from),
-                                                  looks, inverse, key, value);
-        if (!processor) {
-            if (colorconfig->has_error())
-                dst.errorfmt("{}", colorconfig->geterror());
-            else
-                dst.errorfmt(
-                    "Could not construct the color transform (unknown error)");
-            return false;
-        }
+    if (!colorconfig)
+        colorconfig = &ColorConfig::default_colorconfig();
+    std::string implicit;
+    if (from.empty() || from == "current") {
+        // `from` is the scene end of the forward transform whichever way it
+        // runs. Forward, that is what the image is, which its metadata
+        // establishes. Inverse, the image is display-encoded and its
+        // metadata describes that end, so the scene end is the configured
+        // scene-linear space unless the caller names another.
+        implicit = inverse ? std::string(colorconfig->resolve("scene_linear"))
+                           : implicit_source(src, *colorconfig, key, value);
+        from     = implicit;
+    }
+    // "unknown" states that nothing is known, so it is no more usable as a
+    // source here than in colorconvert(), unless the config defines a space
+    // by that name.
+    if (from.empty()
+        || (Strutil::iequals(from, "unknown")
+            && colorconfig->getColorSpaceIndex(from) < 0)) {
+        dst.errorfmt("Unknown color space name (from=\"{}\")", from);
+        return false;
+    }
+    if (colorconfig->isData(from)) {
+        // Data is not color: the pixels and the facts describing them stay.
+        return &dst == &src
+               || ImageBufAlgo::copy(dst, src, TypeUnknown, roi, nthreads);
+    }
+    // Own the selected names before an in-place operation can change metadata
+    // backing the caller's string_views. Use this choice for pixels and tags.
+    const auto selected
+        = ColorConfigAccess::select_display_view(*colorconfig, ustring(display),
+                                                 ustring(view), ustring(from),
+                                                 key, value);
+    const bool default_context
+        = ColorConfigAccess::default_context(*colorconfig, key, value);
+    ColorProcessorHandle processor = colorconfig->createDisplayTransform(
+        selected.display, selected.view, selected.source, ustring(looks),
+        inverse, ustring(key), ustring(value));
+    if (!processor) {
+        if (colorconfig->has_error())
+            dst.errorfmt("{}", colorconfig->geterror());
+        else
+            dst.errorfmt(
+                "Could not construct the color transform (unknown error)");
+        return false;
     }
 
+    ROI converted = roi.defined() ? roi_intersection(roi, src.roi())
+                                  : src.roi();
     logtime.stop();  // transition to colorconvert
     bool ok = colorconvert(dst, src, processor.get(), unpremult, roi, nthreads);
     if (ok) {
-        if (inverse)
-            dst.specmod().set_colorspace(colorconfig->resolve(from));
-        else {
-            // Tag with the display and view the processor used.
-            const auto selected = ColorConfigAccess::select_display_view(
-                *colorconfig, ustring(display), ustring(view),
-                ustring(colorconfig->resolve(from)), key, value);
-            dst.specmod().set_colorspace(
-                colorconfig->getDisplayViewColorSpaceName(
-                    selected.display.string(), selected.view.string()));
+        std::string destination;
+        if (inverse) {
+            destination = selected.source.string();
+        } else if (const char* out = colorconfig->getDisplayViewColorSpaceName(
+                       selected.display.string(), selected.view.string())) {
+            // Forward, the output encoding is the view's display color space.
+            destination = out;
         }
+        tag_converted(dst, *colorconfig, converted, destination,
+                      default_context);
     }
     return ok;
 }
@@ -8127,11 +9495,172 @@ ImageBufAlgo::colorconvert(span<float> color, const ColorProcessor* processor,
 
 namespace {
 
+// Parse a color space name of the form "g<NN>_rec709_(scene|display)".
+static float
+rec709_colorspace_gamma(string_view colorspace)
+{
+    if (!Strutil::parse_prefix(colorspace, "g"))
+        return 0.0f;
+    int g10 = 0;
+    if (!Strutil::parse_int(colorspace, g10) || g10 <= 0)
+        return 0.0f;
+    if (colorspace != "_rec709_scene" && colorspace != "_rec709_display")
+        return 0.0f;
+    return float(g10) / 10.0f;
+}
+
+
+
+// Make the color metadata of `spec` agree with `name`: keep what agrees,
+// rewrite what `name` determines, remove the rest. Return whether any of it
+// contradicted `name`; with `apply` false, only report that. Mastering
+// display metadata is deliberately not listed.
+static bool
+reconcile_colorspace(const ColorConfig& config, ImageSpec& spec,
+                     string_view name, bool apply)
+{
+    bool icc = false;
+    for (const auto& p : spec.extra_attribs)
+        icc |= Strutil::starts_with(p.name(), "ICCProfile");
+    bool present = icc;
+    for (const char* attr :
+         { "chromaticities", "oiio:Chromaticities", "CICP", "colorInteropID",
+           "png:sRGB", "oiio:PNGNumericState", "acesImageContainerFlag",
+           "oiio:Gamma", "Exif:ColorSpace", "tiff:ColorSpace",
+           "tiff:PhotometricInterpretation",
+           pvt::autocc_terminal_unknown_attrib.data() })
+        present |= spec.find_attribute(attr) != nullptr;
+    if (!present)
+        return false;
+
+    // Declared and built-in identities answer from the cheap query; other
+    // spaces pay one cached derivation.
+    ColorSpaceInfo info = config.get_color_space_info(name);
+    if (!ColorSpaceInfoAccess::computed(info,
+                                        ColorSpaceInfoField::Chromaticities)
+        || !ColorSpaceInfoAccess::computed(
+            info, ColorSpaceInfoField::TransferFunction))
+        info = config.derive_color_space_info(name);
+    const string_view id = config.get_color_interop_id(name);
+    const bool srgb = id == "srgb_rec709_scene" || id == "srgb_rec709_display";
+    cspan<float> xy = info.chromaticities();
+    const cspan<int> cicp = config.get_cicp(name);
+    float gamma           = info.transfer_function_gamma();
+    // OIIO's own "g<NN>_rec709" names spell Rec.709 primaries and a gamma.
+    if (xy.size() != 8 && gamma <= 0.0f) {
+        gamma = rec709_colorspace_gamma(id.empty() ? name : id);
+        if (gamma > 0.0f)
+            xy = cspan<float>(exr_chromaticities[0].xy, 8);
+    }
+    bool changed = false;
+    // Keep `attr` when `keep`, else set it from `value` when there is one,
+    // else remove it.
+    auto settle = [&](const char* attr, bool keep, auto&& rewrite) {
+        const ParamValue* p = spec.find_attribute(attr);
+        if (!p || keep)
+            return;
+        changed = true;
+        if (apply)
+            rewrite(attr);
+    };
+    auto erase = [&](const char* attr) { spec.erase_attribute(attr); };
+    auto near  = [&](const ParamValue* p) {
+        if (!p || p->type() != TypeDesc(TypeDesc::FLOAT, 8) || xy.size() != 8)
+            return false;
+        // The tolerance the OpenEXR writer compares an ID's primaries with.
+        const float* v = (const float*)p->data();
+        for (int i = 0; i < 8; ++i)
+            if (!(std::abs(v[i] - xy[i]) <= 1.0e-4f))
+                return false;
+        return true;
+    };
+    for (const char* attr : { "chromaticities", "oiio:Chromaticities" })
+        settle(attr, near(spec.find_attribute(attr)), [&](const char* a) {
+            if (xy.size() == 8)
+                spec.attribute(a, TypeDesc(TypeDesc::FLOAT, 8), xy.data());
+            else
+                erase(a);
+        });
+    const ParamValue* c = spec.find_attribute("CICP",
+                                              TypeDesc(TypeDesc::INT, 4));
+    bool same_cicp      = false;
+    if (c && cicp.size() == 4) {
+        const int* v = (const int*)c->data();
+        const auto a = normalized_cicp_pair(v[0], v[1]);
+        const auto b = normalized_cicp_pair(cicp[0], cicp[1]);
+        same_cicp    = a.primaries == b.primaries && a.transfer == b.transfer;
+    }
+    // `name` determines primaries and transfer; matrix and range describe
+    // the stored samples and stay as they were.
+    settle("CICP", same_cicp, [&](const char* a) {
+        if (c && cicp.size() == 4) {
+            const int* v      = (const int*)c->data();
+            const int code[4] = { cicp[0], cicp[1], v[2], v[3] };
+            spec.attribute(a, TypeDesc(TypeDesc::INT, 4), code);
+        } else {
+            erase(a);
+        }
+    });
+    const string_view old_id = spec.get_string_attribute("colorInteropID");
+    settle("colorInteropID",
+           !old_id.empty() && (old_id == id || Strutil::iequals(old_id, name)),
+           [&](const char* a) {
+               if (!id.empty())
+                   spec.attribute(a, id);
+               else
+                   erase(a);
+           });
+    // An ICC profile cannot be regenerated, and nothing here identifies one,
+    // so it goes without counting as a contradiction.
+    if (icc) {
+        if (apply) {
+            spec.erase_attribute("ICCProfile");
+            spec.erase_attribute("ICCProfile:.*");
+        }
+    }
+    settle("png:sRGB", srgb, erase);
+    settle("oiio:PNGNumericState",
+           spec.get_string_attribute("oiio:PNGNumericState")
+               == ColorSpaceInfoAccess::image_state(info),
+           erase);
+    settle("acesImageContainerFlag",
+           spec.get_int_attribute("acesImageContainerFlag") != 1
+               || id == "lin_ap0_scene",
+           erase);
+    // PNG's gAMA units are the comparison, so 2.19998 read from a file
+    // agrees with 2.2.
+    const float old_gamma = spec.get_float_attribute("oiio:Gamma");
+    settle("oiio:Gamma",
+           gamma > 0.0f && old_gamma > 0.0f
+               && std::lround(100000.0 / old_gamma)
+                      == std::lround(100000.0 / gamma),
+           [&](const char* a) {
+               if (gamma > 0.0f)
+                   spec.attribute(a, gamma);
+               else
+                   erase(a);
+           });
+    // Exif says anything but 0xffff (uncalibrated) is sRGB.
+    settle("Exif:ColorSpace",
+           (spec.get_int_attribute("Exif:ColorSpace") != 0xffff) == srgb,
+           erase);
+    // Format tags nothing here can check, and oiiotool's own marker, go
+    // without counting as a contradiction.
+    if (apply)
+        for (const char* attr :
+             { "tiff:ColorSpace", "tiff:PhotometricInterpretation",
+               pvt::autocc_terminal_unknown_attrib.data() })
+            erase(attr);
+    return changed;
+}
+
+
+
 // Set or clear "oiio:ColorSpace" and clear metadata that might contradict
-// it. Without a config, only the built-in sRGB names count as sRGB.
+// it. This is the image readers' path, which uses no color config, so only
+// the built-in sRGB names count as sRGB.
 void
-set_colorspace_attribute(ImageSpec& spec, string_view colorspace,
-                         const ColorConfig* config)
+set_colorspace_attribute(ImageSpec& spec, string_view colorspace)
 {
     // If we're not changing color space, don't mess with anything
     string_view oldspace = spec.get_string_attribute("oiio:ColorSpace");
@@ -8149,10 +9678,9 @@ set_colorspace_attribute(ImageSpec& spec, string_view colorspace,
     // including some format-specific things that we don't want to propagate
     // from input to output if we know that color space transformations have
     // occurred.
-    bool srgb = config ? config->equivalent(colorspace, "srgb_rec709_scene")
-                       : (Strutil::iequals(colorspace, "srgb_rec709_scene")
-                          || Strutil::iequals(colorspace, "srgb_texture")
-                          || Strutil::iequals(colorspace, "sRGB"));
+    bool srgb = Strutil::iequals(colorspace, "srgb_rec709_scene")
+                || Strutil::iequals(colorspace, "srgb_texture")
+                || Strutil::iequals(colorspace, "sRGB");
     if (!srgb)
         spec.erase_attribute("Exif:ColorSpace");
     spec.erase_attribute("tiff:ColorSpace");
@@ -8163,29 +9691,26 @@ set_colorspace_attribute(ImageSpec& spec, string_view colorspace,
 
 
 void
-set_colorspace_rec709_gamma_attribute(ImageSpec& spec, float gamma,
-                                      const ColorConfig* config)
+set_colorspace_rec709_gamma_attribute(ImageSpec& spec, float gamma)
 {
     // Round gamma to the nearest hundredth to prevent stupid precision choices
     // and make it easier for apps to make decisions based on known gamma values.
     float g_rounded = std::round(gamma * 100.0f) / 100.0f;
     if (fabsf(g_rounded - 1.0f) <= 0.01f) {
-        set_colorspace_attribute(spec, "lin_rec709_scene", config);
+        set_colorspace_attribute(spec, "lin_rec709_scene");
     } else if (fabsf(g_rounded - 1.8f) <= 0.01f) {
-        set_colorspace_attribute(spec, "g18_rec709_scene", config);
+        set_colorspace_attribute(spec, "g18_rec709_scene");
         spec.attribute("oiio:Gamma", 1.8f);
     } else if (fabsf(g_rounded - 2.2f) <= 0.01f) {
-        set_colorspace_attribute(spec, "g22_rec709_scene", config);
+        set_colorspace_attribute(spec, "g22_rec709_scene");
         spec.attribute("oiio:Gamma", 2.2f);
     } else if (fabsf(g_rounded - 2.4f) <= 0.01f) {
-        set_colorspace_attribute(spec, "g24_rec709_scene", config);
+        set_colorspace_attribute(spec, "g24_rec709_scene");
         spec.attribute("oiio:Gamma", 2.4f);
     } else {
-        set_colorspace_attribute(spec,
-                                 Strutil::fmt::format("g{}_rec709_scene",
-                                                      std::lround(g_rounded
-                                                                  * 10.0f)),
-                                 config);
+        set_colorspace_attribute(
+            spec, Strutil::fmt::format("g{}_rec709_scene",
+                                       std::lround(g_rounded * 10.0f)));
         // Preserve the original gamma value for use in color conversions.
         spec.attribute("oiio:Gamma", gamma);
     }
@@ -8198,7 +9723,25 @@ set_colorspace_rec709_gamma_attribute(ImageSpec& spec, float gamma,
 void
 ColorConfig::set_colorspace(ImageSpec& spec, string_view colorspace) const
 {
-    set_colorspace_attribute(spec, colorspace, this);
+    // A null name resolves an unset label from the spec's own metadata and
+    // touches nothing else.
+    if (colorspace.data() == nullptr) {
+        if (spec.find_attribute("oiio:ColorSpace"))
+            return;
+        auto resolved = pvt::resolve_colorspace_source(*this, spec);
+        if (resolved.status == pvt::ColorSpaceStatus::Resolved
+            && !resolved.name.empty())
+            spec.attribute("oiio:ColorSpace", resolved.name);
+        return;
+    }
+    // An empty name clears the label and leaves the evidence.
+    if (colorspace.empty()) {
+        spec.erase_attribute("oiio:ColorSpace");
+        return;
+    }
+    // Any other name is authoritative, even the one already set.
+    spec.attribute("oiio:ColorSpace", colorspace);
+    reconcile_colorspace(*this, spec, colorspace, true);
 }
 
 
@@ -8206,7 +9749,27 @@ ColorConfig::set_colorspace(ImageSpec& spec, string_view colorspace) const
 void
 ColorConfig::set_colorspace_rec709_gamma(ImageSpec& spec, float gamma) const
 {
-    set_colorspace_rec709_gamma_attribute(spec, gamma, this);
+    // Round gamma to the nearest hundredth to prevent stupid precision choices
+    // and make it easier for apps to make decisions based on known gamma values.
+    float g_rounded = std::round(gamma * 100.0f) / 100.0f;
+    if (fabsf(g_rounded - 1.0f) <= 0.01f) {
+        set_colorspace(spec, "lin_rec709_scene");
+    } else if (fabsf(g_rounded - 1.8f) <= 0.01f) {
+        set_colorspace(spec, "g18_rec709_scene");
+        spec.attribute("oiio:Gamma", 1.8f);
+    } else if (fabsf(g_rounded - 2.2f) <= 0.01f) {
+        set_colorspace(spec, "g22_rec709_scene");
+        spec.attribute("oiio:Gamma", 2.2f);
+    } else if (fabsf(g_rounded - 2.4f) <= 0.01f) {
+        set_colorspace(spec, "g24_rec709_scene");
+        spec.attribute("oiio:Gamma", 2.4f);
+    } else {
+        set_colorspace(spec,
+                       Strutil::fmt::format("g{}_rec709_scene",
+                                            std::lround(g_rounded * 10.0f)));
+        // Preserve the original gamma value for use in color conversions.
+        spec.attribute("oiio:Gamma", gamma);
+    }
 }
 
 
@@ -8288,20 +9851,7 @@ pvt::get_colorspace_info(const ImageSpec& spec, bool derive,
 using v3_1::colordebug;
 using v3_1::disable_builtin_configs;
 using v3_1::disable_ocio;
-
-// Parse a color space name of the form "g<NN>_rec709_(scene|display)".
-static float
-rec709_colorspace_gamma(string_view colorspace)
-{
-    if (!Strutil::parse_prefix(colorspace, "g"))
-        return 0.0f;
-    int g10 = 0;
-    if (!Strutil::parse_int(colorspace, g10) || g10 <= 0)
-        return 0.0f;
-    if (colorspace != "_rec709_scene" && colorspace != "_rec709_display")
-        return 0.0f;
-    return float(g10) / 10.0f;
-}
+using v3_1::rec709_colorspace_gamma;
 
 // For file format writers. Answers nothing when the environment disables
 // color management, and an OpenColorIO exception never escapes into a plugin.
@@ -8337,13 +9887,13 @@ pvt::get_cicp_primaries_chromaticities(int primaries, float xy[8])
 void
 pvt::set_colorspace(ImageSpec& spec, string_view name)
 {
-    v3_1::set_colorspace_attribute(spec, name, nullptr);
+    v3_1::set_colorspace_attribute(spec, name);
 }
 
 void
 pvt::set_colorspace_rec709_gamma(ImageSpec& spec, float gamma)
 {
-    v3_1::set_colorspace_rec709_gamma_attribute(spec, gamma, nullptr);
+    v3_1::set_colorspace_rec709_gamma_attribute(spec, gamma);
 }
 
 string_view
@@ -8409,8 +9959,17 @@ pvt::get_colorspace_rec709_gamma(const ImageSpec& spec, bool use_config)
             return g;
     }
 
-    // Obsolete "oiio:Gamma" attribute for backwards compatibility
-    return spec.get_float_attribute("oiio:Gamma", 0.0f);
+    // Obsolete "oiio:Gamma" attribute for backwards compatibility, unless
+    // chromaticities beside it say the primaries are not Rec.709.
+    const float g         = spec.get_float_attribute("oiio:Gamma", 0.0f);
+    const float rec709[8] = { 0.64f, 0.33f, 0.30f,   0.60f,
+                              0.15f, 0.06f, 0.3127f, 0.3290f };
+    if (const ParamValue* p = spec.find_attribute("chromaticities",
+                                                  TypeDesc(TypeDesc::FLOAT, 8)))
+        for (int i = 0; i < 8 && g != 1.0f; ++i)
+            if (!(std::abs(p->get<float>(i) - rec709[i]) <= 1.0e-4f))
+                return 0.0f;
+    return g;
 }
 
 OIIO_NAMESPACE_END

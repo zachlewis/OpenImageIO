@@ -221,16 +221,67 @@ read_info(png_structp& sp, png_infop& ip, int& bit_depth, int& color_type,
         spec.alpha_channel   = 1;
     }
 
-    int srgb_intent;
-    double gamma = 0.0;
-    if (png_get_sRGB(sp, ip, &srgb_intent)) {
+    // Native color chunks. The label keeps its established meaning; the raw
+    // facts are recorded separately so a shared consumer can apply PNG's own
+    // precedence (cICP, iCCP, sRGB, then gAMA/cHRM) without inferring the
+    // sRGB chunk from a label that a format default could also have supplied.
+    int srgb_intent       = 0;
+    const bool has_srgb   = png_get_sRGB(sp, ip, &srgb_intent) != 0;
+    png_fixed_point gamma = 0;
+    png_fixed_point xy[8] = {};
+#ifdef PNG_FIXED_POINT_SUPPORTED
+    const bool has_gamma = png_get_gAMA_fixed(sp, ip, &gamma) && gamma > 0;
+    const bool has_xy    = png_get_cHRM_fixed(sp, ip, &xy[6], &xy[7], &xy[0],
+                                              &xy[1], &xy[2], &xy[3], &xy[4],
+                                              &xy[5])
+                           != 0;
+#else
+    // Some libpng builds expose only floating getters. Recover their native
+    // wire quantization rather than treating this as a generic float match.
+    double floating_gamma = 0.0, floating_xy[8] = {};
+    const bool has_gamma = png_get_gAMA(sp, ip, &floating_gamma)
+                           && floating_gamma > 0.0;
+    const bool has_xy = png_get_cHRM(sp, ip, &floating_xy[6], &floating_xy[7],
+                                     &floating_xy[0], &floating_xy[1],
+                                     &floating_xy[2], &floating_xy[3],
+                                     &floating_xy[4], &floating_xy[5])
+                        != 0;
+    if (has_gamma)
+        gamma = png_fixed_point(std::lround(floating_gamma * 100000));
+    if (has_xy)
+        for (int i = 0; i < 8; ++i)
+            xy[i] = png_fixed_point(std::lround(floating_xy[i] * 100000));
+#endif
+    // gAMA and cHRM together name a Rec.709 gamma when the primaries agree
+    // within the 1e-4 the PNG writer compares them with. The constants are
+    // the wire values, so the label never depends on a color config. gAMA
+    // alone states only a transfer function, and other primaries, or
+    // primaries with no gamma, are recorded below but not named.
+    const png_fixed_point rec709[8] = { 64000, 33000, 30000, 60000,
+                                        15000, 6000,  31270, 32900 };
+    bool rec709_xy                  = has_xy;
+    for (int i = 0; i < 8 && rec709_xy; ++i)
+        rec709_xy = std::abs(xy[i] - rec709[i]) <= 10;
+    if (has_srgb) {
         spec.attribute("oiio:ColorSpace", "srgb_rec709_scene");
-    } else if (png_get_gAMA(sp, ip, &gamma) && gamma > 0.0) {
-        float g = float(1.0 / gamma);
-        pvt::set_colorspace_rec709_gamma(spec, g);
-    } else {
+    } else if (has_gamma && has_xy && rec709_xy) {
+        pvt::set_colorspace_rec709_gamma(spec, float(100000.0 / gamma));
+    } else if (!has_gamma && !has_xy) {
         // If there's no info at all, assume sRGB.
         spec.attribute("oiio:ColorSpace", "srgb_rec709_scene");
+    }
+    if (has_srgb)
+        spec.attribute("png:sRGB", srgb_intent);
+    // The exact wire exponent, not the label's rounded one: 563/256 (Adobe
+    // RGB) must stay distinct from 2.2.
+    if (has_gamma)
+        spec.attribute("oiio:Gamma", float(100000.0 / gamma));
+    if (has_xy) {
+        float chromaticities[8];
+        for (int i = 0; i < 8; ++i)
+            chromaticities[i] = float(double(xy[i]) / 100000);
+        spec.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                       chromaticities);
     }
 
     if (png_get_valid(sp, ip, PNG_INFO_iCCP)) {
@@ -292,6 +343,12 @@ read_info(png_structp& sp, png_infop& ip, int& bit_depth, int& color_type,
             spec.attribute(text_ptr[i].key, text_ptr[i].text);
         }
     }
+    // A file with no color chunk that states its colorInteropID is "unknown"
+    // has said all it can, which the sRGB assumption would contradict.
+    if (!has_srgb && !has_gamma && !has_xy
+        && Strutil::iequals(spec.get_string_attribute("colorInteropID"),
+                            "unknown"))
+        spec.erase_attribute("oiio:ColorSpace");
     spec.x = png_get_x_offset_pixels(sp, ip);
     spec.y = png_get_y_offset_pixels(sp, ip);
 
@@ -638,10 +695,25 @@ write_info(png_structp& sp, png_infop& ip, int& color_type, ImageSpec& spec,
     // the primaries and transfer function itself.
     std::vector<uint8_t> icc_profile        = get_colorspace_icc_profile(spec);
     OIIO_MAYBE_UNUSED bool wrote_colorspace = false;
-    // gAMA alone reads back as Rec.709 primaries, so CICP may still be needed.
+    // gAMA alone states no primaries, so CICP may still be needed.
     OIIO_MAYBE_UNUSED bool wrote_gamma_only = false;
     srgb                                    = false;
-    if (is_colorspace_srgb(spec)) {
+    // An unlabeled spec that carries a gamma or primaries (as the PNG reader
+    // leaves primaries other than Rec.709), or a colorInteropID of "unknown"
+    // (as a reader that cannot identify its pixels leaves), is not the
+    // silent spec that defaults to sRGB; those facts are written instead.
+    const bool unnamed = spec.get_string_attribute("oiio:ColorSpace").empty();
+    const ParamValue* native
+        = unnamed ? spec.find_attribute("chromaticities",
+                                        TypeDesc(TypeDesc::FLOAT, 8))
+                  : nullptr;
+    const bool unknown
+        = unnamed
+          && Strutil::iequals(spec.get_string_attribute("colorInteropID"),
+                              "unknown");
+    const bool stated = native || unknown
+                        || (unnamed && spec.find_attribute("oiio:Gamma"));
+    if (is_colorspace_srgb(spec, !stated)) {
         gamma = 1.0f;
         srgb  = true;
         if (setjmp(png_jmpbuf(sp)))  // NOLINT(cert-err52-cpp)
@@ -666,10 +738,11 @@ write_info(png_structp& sp, png_infop& ip, int& color_type, ImageSpec& spec,
         if (!cicp_covers && icc_profile.empty()) {
             // The span borrows from the info, which must outlive it.
             const ColorSpaceInfo info = pvt::get_colorspace_info(spec, true);
-            cspan<float> xy           = info.chromaticities();
+            cspan<float> xy           = native ? native->as_cspan<float>()
+                                               : info.chromaticities();
             float rec709[8];
-            // Rec.709 primaries, and the unknown primaries of a Rec.709 gamma
-            // or linear name, need no cHRM beside the gAMA written for them.
+            // Known primaries need cHRM beside gAMA when cICP cannot carry
+            // the encoding. gAMA alone never states them, including Rec.709.
             const bool compared
                 = xy.size() == 8
                   && pvt::get_cicp_primaries_chromaticities(1, rec709);
@@ -679,14 +752,15 @@ write_info(png_structp& sp, png_infop& ip, int& color_type, ImageSpec& spec,
             // cHRM stores each coordinate as an unsigned count of 1/100000,
             // so it holds no negative coordinate, such as ACES AP0's blue y,
             // and no zero one either. Those primaries really are lost.
-            bool representable = other;
+            bool representable = compared;
             for (int i = 0; i < 8 && representable; ++i)
                 representable = xy[i] > 0.0f && xy[i] <= 1.0f;
-            // A pure power only the color space's own properties give is not
-            // a Rec.709 gamma, and gAMA alone reads back as one, so it is
-            // written only beside cHRM or for primaries known to be Rec.709.
-            const float own = gamma == 0.0f ? info.transfer_function_gamma()
-                                            : 0.0f;
+            // A pure power only the color space's own properties give is
+            // written beside cHRM when its primaries are known. With no known
+            // primaries, gAMA alone still preserves the transfer fact.
+            const float own = gamma != 0.0f ? 0.0f
+                              : unnamed ? spec.get_float_attribute("oiio:Gamma")
+                                        : info.transfer_function_gamma();
             if (own != 0.0f && (representable || (compared && !other)))
                 gamma = own;
             if (representable && gamma != 0.0f) {
@@ -698,12 +772,13 @@ write_info(png_structp& sp, png_infop& ip, int& color_type, ImageSpec& spec,
             } else if ((other && !representable)
                        || (own != 0.0f && gamma == 0.0f)) {
                 debugfmt("OpenImageIO WARNING: PNG cannot represent the "
-                         "primaries of \"{}\"; the file carries {} and reads "
-                         "back as Rec.709\n",
+                         "primaries of \"{}\"; the file carries {}\n",
                          spec.get_string_attribute("oiio:ColorSpace"),
-                         gamma != 0.0f ? "gAMA alone"
-                                       : "no color chunk at all");
-            } else if (gamma == 0.0f
+                         gamma != 0.0f
+                             ? "gAMA alone without stating primaries"
+                             : "no color chunk at all and uses PNG's sRGB "
+                               "default");
+            } else if (gamma == 0.0f && (native || !unknown)
                        && !ColorConfig::default_colorconfig().isData(
                            spec.get_string_attribute("oiio:ColorSpace"))) {
                 // cHRM is written only beside a transfer function the file
@@ -794,10 +869,8 @@ write_info(png_structp& sp, png_infop& ip, int& color_type, ImageSpec& spec,
     // write colorspace metadata yet.
     cspan<int> cicp = get_colorspace_cicp(spec, !wrote_colorspace);
     if (cicp.empty() && wrote_gamma_only) {
-        // Keep primaries other than Rec.709 that the gAMA chunk cannot carry.
+        // Keep any known primaries that the gAMA chunk cannot carry.
         cicp = get_colorspace_cicp(spec, true);
-        if (!cicp.empty() && cicp[0] == 1)
-            cicp = cspan<int>();  // Rec.709: gAMA alone loses nothing
     }
     if (!cicp.empty()) {
         png_byte vals[4];

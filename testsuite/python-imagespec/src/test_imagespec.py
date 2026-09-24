@@ -237,6 +237,36 @@ try:
     print ("  after set_colorspace('sRGB'):", s.get_string_attribute("oiio:ColorSpace"))
     s.set_colorspace("")
     print ("  after set_colorspace(''):", s.get_string_attribute("oiio:ColorSpace"))
+    # None resolves an unset label from the spec's own metadata and touches
+    # nothing else; "" clears only the label; a set label is left alone.
+    rec709 = (0.64, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.3290)
+    adobe = (0.64, 0.33, 0.21, 0.71, 0.15, 0.06, 0.3127, 0.3290)
+    cc = oiio.ColorConfig()
+    for form in ("method", "module") :
+        s = oiio.ImageSpec()
+        s.attribute("chromaticities", "float[8]", rec709)
+        s.attribute("oiio:Gamma", 2.2)
+        if form == "method" :
+            s.set_colorspace(None)
+        else :
+            oiio.set_colorspace(s)
+        print ("  " + form + " None resolves:",
+               cc.get_color_interop_id(s.get_string_attribute("oiio:ColorSpace")),
+               len(s.extra_attribs))
+        s.set_colorspace("") if form == "method" else oiio.set_colorspace(s, "")
+        print ("  " + form + " '' clears the label only:",
+               s.get_string_attribute("oiio:ColorSpace", "<unset>"),
+               len(s.extra_attribs))
+        s.attribute("oiio:ColorSpace", "lin_ap0_scene")
+        s.set_colorspace()
+        print ("  set label left alone:", s.get_string_attribute("oiio:ColorSpace"))
+        s = oiio.ImageSpec()
+        s.attribute("chromaticities", "float[8]", adobe)
+        s.attribute("oiio:Gamma", 2.2)
+        s.set_colorspace(None)
+        print ("  nothing portable resolves:",
+               s.get_string_attribute("oiio:ColorSpace", "<unset>"),
+               len(s.extra_attribs))
 
     # Also test global OIIO functions here
     print ("\nTesting global attribute store/retrieve:")

@@ -620,6 +620,15 @@ test_color_space_info()
     srgb.attribute("oiio:ColorSpace", "srgb_rec709_scene");
     OIIO_CHECK_EQUAL(pvt::get_colorspace_rec709_gamma(srgb), 0.0f);
 
+    // Explicit gamma 1 is linear even beside non-Rec.709 primaries. Writers
+    // use this when no portable ID establishes the transfer function.
+    const float adobe[8] = { 0.640f, 0.330f, 0.210f,  0.710f,
+                             0.150f, 0.060f, 0.3127f, 0.3290f };
+    ImageSpec gamma_one;
+    gamma_one.attribute("oiio:Gamma", 1.0f);
+    gamma_one.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8), adobe);
+    OIIO_CHECK_EQUAL(pvt::get_colorspace_rec709_gamma(gamma_one), 1.0f);
+
     // A name or ID that spells its Rec.709 gamma reports that gamma without
     // any further measurement, and with no oiio:Gamma attribute to fall back
     // on. This is what keeps a writer's tag when nothing else supplies one.
@@ -1757,6 +1766,745 @@ test_private_properties()
 
 
 
+// The resolved name alone, so the assertions below read as calls.
+static std::string
+resolve_colorspace(
+    const ColorConfig& config, const ImageSpec& spec, string_view filename = "",
+    string_view assignment = "", string_view failover = "",
+    string_view context_key = "", string_view context_value = "",
+    pvt::FileRulesPrecedence file_rules = pvt::FileRulesPrecedence::Fallback,
+    pvt::MissingColorSpace missing      = pvt::MissingColorSpace::Preserve)
+{
+    return pvt::resolve_colorspace_source(config, spec, filename, assignment,
+                                          failover, context_key, context_value,
+                                          file_rules, missing)
+        .name;
+}
+
+
+
+static void
+test_metadata_resolution()
+{
+    if (!ColorConfig::supportsOpenColorIO())
+        return;
+    const std::string filename = Filesystem::temp_directory_path() + "/"
+                                 + Filesystem::unique_path() + ".ocio";
+    // "data" and "bypass" are aliases, as the CIF ID must be: OCIO rejects a
+    // config whose alias is also a role name, and the built-in configs
+    // already exercise the role spelling. A glob rule needs an explicit
+    // extension; OCIO rejects an empty one. No interchange role is declared,
+    // so every expectation below is about authored names and aliases rather
+    // than about what a measured comparison would recognize.
+    OIIO_CHECK_ASSERT(Filesystem::write_text_file(
+        filename,
+        "ocio_profile_version: 2.3\n"
+        "strictparsing: false\n"
+        "roles: {default: Linear, scene_linear: Linear}\n"
+        "file_rules:\n"
+        "  - !<Rule> {name: plates, colorspace: sRGB, pattern: plate_*,"
+        " extension: \"*\"}\n"
+        "  - !<Rule> {name: Default, colorspace: Gamma22}\n"
+        "colorspaces:\n"
+        "  - !<ColorSpace>\n    name: Linear\n"
+        "    aliases: [lin_rec709_scene]\n"
+        "  - !<ColorSpace>\n    name: sRGB\n"
+        "    aliases: [srgb_rec709_scene, srgb_rec709_display]\n"
+        "    to_scene_reference: !<ExponentTransform> {value: 2.2}\n"
+        "  - !<ColorSpace>\n    name: Gamma22\n"
+        "    aliases: [g22_rec709_scene]\n"
+        "    to_scene_reference: !<ExponentTransform> {value: 2.2}\n"
+        "  - !<ColorSpace>\n    name: AP0\n"
+        "    aliases: [lin_ap0_scene]\n"
+        "  - !<ColorSpace>\n    name: PQ\n"
+        "    aliases: [\"cicp:9-16-0-1\"]\n"
+        "  - !<ColorSpace>\n    name: SD\n"
+        "    aliases: [\"cicp:6-14-0-1\", \"cicp:6-1-5-0\"]\n"
+        "  - !<ColorSpace>\n    name: AdobeRGB\n"
+        "    aliases: [g22_adobergb_display]\n"
+        "  - !<ColorSpace>\n    name: Data\n    isdata: true\n"
+        "    aliases: [data, bypass]\n"
+        "display_colorspaces:\n"
+        "  - !<ColorSpace>\n    name: DisplayGamma22\n"
+        "    aliases: [g22_rec709_display]\n"
+        "    to_display_reference: !<ExponentTransform> {value: 2.2}\n"));
+    ColorConfig config(filename);
+    // A rejected fixture silently falls back to the built-in inventory and
+    // every native expectation below would fail for the wrong reason.
+    OIIO_CHECK_EQUAL(config.geterror(false), "");
+    OIIO_CHECK_ASSERT(config.getColorSpaceIndex("Data") >= 0);
+    if (config.has_error()) {
+        Filesystem::remove(filename);
+        return;
+    }
+    const float rec709[8] = { 0.640f, 0.330f, 0.300f,  0.600f,
+                              0.150f, 0.060f, 0.3127f, 0.3290f };
+    const float adobe[8]  = { 0.640f, 0.330f, 0.210f,  0.710f,
+                              0.150f, 0.060f, 0.3127f, 0.3290f };
+    const float custom[8] = { 0.70f, 0.29f, 0.17f,   0.80f,
+                              0.13f, 0.05f, 0.3127f, 0.3290f };
+
+    // Explicit assignment wins; a miss consults only the failover.
+    ImageSpec spec;
+    spec.attribute("colorInteropID", "srgb_rec709_scene");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.exr"), "sRGB");
+    using Source    = pvt::ColorSpaceSource;
+    using Status    = pvt::ColorSpaceStatus;
+    auto provenance = pvt::resolve_colorspace_source(config, spec,
+                                                     "plate_a.exr");
+    OIIO_CHECK_EQUAL(provenance.name,
+                     resolve_colorspace(config, spec, "plate_a.exr"));
+    OIIO_CHECK_ASSERT(provenance.source == Source::InteropID);
+    OIIO_CHECK_ASSERT(provenance.status == Status::Resolved);
+    provenance = pvt::resolve_colorspace_source(config, spec, "plate_a.exr",
+                                                "lin_rec709_scene");
+    OIIO_CHECK_EQUAL(provenance.name, "Linear");
+    OIIO_CHECK_ASSERT(provenance.source == Source::Assignment);
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.exr",
+                                        "lin_rec709_scene"),
+                     "Linear");
+    // An assignment this configuration cannot use is a statement, and once
+    // the failover is exhausted the answer is "unknown", never a default.
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.exr", "nope"),
+                     "unknown");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.exr", "nope",
+                                        "scene_linear"),
+                     "Linear");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.exr",
+                                        "lin_rec709_scene", "", "", "",
+                                        pvt::FileRulesPrecedence::First),
+                     "Linear");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "", "bypass"), "Data");
+
+    using Missing = pvt::MissingColorSpace;
+    using Rules   = pvt::FileRulesPrecedence;
+    ImageSpec missing;
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, missing, "frame.exr", "", "",
+                                        "", "", Rules::Fallback,
+                                        Missing::Preserve),
+                     "");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, missing, "frame.exr", "", "",
+                                        "", "", Rules::Fallback,
+                                        Missing::ConfigPolicy),
+                     "Gamma22");
+    provenance = pvt::resolve_colorspace_source(config, missing, "frame.exr",
+                                                "", "", "", "", Rules::Fallback,
+                                                Missing::ConfigPolicy);
+    OIIO_CHECK_EQUAL(provenance.name, "Gamma22");
+    OIIO_CHECK_ASSERT(provenance.source == Source::FileRulesDefault);
+    OIIO_CHECK_ASSERT(provenance.status == Status::Resolved);
+    // An invalid explicit assignment skips file facts and answers "unknown"
+    // whatever the missing-source policy says, because something was stated.
+    // A usable failover retains priority.
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.exr", "nope", "",
+                                        "", "", Rules::Fallback,
+                                        Missing::ConfigPolicy),
+                     "unknown");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.exr", "unknown",
+                                        "", "", "", Rules::Fallback,
+                                        Missing::ConfigPolicy),
+                     "unknown");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.exr", "unknown",
+                                        "data", "", "", Rules::Fallback,
+                                        Missing::ConfigPolicy),
+                     "Data");
+
+    // ACES container over a conflicting ID; data/bypass are terminal;
+    // unknown lets FileRules apply.
+    spec.attribute("acesImageContainerFlag", 1);
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec), "AP0");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.exr", "", "", "",
+                                        "", pvt::FileRulesPrecedence::First),
+                     "AP0");
+    spec.erase_attribute("acesImageContainerFlag");
+    spec.attribute("colorInteropID", "data");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.exr", "", "", "",
+                                        "",
+                                        pvt::FileRulesPrecedence::MetadataOnly),
+                     "Data");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.exr", "", "", "",
+                                        "", pvt::FileRulesPrecedence::First),
+                     "sRGB");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.exr", "", "", "",
+                                        "", pvt::FileRulesPrecedence::Fallback),
+                     "Data");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.exr"), "Data");
+    spec.attribute("colorInteropID", "bypass");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec), "Data");
+    // A file's "unknown" is evidence that does not help, so resolution goes
+    // on: a matching FileRule still answers. With everything exhausted the
+    // answer is "unknown", on this config whose strictparsing is off.
+    spec.attribute("colorInteropID", "unknown");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.exr"), "sRGB");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "frame.exr"), "unknown");
+    provenance = pvt::resolve_colorspace_source(config, spec, "frame.exr");
+    OIIO_CHECK_ASSERT(provenance.terminal_unknown);
+    OIIO_CHECK_ASSERT(provenance.status == Status::TerminalUnknown);
+    // An ID this configuration cannot use behaves the same way, and the
+    // rest of the file's evidence is still consulted first.
+    spec.attribute("colorInteropID", "notaspace");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "frame.exr"), "unknown");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.exr"), "sRGB");
+    spec.attribute("colorInteropID", "unknown");
+    spec.attribute("colorInteropID", "studio:custom_space");
+    spec.attribute("oiio:ColorSpace", "scene_linear");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "frame.exr"), "Linear");
+    spec.erase_attribute("colorInteropID");
+    spec.erase_attribute("oiio:ColorSpace");
+
+    // CICP: exact alias, table identity, unspecified, limited range.
+    const int pq[]          = { 9, 16, 0, 1 };
+    const int srgb[]        = { 1, 13, 0, 1 };
+    const int p3[]          = { 12, 13, 0, 1 };
+    const int unspecified[] = { 2, 2, 0, 1 };
+    const int limited[]     = { 1, 13, 0, 0 };
+    const int unsupported[] = { 250, 250, 0, 1 };
+    spec.attribute("CICP", TypeDesc(TypeDesc::INT, 4), pq);
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "frame.png"), "PQ");
+    spec.attribute("CICP", TypeDesc(TypeDesc::INT, 4), srgb);
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.png"), "sRGB");
+    spec.attribute("CICP", TypeDesc(TypeDesc::INT, 4), p3);
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "frame.png"),
+                     "srgb_p3d65_scene");
+    spec.attribute("oiio:ColorSpace", "srgb_rec709_scene");
+    spec.attribute("CICP", TypeDesc(TypeDesc::INT, 4), unspecified);
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "frame.png"), "sRGB");
+    // A full PNG claim OIIO cannot identify hides the reader label but
+    // reaches FileRules and the failover; other containers fall through.
+    for (const int* claim : { limited, unsupported }) {
+        spec.attribute("CICP", TypeDesc(TypeDesc::INT, 4), claim);
+        OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "frame.png"),
+                         "unknown");
+        OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "frame.png", "", "",
+                                            "", "", Rules::Fallback,
+                                            Missing::ConfigPolicy),
+                         "unknown");
+        provenance = pvt::resolve_colorspace_source(config, spec, "frame.png",
+                                                    "", "", "", "",
+                                                    Rules::Fallback,
+                                                    Missing::ConfigPolicy);
+        OIIO_CHECK_EQUAL(provenance.name, "unknown");
+        OIIO_CHECK_ASSERT(provenance.source == Source::CICP);
+        OIIO_CHECK_ASSERT(provenance.status == Status::TerminalUnknown);
+        OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "frame.png", "",
+                                            "data"),
+                         "Data");
+        OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.png", "",
+                                            "data"),
+                         "sRGB");
+        OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "plate_a.png", "",
+                                            "data", "", "",
+                                            pvt::FileRulesPrecedence::First),
+                         "sRGB");
+        OIIO_CHECK_EQUAL(
+            resolve_colorspace(config, spec, "plate_a.png", "", "data", "", "",
+                               pvt::FileRulesPrecedence::MetadataOnly),
+            "Data");
+        OIIO_CHECK_EQUAL(resolve_colorspace(config, spec, "frame.exr", "",
+                                            "data"),
+                         "sRGB");
+    }
+
+    // Standard-definition tuples, on a spec of their own so the cases above
+    // keep the state they established. This config defines neither SD color
+    // space, so the identity itself is returned for a later conversion,
+    // exactly as the P3 case above does.
+    {
+        ImageSpec sd;
+        auto claim = [&](const int tuple[4], string_view file) {
+            sd.attribute("CICP", TypeDesc(TypeDesc::INT, 4), tuple);
+            return resolve_colorspace(config, sd, file);
+        };
+        const int sd525[]  = { 6, 1, 0, 1 };
+        const int sd625[]  = { 5, 8, 0, 1 };
+        const int sd240m[] = { 7, 1, 0, 1 };
+        OIIO_CHECK_EQUAL(claim(sd525, "frame.png"), "oiio:g24_rec601_display");
+        OIIO_CHECK_EQUAL(claim(sd625, "frame.png"),
+                         "oiio:lin_rec601pal_display");
+        // SMPTE 240M primaries are the 525-line primaries exactly.
+        OIIO_CHECK_EQUAL(claim(sd240m, "frame.png"), "oiio:g24_rec601_display");
+        // An exact authored alias claims its tuple as spelled, whether or not
+        // anything else would have recognized it: the alternate transfer code
+        // that the table would have answered for, and the narrow-range YCbCr
+        // tuple that nothing else claims at all.
+        const int aliased_transfer[] = { 6, 14, 0, 1 };
+        const int aliased_carrier[]  = { 6, 1, 5, 0 };
+        OIIO_CHECK_EQUAL(claim(aliased_transfer, "frame.png"), "SD");
+        OIIO_CHECK_EQUAL(claim(aliased_carrier, "frame.png"), "SD");
+        // Without an alias, a tuple describing a carrier this library does not
+        // hand back -- narrow range, or YCbCr coefficients -- claims nothing.
+        const int narrow[] = { 6, 1, 0, 0 };
+        const int ycbcr[]  = { 5, 1, 5, 0 };
+        OIIO_CHECK_EQUAL(claim(narrow, "frame.exr"), "");
+        OIIO_CHECK_EQUAL(claim(ycbcr, "frame.exr"), "");
+    }
+    spec.erase_attribute("CICP");
+
+    // Numeric metadata selects only published or configured identities.
+    // Gamma alone supplies no gamut but can select a configured transfer
+    // match. An otherwise complete encoding that matches neither is evidence
+    // that does not help: it ends as "unknown", never as the configuration's
+    // missing-source default.
+    ImageSpec numeric;
+    numeric.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8), adobe);
+    numeric.attribute("oiio:Gamma", 2.19921875f);
+    provenance = pvt::resolve_colorspace_source(config, numeric, "frame.png");
+    OIIO_CHECK_EQUAL(provenance.name, "AdobeRGB");
+    OIIO_CHECK_ASSERT(provenance.source == Source::NumericMetadata);
+    numeric.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8), custom);
+    numeric.attribute("oiio:Gamma", 1.8f);
+    provenance = pvt::resolve_colorspace_source(config, numeric, "frame.png",
+                                                "", "", "", "", Rules::Fallback,
+                                                Missing::ConfigPolicy);
+    OIIO_CHECK_EQUAL(provenance.name, "unknown");
+    OIIO_CHECK_ASSERT(provenance.terminal_unknown);
+    ImageSpec gamma_only;
+    gamma_only.attribute("oiio:Gamma", 2.2f);
+    provenance = pvt::resolve_colorspace_source(config, gamma_only,
+                                                "frame.png");
+    OIIO_CHECK_EQUAL(provenance.name, "DisplayGamma22");
+    OIIO_CHECK_ASSERT(provenance.source == Source::NumericMetadata);
+    gamma_only.attribute("oiio:PNGNumericState", "scene");
+    provenance = pvt::resolve_colorspace_source(config, gamma_only,
+                                                "frame.png");
+    OIIO_CHECK_ASSERT(provenance.name != "DisplayGamma22");
+    OIIO_CHECK_FALSE(provenance.name.empty());
+    ImageSpec exr_numeric;
+    exr_numeric.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                          rec709);
+    provenance = pvt::resolve_colorspace_source(config, exr_numeric,
+                                                "frame.exr");
+    OIIO_CHECK_EQUAL(provenance.name, "Linear");
+    OIIO_CHECK_ASSERT(provenance.source == Source::NumericMetadata);
+
+    // One effective context expands an explicit selector without changing the
+    // ColorConfig's own context.
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, missing, "frame.exr", "$CS", "",
+                                        "CS", "lin_rec709_scene"),
+                     "Linear");
+    OIIO_CHECK_EQUAL(resolve_colorspace(config, missing, "frame.exr", "$CS"),
+                     "unknown");
+
+    ImageSpec contradictory;
+    contradictory.attribute("colorInteropID", "data");
+    contradictory.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                            rec709);
+    contradictory.attribute("oiio:Gamma", 2.2f);
+    contradictory.attribute("CICP", TypeDesc(TypeDesc::INT, 4), srgb);
+    // Metadata warnings are reported alongside a trace.
+    std::vector<pvt::ResolverStep> trace;
+    provenance = pvt::resolve_colorspace_source(
+        config, contradictory, "frame.exr", "", "", "", "",
+        pvt::FileRulesPrecedence::Fallback, pvt::MissingColorSpace::Preserve,
+        &trace);
+    OIIO_CHECK_ASSERT(
+        std::find(provenance.metadata_warnings.begin(),
+                  provenance.metadata_warnings.end(),
+                  "the bundle is tagged 'data' but carries a gamma")
+        != provenance.metadata_warnings.end());
+
+    // The same resolver under a shipped test config.
+    {
+        ColorConfig unit(OIIO_COLOR_TEST_CONFIG);
+        OIIO_CHECK_FALSE(unit.has_error());
+        const std::string srgb_tx = "sRGB Encoded Rec.709 (sRGB)";
+        ImageSpec interop;
+        interop.attribute("colorInteropID", "srgb_rec709_scene");
+        provenance = pvt::resolve_colorspace_source(unit, interop,
+                                                    "in_srgb_tx.exr");
+        OIIO_CHECK_EQUAL(provenance.name, srgb_tx);
+        OIIO_CHECK_ASSERT(provenance.source == Source::InteropID);
+        OIIO_CHECK_ASSERT(provenance.status == Status::Resolved);
+        OIIO_CHECK_FALSE(provenance.approximate);
+        OIIO_CHECK_EQUAL(resolve_colorspace(unit, interop, "in_srgb_tx.exr", "",
+                                            "", "", "", Rules::First),
+                         srgb_tx);
+        OIIO_CHECK_EQUAL(resolve_colorspace(unit, interop, "in_srgb_tx.exr", "",
+                                            "", "", "", Rules::MetadataOnly),
+                         srgb_tx);
+
+        provenance = pvt::resolve_colorspace_source(unit, ImageSpec(),
+                                                    "in_srgb_tx.exr", "", "",
+                                                    "", "", Rules::First);
+        OIIO_CHECK_EQUAL(provenance.name, srgb_tx);
+        OIIO_CHECK_ASSERT(provenance.source == Source::FileRulesFirst);
+
+        // A label this config cannot use is evidence that does not help:
+        // everything else is exhausted, so the answer is "unknown".
+        ImageSpec unclaimed;
+        unclaimed.attribute("oiio:ColorSpace", "not-in-this-config");
+        provenance = pvt::resolve_colorspace_source(unit, unclaimed,
+                                                    "plate.exr");
+        OIIO_CHECK_EQUAL(provenance.name, "unknown");
+        OIIO_CHECK_ASSERT(provenance.terminal_unknown);
+        OIIO_CHECK_ASSERT(provenance.status == Status::TerminalUnknown);
+
+        provenance = pvt::resolve_colorspace_source(unit, ImageSpec(), "", "",
+                                                    "", "", "", Rules::Fallback,
+                                                    Missing::ConfigPolicy);
+        OIIO_CHECK_EQUAL(provenance.name, "unknown");
+        OIIO_CHECK_ASSERT(provenance.status == Status::TerminalUnknown);
+        OIIO_CHECK_ASSERT(provenance.source == Source::TerminalPolicy);
+
+        const int exact_sd[]       = { 6, 1, 0, 1 };
+        const int approximate_sd[] = { 7, 1, 0, 1 };
+        ImageSpec exact_cicp, approximate_cicp;
+        exact_cicp.attribute("CICP", TypeDesc(TypeDesc::INT, 4), exact_sd);
+        approximate_cicp.attribute("CICP", TypeDesc(TypeDesc::INT, 4),
+                                   approximate_sd);
+        auto exact       = pvt::resolve_colorspace_source(unit, exact_cicp,
+                                                          "plate.png");
+        auto approximate = pvt::resolve_colorspace_source(unit,
+                                                          approximate_cicp,
+                                                          "plate.png");
+        OIIO_CHECK_EQUAL(exact.name, approximate.name);
+        OIIO_CHECK_ASSERT(exact.source == Source::CICP);
+        OIIO_CHECK_ASSERT(approximate.source == Source::CICP);
+        OIIO_CHECK_ASSERT(exact.status == Status::Resolved);
+        OIIO_CHECK_ASSERT(approximate.status == Status::Resolved);
+        OIIO_CHECK_FALSE(exact.approximate);
+        OIIO_CHECK_ASSERT(approximate.approximate);
+
+        // This config defines no Adobe RGB space, so the complete numeric
+        // facts (563/256 exactly) select the identity itself.
+        ImageSpec numeric;
+        numeric.attribute("chromaticities", TypeDesc(TypeDesc::FLOAT, 8),
+                          adobe);
+        numeric.attribute("oiio:Gamma", 2.19921875f);
+        provenance = pvt::resolve_colorspace_source(unit, numeric, "plate.png");
+        OIIO_CHECK_EQUAL(provenance.name, "g22_adobergb_display");
+        OIIO_CHECK_ASSERT(provenance.source == Source::NumericMetadata);
+
+        // Malformed evidence makes no claim; the later reader label remains
+        // usable.
+        const int malformed_cicp[] = { 1, 13, 0 };
+        ImageSpec malformed;
+        malformed.attribute("CICP", TypeDesc(TypeDesc::INT, 3), malformed_cicp);
+        malformed.attribute("oiio:ColorSpace", "lin_rec709_scene");
+        provenance = pvt::resolve_colorspace_source(unit, malformed,
+                                                    "plate.exr");
+        OIIO_CHECK_EQUAL(provenance.name, "Linear Rec.709 (sRGB)");
+        OIIO_CHECK_ASSERT(provenance.source == Source::ReaderLabel);
+    }
+
+    // The terminal policy when an image states nothing at all. Strict
+    // parsing answers "unknown", or a color space the config names or
+    // aliases that, which is the config author's catch-space. Without
+    // strict parsing the config's own default assignment answers.
+    {
+        const std::string strict_name = Filesystem::temp_directory_path() + "/"
+                                        + Filesystem::unique_path() + ".ocio";
+        const char* body
+            = "ocio_profile_version: 2.3\n"
+              "strictparsing: true\n"
+              "roles: {default: Linear, scene_linear: Linear}\n"
+              "file_rules:\n"
+              "  - !<Rule> {name: Default, colorspace: Gamma22}\n"
+              "colorspaces:\n"
+              "  - !<ColorSpace>\n    name: Linear\n"
+              "    aliases: [lin_rec709_scene]\n"
+              "  - !<ColorSpace>\n    name: Gamma22\n"
+              "    aliases: [g22_rec709_scene]\n"
+              "    to_scene_reference: !<ExponentTransform> {value: 2.2}\n";
+        OIIO_CHECK_ASSERT(Filesystem::write_text_file(strict_name, body));
+        ColorConfig strict(strict_name);
+        OIIO_CHECK_EQUAL(strict.geterror(false), "");
+        OIIO_CHECK_EQUAL(resolve_colorspace(strict, ImageSpec(), "frame.exr",
+                                            "", "", "", "", Rules::Fallback,
+                                            Missing::ConfigPolicy),
+                         "unknown");
+        Filesystem::remove(strict_name);
+
+        // Same config, plus a catch-space the author named "unknown".
+        const std::string caught_name = Filesystem::temp_directory_path() + "/"
+                                        + Filesystem::unique_path() + ".ocio";
+        OIIO_CHECK_ASSERT(Filesystem::write_text_file(
+            caught_name,
+            std::string(body)
+                + "  - !<ColorSpace>\n    name: unknown\n    isdata: true\n"
+                  "environment: {EMPTY: \"\"}\n"));
+        ColorConfig caught(caught_name);
+        OIIO_CHECK_EQUAL(caught.geterror(false), "");
+        auto terminal = pvt::resolve_colorspace_source(caught, ImageSpec(),
+                                                       "frame.exr", "", "", "",
+                                                       "", Rules::Fallback,
+                                                       Missing::ConfigPolicy);
+        OIIO_CHECK_EQUAL(terminal.name, "unknown");
+        OIIO_CHECK_FALSE(terminal.terminal_unknown);
+        OIIO_CHECK_ASSERT(terminal.status == Status::Resolved);
+        // And it catches a file that said "unknown" too.
+        ImageSpec said;
+        said.attribute("colorInteropID", "unknown");
+        terminal = pvt::resolve_colorspace_source(caught, said, "frame.exr");
+        OIIO_CHECK_EQUAL(terminal.name, "unknown");
+        OIIO_CHECK_FALSE(terminal.terminal_unknown);
+        // A caller's own name is resolved under the effective context before
+        // it is judged. One that expands to a real space is used; one that
+        // expands to nothing named nothing, so the catch-space answers; one
+        // that expands to a name this configuration lacks is the caller's
+        // mistake and the catch-space does not answer it. A variable the
+        // context does not define comes back unexpanded, which is such a
+        // name and not one that resolved to nothing.
+        OIIO_CHECK_EQUAL(resolve_colorspace(caught, ImageSpec(), "frame.exr",
+                                            "$CS", "", "CS", "Gamma22"),
+                         "Gamma22");
+        terminal = pvt::resolve_colorspace_source(caught, ImageSpec(),
+                                                  "frame.exr", "$EMPTY");
+        OIIO_CHECK_EQUAL(terminal.name, "unknown");
+        OIIO_CHECK_FALSE(terminal.terminal_unknown);
+        terminal = pvt::resolve_colorspace_source(caught, ImageSpec(),
+                                                  "frame.exr", "$CS", "", "CS",
+                                                  "NoSuchSpace");
+        OIIO_CHECK_EQUAL(terminal.name, "unknown");
+        OIIO_CHECK_ASSERT(terminal.terminal_unknown);
+        terminal = pvt::resolve_colorspace_source(caught, ImageSpec(),
+                                                  "frame.exr", "$NOPE");
+        OIIO_CHECK_EQUAL(terminal.name, "unknown");
+        OIIO_CHECK_ASSERT(terminal.terminal_unknown);
+        // The same four, spelled as the caller's failover, and the first two
+        // in the Windows "%VAR%" spelling OpenColorIO also expands. A file
+        // that said "unknown" would be placed in the catch-space by name
+        // before the failover is reached, so these start from an image that
+        // says nothing and let the configuration's policy run out.
+        OIIO_CHECK_EQUAL(resolve_colorspace(caught, ImageSpec(), "frame.exr",
+                                            "", "%CS%", "CS", "Gamma22",
+                                            Rules::Fallback,
+                                            Missing::ConfigPolicy),
+                         "Gamma22");
+        terminal = pvt::resolve_colorspace_source(caught, ImageSpec(),
+                                                  "frame.exr", "", "%EMPTY%",
+                                                  "", "", Rules::Fallback,
+                                                  Missing::ConfigPolicy);
+        OIIO_CHECK_EQUAL(terminal.name, "unknown");
+        OIIO_CHECK_FALSE(terminal.terminal_unknown);
+        terminal = pvt::resolve_colorspace_source(caught, ImageSpec(),
+                                                  "frame.exr", "", "$CS", "CS",
+                                                  "NoSuchSpace",
+                                                  Rules::Fallback,
+                                                  Missing::ConfigPolicy);
+        OIIO_CHECK_EQUAL(terminal.name, "unknown");
+        OIIO_CHECK_ASSERT(terminal.terminal_unknown);
+        terminal = pvt::resolve_colorspace_source(caught, ImageSpec(),
+                                                  "frame.exr", "", "$NOPE", "",
+                                                  "", Rules::Fallback,
+                                                  Missing::ConfigPolicy);
+        OIIO_CHECK_EQUAL(terminal.name, "unknown");
+        OIIO_CHECK_ASSERT(terminal.terminal_unknown);
+        Filesystem::remove(caught_name);
+    }
+
+    Filesystem::remove(filename);
+}
+
+
+// The set_colorspace contract: a name is authoritative over the other color
+// metadata, "" clears only the label, and no name resolves an unset label.
+static void
+test_set_colorspace_contract()
+{
+    if (!ColorConfig::supportsOpenColorIO())
+        return;
+    const ColorConfig& config(ColorConfig::default_colorconfig());
+    const TypeDesc xytype(TypeDesc::FLOAT, 8), cicptype(TypeDesc::INT, 4);
+    const float ap0[8] = { .7347f, .2653f, 0.0f,    1.0f,
+                           .0001f, -.077f, .32168f, .33767f };
+    const float rec709[8]
+        = { .64f, .33f, .30f, .60f, .15f, .06f, .3127f, .3290f };
+    const float adobe[8]
+        = { .64f, .33f, .21f, .71f, .15f, .06f, .3127f, .3290f };
+    auto xy = [&](const ImageSpec& spec) {
+        const ParamValue* p = spec.find_attribute("chromaticities", xytype);
+        return p ? std::vector<float>(p->as_cspan<float>().begin(),
+                                      p->as_cspan<float>().end())
+                 : std::vector<float>();
+    };
+    auto cicp = [&](const ImageSpec& spec) {
+        const ParamValue* p = spec.find_attribute("CICP", cicptype);
+        return p ? std::vector<int>(p->as_cspan<int>().begin(),
+                                    p->as_cspan<int>().end())
+                 : std::vector<int>();
+    };
+    auto is_rec709 = [&](const ImageSpec& spec) {
+        std::vector<float> v = xy(spec);
+        for (size_t i = 0; v.size() == 8 && i < 8; ++i)
+            if (std::abs(v[i] - rec709[i]) > 1.0e-4f)
+                return false;
+        return v.size() == 8;
+    };
+
+    // Contradicting primaries are rewritten, agreeing ones kept, and a stale
+    // ID follows the name. Setting the current name again still reconciles.
+    for (const char* label : { "", "lin_rec709_scene" }) {
+        ImageSpec spec(2, 2, 3, TypeFloat);
+        if (*label)
+            spec.attribute("oiio:ColorSpace", label);
+        spec.attribute("chromaticities", xytype, ap0);
+        spec.attribute("colorInteropID", "lin_ap0_scene");
+        spec.attribute("acesImageContainerFlag", 1);
+        spec.set_colorspace("lin_rec709_scene");
+        OIIO_CHECK_EQUAL(spec.get_string_attribute("oiio:ColorSpace"),
+                         "lin_rec709_scene");
+        OIIO_CHECK_ASSERT(is_rec709(spec));
+        OIIO_CHECK_EQUAL(spec.get_string_attribute("colorInteropID"),
+                         "lin_rec709_scene");
+        OIIO_CHECK_ASSERT(!spec.find_attribute("acesImageContainerFlag"));
+    }
+    {
+        ImageSpec spec(2, 2, 3, TypeFloat);
+        spec.attribute("chromaticities", xytype, rec709);
+        spec.attribute("oiio:Gamma", 1.0f);
+        spec.set_colorspace("lin_rec709_scene");
+        OIIO_CHECK_ASSERT(is_rec709(spec));
+        OIIO_CHECK_EQUAL(spec.get_float_attribute("oiio:Gamma"), 1.0f);
+    }
+
+    // CICP: primaries and transfer follow the name when it has a code, and
+    // matrix and range stay; a name without a code removes it.
+    {
+        const int pq2020[4] = { 9, 16, 0, 1 };
+        ImageSpec spec(2, 2, 3, TypeFloat);
+        spec.attribute("CICP", cicptype, pq2020);
+        spec.set_colorspace("lin_rec709_scene");
+        OIIO_CHECK_ASSERT(cicp(spec) == std::vector<int>({ 1, 8, 0, 1 }));
+        spec.attribute("CICP", cicptype, pq2020);
+        spec.set_colorspace("g22_rec709_display");
+        OIIO_CHECK_ASSERT(cicp(spec).empty());
+        const int srgb[4] = { 1, 13, 0, 1 };
+        spec.attribute("CICP", cicptype, srgb);
+        spec.set_colorspace("srgb_rec709_scene");
+        OIIO_CHECK_ASSERT(cicp(spec) == std::vector<int>({ 1, 13, 0, 1 }));
+    }
+
+    // An ICC profile cannot be checked or regenerated here, so it goes with
+    // its decoded fields. Mastering display metadata is not touched.
+    {
+        const unsigned char icc[4] = { 1, 2, 3, 4 };
+        ImageSpec spec(2, 2, 3, TypeFloat);
+        spec.attribute("ICCProfile", TypeDesc(TypeDesc::UINT8, 4), icc);
+        spec.attribute("ICCProfile:profile_version", "4.3.0");
+        spec.attribute("mdcv_max_luminance", 1000.0f);
+        spec.attribute("png:sRGB", 0);
+        spec.set_colorspace("srgb_rec709_scene");
+        OIIO_CHECK_ASSERT(!spec.find_attribute("ICCProfile"));
+        OIIO_CHECK_ASSERT(!spec.find_attribute("ICCProfile:profile_version"));
+        OIIO_CHECK_EQUAL(spec.get_float_attribute("mdcv_max_luminance"),
+                         1000.0f);
+        OIIO_CHECK_ASSERT(spec.find_attribute("png:sRGB"));
+        spec.set_colorspace("g22_rec709_scene");
+        OIIO_CHECK_ASSERT(!spec.find_attribute("png:sRGB"));
+        OIIO_CHECK_EQUAL(spec.get_float_attribute("mdcv_max_luminance"),
+                         1000.0f);
+    }
+
+    // An identity the config does not define keeps its own properties.
+    {
+        const std::string filename = Filesystem::temp_directory_path() + "/"
+                                     + Filesystem::unique_path() + ".ocio";
+        OIIO_CHECK_ASSERT(Filesystem::write_text_file(
+            filename, "ocio_profile_version: 2.3\n"
+                      "roles: {default: Linear, scene_linear: Linear}\n"
+                      "colorspaces:\n"
+                      "  - !<ColorSpace> {name: Linear}\n"));
+        ColorConfig small(filename);
+        ImageSpec spec(2, 2, 3, TypeFloat);
+        spec.attribute("chromaticities", xytype, rec709);
+        spec.attribute("oiio:Gamma", 2.2f);
+        small.set_colorspace(spec, "g22_rec709_display");
+        OIIO_CHECK_ASSERT(is_rec709(spec));
+        OIIO_CHECK_EQUAL(spec.get_float_attribute("oiio:Gamma"), 2.2f);
+        Filesystem::remove(filename);
+    }
+
+    // A name's image state settles "oiio:PNGNumericState": a display name
+    // over a scene state removes it, and a state the name agrees with stays.
+    {
+        ImageSpec spec(2, 2, 3, TypeFloat);
+        spec.attribute("oiio:PNGNumericState", "scene");
+        spec.set_colorspace("g22_rec709_display");
+        OIIO_CHECK_ASSERT(!spec.find_attribute("oiio:PNGNumericState"));
+        spec.attribute("oiio:PNGNumericState", "scene");
+        spec.set_colorspace("g22_rec709_scene");
+        OIIO_CHECK_EQUAL(spec.get_string_attribute("oiio:PNGNumericState"),
+                         "scene");
+    }
+
+    // "unknown" states that nothing is known, and takes the evidence. A
+    // colorInteropID is rewritten to "unknown" rather than removed: the file
+    // keeps saying that nothing is known about it.
+    {
+        ImageSpec spec(2, 2, 3, TypeFloat);
+        spec.attribute("chromaticities", xytype, rec709);
+        spec.attribute("oiio:Gamma", 2.2f);
+        spec.attribute("Exif:ColorSpace", 1);
+        spec.attribute("colorInteropID", "lin_rec709_scene");
+        spec.attribute("mdcv_max_luminance", 1000.0f);
+        spec.set_colorspace("unknown");
+        OIIO_CHECK_EQUAL(spec.get_string_attribute("oiio:ColorSpace"),
+                         "unknown");
+        OIIO_CHECK_ASSERT(xy(spec).empty());
+        OIIO_CHECK_ASSERT(!spec.find_attribute("oiio:Gamma"));
+        OIIO_CHECK_ASSERT(!spec.find_attribute("Exif:ColorSpace"));
+        OIIO_CHECK_EQUAL(spec.get_string_attribute("colorInteropID"),
+                         "unknown");
+        OIIO_CHECK_ASSERT(spec.find_attribute("mdcv_max_luminance"));
+    }
+
+    // "" clears the label and nothing else.
+    {
+        const int srgb[4] = { 1, 13, 0, 1 };
+        ImageSpec spec(2, 2, 3, TypeFloat);
+        spec.attribute("oiio:ColorSpace", "g22_rec709_scene");
+        spec.attribute("chromaticities", xytype, rec709);
+        spec.attribute("CICP", cicptype, srgb);
+        spec.attribute("oiio:Gamma", 2.2f);
+        spec.attribute("Exif:ColorSpace", 1);
+        spec.attribute("tiff:PhotometricInterpretation", 2);
+        const size_t before = spec.extra_attribs.size();
+        spec.set_colorspace("");
+        OIIO_CHECK_ASSERT(!spec.find_attribute("oiio:ColorSpace"));
+        OIIO_CHECK_EQUAL(spec.extra_attribs.size(), before - 1);
+        OIIO_CHECK_EQUAL(spec.get_float_attribute("oiio:Gamma"), 2.2f);
+        config.set_colorspace(spec, std::string());
+        OIIO_CHECK_EQUAL(spec.extra_attribs.size(), before - 1);
+    }
+
+    // No name resolves an unset label from the metadata, to a portable
+    // answer only, and touches nothing else. A set label is left alone.
+    for (int form = 0; form < 3; ++form) {
+        auto resolve = [&](ImageSpec& spec) {
+            if (form == 0)
+                spec.set_colorspace();
+            else if (form == 1)
+                set_colorspace(spec, nullptr);
+            else
+                config.set_colorspace(spec, ustring());
+        };
+        ImageSpec spec(2, 2, 3, TypeFloat);
+        spec.attribute("chromaticities", xytype, rec709);
+        spec.attribute("oiio:Gamma", 2.2f);
+        resolve(spec);
+        OIIO_CHECK_EQUAL(config.get_color_interop_id(
+                             spec.get_string_attribute("oiio:ColorSpace")),
+                         "g22_rec709_scene");
+        OIIO_CHECK_EQUAL(spec.extra_attribs.size(), 3);
+        spec.attribute("chromaticities", xytype, ap0);
+        resolve(spec);
+        OIIO_CHECK_ASSERT(xy(spec)[0] == ap0[0]);
+        OIIO_CHECK_EQUAL(config.get_color_interop_id(
+                             spec.get_string_attribute("oiio:ColorSpace")),
+                         "g22_rec709_scene");
+
+        ImageSpec none(2, 2, 3, TypeFloat);
+        none.attribute("chromaticities", xytype, adobe);
+        none.attribute("oiio:Gamma", 2.2f);
+        resolve(none);
+        OIIO_CHECK_ASSERT(!none.find_attribute("oiio:ColorSpace"));
+        OIIO_CHECK_EQUAL(none.extra_attribs.size(), 2);
+    }
+}
+
+
+
 int
 main(int argc, char* argv[])
 {
@@ -1786,6 +2534,8 @@ main(int argc, char* argv[])
     test_color_space_info_context();
     test_encoding_tie_break();
     test_private_properties();
+    test_metadata_resolution();
+    test_set_colorspace_contract();
 
     return unit_test_failures != 0;
 }

@@ -4149,6 +4149,138 @@ test_ociolook_default_config()
 }
 
 
+// Isolated the way imagecache_test isolates with an unshared ImageCache: the
+// shared memos checked here are keyed by the config or by the exact ICC
+// bytes, so a config and a profile no other test builds start cold however
+// the tests before this one warmed theirs.
+static void
+test_cache_diagnostics()
+{
+    if (!ColorConfig::supportsOpenColorIO())
+        return;
+    // The description makes each file's config, and so its memo keys, unique.
+    auto write_config = [](const std::string& token) {
+        const std::string filename = Filesystem::temp_directory_path() + "/"
+                                     + token + ".ocio";
+        OIIO_CHECK_ASSERT(Filesystem::write_text_file(
+            filename,
+            std::string(
+                "ocio_profile_version: 2.3\n"
+                "environment: {SHOT: ACES2065-1}\n"
+                "roles: {default: ACES2065-1, scene_linear: ACES2065-1,\n"
+                "  aces_interchange: ACES2065-1,\n"
+                "  cie_xyz_d65_interchange: XYZ}\n"
+                "file_rules:\n"
+                "  - !<Rule> {name: Default, colorspace: default}\n"
+                "colorspaces:\n"
+                "  - !<ColorSpace> {name: ACES2065-1, encoding: scene-linear}\n"
+                "  - !<ColorSpace>\n    name: XYZ\n"
+                "    from_scene_reference: !<BuiltinTransform>\n"
+                "      {style: UTILITY - ACES-AP0_to_CIE-XYZ-D65_BFD}\n"
+                "  - !<ColorSpace>\n    name: Working\n"
+                "    from_scene_reference: !<BuiltinTransform>\n"
+                "      {style: ACEScg_to_ACES2065-1, direction: inverse}\n"
+                "  - !<ColorSpace>\n    name: Plate\n    to_scene_reference: "
+                "!<ColorSpaceTransform> {src: $SHOT, dst: ACES2065-1}\n"
+                "description: ")
+                + token + "\n"));
+        return filename;
+    };
+    const std::string token    = Filesystem::unique_path();
+    const std::string filename = write_config(token);
+    const auto stat = [](const ParamValueList& stats, string_view name) {
+        auto found = stats.find(name);
+        OIIO_CHECK_ASSERT(found != stats.cend() && found->type() == TypeInt64);
+        return found != stats.cend() ? found->get<int64_t>() : int64_t(-1);
+    };
+
+    // Any ColorConfig reports the shared values.
+    const auto before = pvt::color_cache_stats(ColorConfig());
+    ColorConfig config(filename);
+    OIIO_CHECK_EQUAL(config.geterror(false), "");
+    const auto built = pvt::color_cache_stats(config);
+    OIIO_CHECK_EQUAL(stat(built, "shared.native_catalogs.entries"),
+                     stat(before, "shared.native_catalogs.entries") + 1);
+    OIIO_CHECK_EQUAL(stat(built, "shared.native_catalogs.computed"),
+                     stat(before, "shared.native_catalogs.computed") + 1);
+    OIIO_CHECK_EQUAL(stat(built, "config.views.entries"), 0);
+    OIIO_CHECK_EQUAL(stat(built, "config.processors.requested"), 0);
+    OIIO_CHECK_EQUAL(stat(built, "config.processors.created"), 0);
+    // Asking performs no color work.
+    const auto again = pvt::color_cache_stats(config);
+    for (const auto& value : built)
+        OIIO_CHECK_EQUAL(stat(again, value.name()), value.get<int64_t>());
+
+    // Cold work on this config's own entries, and on bytes nothing measured.
+    const std::vector<uint8_t> profile = icc_profile(
+        { icc_xyz_tag("wtpt", icc_pcs_white),
+          { "zzzz", std::vector<uint8_t>(token.begin(), token.end()) } });
+    ImageSpec spec;
+    spec.attribute("ICCProfile", TypeDesc(TypeDesc::UINT8, int(profile.size())),
+                   profile.data());
+    std::vector<std::string> answers;
+    auto work = [&]() {
+        answers.emplace_back(config.get_color_interop_id("Working"));
+        answers.emplace_back(config.resolve("lin_ap1_scene"));
+        OIIO_CHECK_ASSERT(config.derive_color_space_info("Working").valid());
+        OIIO_CHECK_ASSERT(
+            pvt::color_space_info(config, "Plate", true, "SHOT", "Working")
+                .valid());
+        OIIO_CHECK_ASSERT(config.createColorProcessor("Working", "ACES2065-1"));
+        answers.push_back(resolve_colorspace(config, spec, "frame.png"));
+        return pvt::color_cache_stats(config);
+    };
+    const auto cold = work();
+    for (const char* name :
+         { "shared.id_matches.entries", "shared.id_matches.computed",
+           "shared.interop_ids.computed", "shared.properties.entries",
+           "shared.properties.computed", "shared.icc_profiles.entries",
+           "shared.icc_profiles.computed" })
+        OIIO_CHECK_ASSERT(stat(cold, name) > stat(built, name));
+    OIIO_CHECK_EQUAL(stat(cold, "shared.interop_ids.entries"),
+                     stat(built, "shared.interop_ids.entries") + 1);
+    OIIO_CHECK_EQUAL(stat(cold, "shared.icc_profiles.bytes"),
+                     stat(built, "shared.icc_profiles.bytes")
+                         + int64_t(profile.size()));
+    OIIO_CHECK_EQUAL(stat(cold, "config.views.entries"), 1);
+    OIIO_CHECK_EQUAL(stat(cold, "config.processors.created"), 1);
+
+    // The same work again is answered by what the first pass retained.
+    const auto warm = work();
+    for (const auto& value : cold)
+        if (value.name() != "config.processors.requested")
+            OIIO_CHECK_EQUAL(stat(warm, value.name()), value.get<int64_t>());
+    OIIO_CHECK_ASSERT(stat(warm, "config.processors.requested")
+                      > stat(cold, "config.processors.requested"));
+    OIIO_CHECK_EQUAL(answers[0], "lin_ap1_scene");
+    OIIO_CHECK_EQUAL(answers[1], "Working");
+    for (size_t i = 0; i < 3; ++i)
+        OIIO_CHECK_EQUAL(answers[i + 3], answers[i]);
+
+    // Another ColorConfig of the same file finds what the first retained.
+    ColorConfig twin(filename);
+    OIIO_CHECK_EQUAL(twin.resolve("lin_ap1_scene"), "Working");
+    const auto shared = pvt::color_cache_stats(twin);
+    for (const auto& value : warm)
+        if (Strutil::starts_with(value.name(), "shared."))
+            OIIO_CHECK_EQUAL(stat(shared, value.name()), value.get<int64_t>());
+
+    // A config with other memo keys derives the same space again, cold, from
+    // reference measurements that are all retained by now.
+    const std::string other_file = write_config(Filesystem::unique_path());
+    ColorConfig other(other_file);
+    const auto other_before = pvt::color_cache_stats(other);
+    OIIO_CHECK_ASSERT(other.derive_color_space_info("Working").valid());
+    const auto other_after = pvt::color_cache_stats(other);
+    OIIO_CHECK_ASSERT(stat(other_after, "shared.properties.computed")
+                      > stat(other_before, "shared.properties.computed"));
+    OIIO_CHECK_EQUAL(stat(other_after, "shared.builtin_measurements.computed"),
+                     stat(other_before, "shared.builtin_measurements.computed"));
+    Filesystem::remove(filename);
+    Filesystem::remove(other_file);
+}
+
+
 int
 main(int argc, char* argv[])
 {
@@ -4188,6 +4320,7 @@ main(int argc, char* argv[])
     test_icc_unsupported_retention();
     test_exr_writer_copy_identity();
     test_ociolook_default_config();
+    test_cache_diagnostics();
 
     return unit_test_failures != 0;
 }

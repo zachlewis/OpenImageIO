@@ -1434,15 +1434,13 @@ test_naming_versus_measurement()
     OIIO_CHECK_EQUAL(equality_id(config, "FalseLinear"), "g22_rec709_scene");
     OIIO_CHECK_ASSERT(config.get_color_interop_id("FalseLinear")
                       != "g22_rec709_scene");
-    // Its declared linear encoding does not stop derivation from reporting
-    // the 2.2 power the definition measures as.
+    // Its declared linear encoding remains the reported transfer property
+    // even though the definition measures as a 2.2 power.
     auto false_linear = config.derive_color_space_info("FalseLinear");
     OIIO_CHECK_ASSERT(ColorSpaceInfoAccess::transfer_function_kind(false_linear)
-                      == ColorTransferFunctionKind::Power);
-    OIIO_CHECK_EQUAL_THRESH(false_linear.transfer_function_gamma(), 2.2f,
-                            1.0e-6f);
-    // An authored linear encoding is honored rather than measured: only a
-    // measured pure-power exponent replaces it, and this definition has none.
+                      == ColorTransferFunctionKind::Linear);
+    OIIO_CHECK_EQUAL(false_linear.transfer_function_gamma(), 1.0f);
+    // The same rule applies when the contradicting curve is not a pure power.
     auto false_linear_srgb = config.derive_color_space_info("FalseLinearSRGB");
     OIIO_CHECK_EQUAL(false_linear_srgb.transfer_function_gamma(), 1.0f);
     OIIO_CHECK_ASSERT(
@@ -1745,6 +1743,964 @@ test_encoding_tie_break()
 }
 
 
+static bool
+found(const std::vector<std::string>& names, const std::string& wanted)
+{
+    return std::find(names.begin(), names.end(), wanted) != names.end();
+}
+
+
+static int
+position(const std::vector<std::string>& names, const std::string& wanted)
+{
+    auto it = std::find(names.begin(), names.end(), wanted);
+    return it == names.end() ? -1 : int(it - names.begin());
+}
+
+
+// Color space property search. Every matrix and curve parameter below is
+// copied verbatim from the bundled reference config, so a difference in a
+// result is a difference in the search rather than in the fixture.
+static void
+test_color_space_search()
+{
+    if (!ColorConfig::supportsOpenColorIO())
+        return;
+    const std::string directory = Filesystem::temp_directory_path() + "/"
+                                  + Filesystem::unique_path();
+    OIIO_CHECK_ASSERT(Filesystem::create_directory(directory));
+    const std::string filename = directory + "/search.ocio";
+
+    const std::string rec709_to_ap0
+        = "!<MatrixTransform> {matrix: [0.439632981919491, "
+          "0.382988698151554, 0.177378319928955, 0, 0.0897764429588424, "
+          "0.813439428748981, 0.0967841282921771, 0, 0.0175411703831727, "
+          "0.111546553302387, 0.87091227631444, 0, 0, 0, 0, 1]}";
+    const std::string p3d65_to_ap0
+        = "!<MatrixTransform> {matrix: [0.518933487597981, 0.28625658638669, "
+          "0.194809926015329, 0, 0.0738593830470598, 0.819845163936986, "
+          "0.106295453015954, 0, -0.000307011368446647, 0.0438070502536223, "
+          "0.956499961114824, 0, 0, 0, 0, 1]}";
+    const std::string awg3_to_ap0
+        = "!<MatrixTransform> {matrix: [0.680205505106279, "
+          "0.236136601606481, 0.0836578932872398, 0, 0.0854149797421404, "
+          "1.01747087860704, -0.102885858349182, 0, 0.00205652166929683, "
+          "-0.0625625003847921, 1.06050597871549, 0, 0, 0, 0, 1]}";
+    // One published camera curve, stated by its log slope. A configuration
+    // authors a vendor's curve with the digits it has, so two statements of
+    // one curve differ a little -- and two that differ in opposite directions
+    // can each agree with the published curve while disagreeing with each
+    // other by more than the tolerance that admitted them both.
+    // The linear-side slope beside it moves the toe without moving reference
+    // white, which is what states a curve a fixed distance from another in
+    // shape alone -- far enough apart for a video budget, near enough for a
+    // wide-varying one.
+    const auto logc3_slope = [](double slope,
+                                double lin_slope = 5.55555555555556) {
+        return Strutil::fmt::format(
+            "!<LogCameraTransform> {{base: 10, log_side_slope: {:.15g}, "
+            "log_side_offset: 0.385536998692443, lin_side_slope: {:.15g}, "
+            "lin_side_offset: 0.0522722750251688, "
+            "lin_side_break: 0.0105909904954696, direction: inverse}}",
+            slope, lin_slope);
+    };
+    const std::string logc3 = logc3_slope(0.247189638318671);
+
+    // A decode table for the 2.2 power in a container no extension allowlist
+    // names, and the Rec.709 primaries as an external matrix. What a resource
+    // contains decides whether it can be measured, not what it is called.
+    std::string cube = "LUT_1D_SIZE 1024\n";
+    for (int i = 0; i < 1024; ++i) {
+        const double v = std::pow(double(i) / 1023.0, 2.2);
+        cube += Strutil::fmt::format("{:.9f} {:.9f} {:.9f}\n", v, v, v);
+    }
+    OIIO_CHECK_ASSERT(
+        Filesystem::write_text_file(directory + "/g22.cube", cube));
+    // A one-dimensional table whose green channel bends differently from red
+    // and blue. Every output channel still depends on that channel alone, so
+    // the table is separable -- but the three channels do not share one curve,
+    // which is what the equal-channel contract asks of a parameterized curve
+    // and must ask of a tabulated one too.
+    std::string skew = "LUT_1D_SIZE 16\n";
+    for (int i = 0; i < 16; ++i) {
+        const double x = double(i) / 15.0;
+        skew += Strutil::fmt::format("{:.9f} {:.9f} {:.9f}\n", std::pow(x, 2.2),
+                                     std::pow(x, 2.6), std::pow(x, 2.2));
+    }
+    OIIO_CHECK_ASSERT(
+        Filesystem::write_text_file(directory + "/skew.cube", skew));
+    // The same container carrying a three-dimensional table instead. It mixes
+    // the channels, so the neutral axis is not a curve the space has: what a
+    // resource contains decides here too, in both directions.
+    OIIO_CHECK_ASSERT(Filesystem::write_text_file(directory + "/mix.cube",
+                                                  "LUT_3D_SIZE 2\n"
+                                                  "0.00 0.00 0.00\n"
+                                                  "0.90 0.05 0.00\n"
+                                                  "0.05 0.90 0.00\n"
+                                                  "0.95 0.95 0.00\n"
+                                                  "0.00 0.00 0.90\n"
+                                                  "0.90 0.05 0.90\n"
+                                                  "0.05 0.90 0.90\n"
+                                                  "1.00 1.00 1.00\n"));
+    OIIO_CHECK_ASSERT(Filesystem::write_text_file(
+        directory + "/rec709.spimtx",
+        "0.439632981919491 0.382988698151554 0.177378319928955 0\n"
+        "0.0897764429588424 0.813439428748981 0.0967841282921771 0\n"
+        "0.0175411703831727 0.111546553302387 0.87091227631444 0\n"));
+
+    std::string text
+        = "ocio_profile_version: 2.3\n"
+          "environment: {SHOTSPACE: Pure22}\n"
+          "search_path: .\n"
+          // `p3d65` is a role here, and a gamut component everywhere else. A
+          // native selector has to win, so a search for it must return the
+          // Rec.709 spaces this role points at.
+          "roles: {default: ACES, aces_interchange: ACES, scene_linear: ACES, "
+          "p3d65: Rec709Linear}\n"
+          "file_rules:\n  - !<Rule> {name: Default, colorspace: default}\n"
+          "inactive_colorspaces: [Hidden]\n"
+          "colorspaces:\n"
+          "  - !<ColorSpace>\n    name: ACES\n    encoding: scene-linear\n";
+    // Decode order: the curve linearizes, then the matrix reaches AP0.
+    auto scene = [&](string_view name, string_view encoding, string_view curve,
+                     const std::string& matrix, string_view aliases = "") {
+        text += "  - !<ColorSpace>\n    name: " + std::string(name) + "\n";
+        if (!aliases.empty())
+            text += "    aliases: [" + std::string(aliases) + "]\n";
+        if (!encoding.empty())
+            text += "    encoding: " + std::string(encoding) + "\n";
+        if (curve.empty()) {
+            text += "    to_scene_reference: " + matrix + "\n";
+            return;
+        }
+        text += "    to_scene_reference: !<GroupTransform>\n"
+                "      children:\n        - "
+                + std::string(curve) + "\n        - " + matrix + "\n";
+    };
+    // No authored encoding at all: the reference definition it is identified
+    // with is the only thing that can supply one.
+    scene("Rec709Linear", "", "", rec709_to_ap0);
+    scene("Pure22", "sdr-video", "!<ExponentTransform> {value: 2.2}",
+          rec709_to_ap0);
+    scene("g22_rec709_scene", "sdr-video", "!<ExponentTransform> {value: 2.2}",
+          rec709_to_ap0);
+    // The same 2.2 power tagged for cinema. Its authored attribute and the
+    // encoding of the reference definition it is identified with are both
+    // true of it, so it answers to either -- unless the caller asked for
+    // authored attributes only.
+    scene("Pure22Tagged", "sdr-cinema", "!<ExponentTransform> {value: 2.2}",
+          rec709_to_ap0);
+    scene("TrueSRGB", "sdr-video",
+          "!<ExponentWithLinearTransform> {gamma: 2.4, offset: 0.055}",
+          rec709_to_ap0);
+    // Named and aliased for sRGB, and a 2.2 power. The name is a claim; the
+    // curve is the fact.
+    scene("sRGB Texture", "sdr-video", "!<ExponentTransform> {value: 2.2}",
+          rec709_to_ap0, "srgb_encoded");
+    // A bespoke exponent no published family describes, on two gamuts.
+    scene("Pure17", "sdr-video", "!<ExponentTransform> {value: 1.7}",
+          rec709_to_ap0);
+    scene("Pure17Wide", "sdr-video", "!<ExponentTransform> {value: 1.7}",
+          p3d65_to_ap0);
+    scene("Pure18", "sdr-video", "!<ExponentTransform> {value: 1.8}",
+          rec709_to_ap0);
+    scene("RenamedLog", "log", logc3, awg3_to_ap0);
+    scene("LogEdgeLow", "log", logc3_slope(0.241189638318671), awg3_to_ap0);
+    scene("LogEdgeHigh", "log", logc3_slope(0.253189638318671), awg3_to_ap0);
+    // Nearer to LogEdgeLow than LogEdgeHigh is, and in no published family.
+    scene("LogOutside", "log", logc3_slope(0.233189638318671), awg3_to_ap0);
+    // One curve, authored twice with different encodings. It stands the same
+    // distance from LogOutside either way; what the two spaces disagree about
+    // is how much a curve of theirs is expected to vary, which is what the
+    // comparison tolerance answers to.
+    scene("NearLogWide", "hdr-video", logc3_slope(0.233189638318671, 5.61),
+          awg3_to_ap0);
+    scene("NearLogTight", "sdr-video", logc3_slope(0.233189638318671, 5.61),
+          awg3_to_ap0);
+    // LogOutside's curve with no encoding stated, so the hint's sets the
+    // tolerance it is compared at.
+    scene("LogOutsideBare", "", logc3_slope(0.233189638318671), awg3_to_ap0);
+    scene("\"~Tilde\"", "sdr-video", "!<ExponentTransform> {value: 2.4}",
+          rec709_to_ap0);
+    scene("Hidden", "sdr-video", "!<ExponentTransform> {value: 2.2}",
+          rec709_to_ap0);
+    scene("Unique", "sdr-video", "!<ExponentTransform> {value: 2.2}",
+          rec709_to_ap0);
+    text += "    categories: [is-unique]\n";
+    // Two external resources, one of them in a container an allowlist would
+    // have refused without ever reading it.
+    text
+        += "  - !<ColorSpace>\n    name: TableEncoded\n"
+           "    encoding: sdr-video\n"
+           "    to_scene_reference: !<GroupTransform>\n      children:\n"
+           "        - !<FileTransform> {src: g22.cube, interpolation: linear}\n"
+           "        - !<FileTransform> {src: rec709.spimtx}\n";
+    // A shape the bounded structural admission does not read. Its curve is
+    // unknown by default, which is not the same as unlike -- and `exhaustive`
+    // lets OpenColorIO's own realization answer instead.
+    text += "  - !<ColorSpace>\n    name: CdlEncoded\n"
+            "    encoding: sdr-video\n"
+            "    to_scene_reference: !<GroupTransform>\n      children:\n"
+            "        - !<CDLTransform> {power: [2.2, 2.2, 2.2]}\n        - "
+            + rec709_to_ap0 + "\n";
+    // A three-dimensional table beside the one-dimensional one above, in the
+    // same container. The walk admits an external resource unread, so what the
+    // operations OpenColorIO built say is the only thing that separates these
+    // two: a channel-mixing table has no neutral-axis curve to report.
+    text += "  - !<ColorSpace>\n    name: MixEncoded\n"
+            "    encoding: sdr-video\n"
+            "    to_scene_reference: !<GroupTransform>\n      children:\n"
+            "        - !<FileTransform> {src: mix.cube, interpolation: "
+            "tetrahedral}\n        - "
+            + rec709_to_ap0 + "\n";
+    // The separable but unequal-channel table beside it, on the same Rec.709
+    // matrix. Nothing here states one encoding, so the matrix is not this
+    // space's linear part and no gamut follows from it.
+    text += "  - !<ColorSpace>\n    name: SkewTable\n"
+            "    encoding: sdr-video\n"
+            "    to_scene_reference: !<GroupTransform>\n      children:\n"
+            "        - !<FileTransform> {src: skew.cube, interpolation: "
+            "linear}\n        - "
+            + rec709_to_ap0 + "\n";
+    // The shape an image formation chain has: a per-channel bend, a matrix into
+    // a working gamut, another bend there, and only then the matrix that
+    // reaches the reference. Every operation is one this build reads, and the
+    // matrix nearest the reference plainly states Rec.709 -- but a curve stands
+    // between the two matrices, so the chain has no single linear part and
+    // neither matrix is the space's own gamut. Reading the nearest one anyway
+    // is how a formation chain's inset working space gets published as the
+    // primaries of every display variant that shares it.
+    text += "  - !<ColorSpace>\n    name: InsetChain\n"
+            "    encoding: sdr-video\n"
+            "    to_scene_reference: !<GroupTransform>\n      children:\n"
+            "        - !<FileTransform> {src: g22.cube, interpolation: linear}\n"
+            "        - "
+            + p3d65_to_ap0
+            + "\n        - !<FileTransform> {src: g22.cube, interpolation: "
+              "linear}\n        - "
+            + rec709_to_ap0 + "\n";
+    // The 2.2 power with a clamp beside it, which is how OpenColorIO's own
+    // tabulated encodings are shaped. A range is an operation the strict
+    // reader cannot restate as curve parameters and the sampled walk reads
+    // without trouble, and it is the sampled walk that bounds a probe.
+    text += "  - !<ColorSpace>\n    name: RangeGated\n"
+            "    encoding: sdr-video\n"
+            "    to_scene_reference: !<GroupTransform>\n      children:\n"
+            "        - !<RangeTransform> {min_in_value: 0, min_out_value: 0}\n"
+            "        - !<ExponentTransform> {value: 2.2}\n        - "
+            + rec709_to_ap0 + "\n";
+    // OpenColorIO builds ACEScc from a range, a one-dimensional table and the
+    // AP1 matrix, so the strict reader never reaches the matrix -- in the
+    // bundled reference config as well as here. The gamut is still the one
+    // the identity names, and that config's other AP1 definitions say what
+    // that is.
+    text += "  - !<ColorSpace>\n    name: TabulatedLog\n    encoding: log\n"
+            "    to_scene_reference: !<BuiltinTransform> "
+            "{style: ACEScc_to_ACES2065-1}\n";
+    text += "  - !<ColorSpace>\n    name: ShotSpace\n"
+            "    encoding: sdr-video\n"
+            "    to_scene_reference: !<ColorSpaceTransform> "
+            "{src: \"$SHOTSPACE\", dst: ACES}\n";
+    // Scene-reference topology does not override explicit semantic evidence.
+    text += "  - !<ColorSpace>\n    name: DisplayEvidence\n"
+            "    encoding: display-linear\n"
+            "    to_scene_reference: "
+            + rec709_to_ap0 + "\n";
+    text += "  - !<ColorSpace>\n    name: UnknownState\n"
+            "    encoding: sdr-video\n"
+            "    to_scene_reference: !<MatrixTransform> "
+            "{matrix: [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1]}\n";
+    text += "  - !<ColorSpace>\n    name: LinkedToShot\n"
+            "    encoding: sdr-video\n"
+            "    to_scene_reference: !<ColorSpaceTransform> "
+            "{src: ShotSpace, dst: ACES}\n";
+    text += "  - !<ColorSpace>\n    name: Mask\n    isdata: true\n";
+    text += "named_transforms:\n"
+            "  - !<NamedTransform>\n    name: crv_g24_tx\n"
+            "    encoding: sdr-video\n"
+            "    inverse_transform: !<ExponentTransform> "
+            "{value: 2.4, style: pass_thru, direction: inverse}\n"
+            // Aliased for the published 2.6 family and implementing 2.2. The
+            // family is not adopted until the two measure the same, so this
+            // hint has to find the 2.2 spaces.
+            "  - !<NamedTransform>\n    name: LyingCurve\n"
+            "    aliases: [crv_g26_tx]\n    encoding: sdr-video\n"
+            "    inverse_transform: !<ExponentTransform> "
+            "{value: 2.2, style: pass_thru, direction: inverse}\n"
+            "display_colorspaces:\n"
+            "  - !<ColorSpace>\n    name: UnknownDisplay\n"
+            "    encoding: sdr-video\n"
+            "  - !<ColorSpace>\n    name: DisplayIdentity\n"
+            "    aliases: [srgb_rec709_display]\n"
+            "    encoding: sdr-video\n"
+            "  - !<ColorSpace>\n    name: g24_rec709_display\n"
+            "    encoding: sdr-video\n";
+    OIIO_CHECK_ASSERT(Filesystem::write_text_file(filename, text));
+
+    ColorConfig config(filename);
+    OIIO_CHECK_EQUAL(config.geterror(false), "");
+
+    // --- Candidate universe -------------------------------------------------
+    {
+        auto all = pvt::find_color_spaces(config);
+        // Data and is-unique spaces are never candidates, an inactive space
+        // needs to be asked for, and so does one whose definition varies with
+        // a context variable.
+        OIIO_CHECK_FALSE(found(all, "Mask"));
+        OIIO_CHECK_FALSE(found(all, "Unique"));
+        OIIO_CHECK_FALSE(found(all, "Hidden"));
+        OIIO_CHECK_FALSE(found(all, "ShotSpace"));
+        OIIO_CHECK_FALSE(found(all, "LinkedToShot"));
+        OIIO_CHECK_ASSERT(found(all, "Pure22"));
+        // A repeated search answers identically, warm.
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config) == all);
+        // And so does another wrapper over the same configuration.
+        ColorConfig second(filename);
+        OIIO_CHECK_EQUAL(second.geterror(false), "");
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(second) == all);
+    }
+    {
+        pvt::ColorSpaceSearchOptions options;
+        options.include_inactive          = true;
+        options.include_context_sensitive = true;
+        auto all = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_ASSERT(found(all, "Hidden"));
+        OIIO_CHECK_ASSERT(found(all, "ShotSpace"));
+        // Ordering: context-invariant first, then active before inactive,
+        // then by name.
+        OIIO_CHECK_ASSERT(position(all, "ACES") < position(all, "Pure22"));
+        OIIO_CHECK_ASSERT(position(all, "Pure22") < position(all, "Hidden"));
+        OIIO_CHECK_ASSERT(position(all, "Hidden") < position(all, "ShotSpace"));
+        OIIO_CHECK_ASSERT(position(all, "LinkedToShot")
+                          < position(all, "ShotSpace"));
+        options.include_active = false;
+        auto inactive_only     = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(inactive_only.size(), 1);
+        OIIO_CHECK_ASSERT(found(inactive_only, "Hidden"));
+        options.include_inactive = false;
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options).empty());
+    }
+
+    // --- only and exclude name the universe exactly --------------------------
+    {
+        pvt::ColorSpaceSearchOptions options;
+        options.only = std::vector<std::string> { "Pure22", "TrueSRGB" };
+        auto pair    = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(pair.size(), 2);
+        OIIO_CHECK_ASSERT(found(pair, "Pure22") && found(pair, "TrueSRGB"));
+        // An alias is not a canonical name, and nothing here resolves one.
+        options.only = std::vector<std::string> { "srgb_encoded" };
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options).empty());
+        // Unset is every color space; empty is none.
+        options.only = std::vector<std::string> {};
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options).empty());
+        options.only.reset();
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options).size() > 1);
+        options.exclude = { "Pure22" };
+        auto rest       = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_FALSE(found(rest, "Pure22"));
+        OIIO_CHECK_ASSERT(found(rest, "TrueSRGB"));
+    }
+
+    // --- Grammar -------------------------------------------------------------
+    {
+        // A bare operator, a dangling escape and an unrecognized escape are
+        // errors, so a typo cannot silently become a value.
+        for (const char* bad : { "-", "~", "\\", "\\q" }) {
+            pvt::ColorSpaceSearchOptions options;
+            options.transfer_functions = { bad };
+            OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options).empty());
+            OIIO_CHECK_ASSERT(config.has_error());
+            OIIO_CHECK_ASSERT(config.geterror().size());
+        }
+        // So is a literal nothing resolves.
+        pvt::ColorSpaceSearchOptions options;
+        options.encodings = { "not-an-encoding" };
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options).empty());
+        OIIO_CHECK_ASSERT(config.geterror().size());
+        // An escape makes a name beginning with an operator a value again.
+        options                    = pvt::ColorSpaceSearchOptions();
+        options.transfer_functions = { "~Tilde" };
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options).empty());
+        OIIO_CHECK_ASSERT(config.geterror().size());
+        options.transfer_functions = { "\\~Tilde" };
+        auto gamma24               = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(gamma24, "~Tilde"));
+        OIIO_CHECK_FALSE(found(gamma24, "Pure22"));
+    }
+
+    // --- Exclusion keeps the underivable, inverse rejects it -----------------
+    {
+        pvt::ColorSpaceSearchOptions options;
+        options.transfer_functions = { "-Pure22" };
+        auto kept                  = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        // An exclusion-only axis starts selected and subtracts proven
+        // matches; a candidate whose curve could not be derived stays.
+        OIIO_CHECK_FALSE(found(kept, "Pure22"));
+        OIIO_CHECK_ASSERT(found(kept, "TrueSRGB"));
+        OIIO_CHECK_ASSERT(found(kept, "CdlEncoded"));
+        // The tabulated 2.2 curve is proven to match and goes; the
+        // channel-mixing table beside it is underivable and stays.
+        OIIO_CHECK_FALSE(found(kept, "TableEncoded"));
+        OIIO_CHECK_ASSERT(found(kept, "MixEncoded"));
+
+        options.transfer_functions = { "~Pure22" };
+        auto differing             = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_FALSE(found(differing, "Pure22"));
+        OIIO_CHECK_ASSERT(found(differing, "TrueSRGB"));
+        // Unknown is not "different".
+        OIIO_CHECK_FALSE(found(differing, "CdlEncoded"));
+
+        // Two tables in one container, and nothing about the file name
+        // separates them. The per-channel one carries a curve, so an inverse
+        // term can say it differs from sRGB; the channel-mixing one has no
+        // curve for a neutral-axis probe to measure, so it cannot be
+        // proven to differ from anything.
+        options.transfer_functions = { "~TrueSRGB" };
+        auto not_srgb              = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(not_srgb, "TableEncoded"));
+        OIIO_CHECK_FALSE(found(not_srgb, "MixEncoded"));
+        // The range beside a curve is read, so that space is proven to differ
+        // from sRGB rather than left underivable.
+        OIIO_CHECK_ASSERT(found(not_srgb, "RangeGated"));
+
+        // Exclusions are applied last and win.
+        options.transfer_functions = { "~Pure22", "-TrueSRGB" };
+        auto subtracted            = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_FALSE(found(subtracted, "TrueSRGB"));
+        OIIO_CHECK_ASSERT(found(subtracted, "Pure18"));
+    }
+
+    // --- Transfer facts are measured, not named ------------------------------
+    {
+        pvt::ColorSpaceSearchOptions options;
+        options.transfer_functions = { "srgb_rec709_scene" };
+        auto srgb                  = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(srgb, "TrueSRGB"));
+        // Named and aliased for sRGB, and demonstrably a 2.2 power.
+        OIIO_CHECK_FALSE(found(srgb, "sRGB Texture"));
+        OIIO_CHECK_FALSE(found(srgb, "Pure22"));
+
+        options.transfer_functions = { "g22_rec709_scene" };
+        auto power22               = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(power22, "Pure22"));
+        OIIO_CHECK_ASSERT(found(power22, "sRGB Texture"));
+        // A curve authored as a table in an unlisted container is measured
+        // like any other.
+        OIIO_CHECK_ASSERT(found(power22, "TableEncoded"));
+        // And so is one with a range beside it: a probe is a sampled
+        // measurement, so what bounds it is the sampled walk, not the stricter
+        // reader that has to restate every operation as curve parameters.
+        OIIO_CHECK_ASSERT(found(power22, "RangeGated"));
+        OIIO_CHECK_FALSE(found(power22, "TrueSRGB"));
+
+        // A bespoke exponent no published family describes is still found,
+        // by its measured signature, from another space that carries it --
+        // across a different gamut, because the probe measures the
+        // curve apart from the primaries.
+        options.transfer_functions = { "Pure17" };
+        auto power17               = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(power17, "Pure17"));
+        OIIO_CHECK_ASSERT(found(power17, "Pure17Wide"));
+        OIIO_CHECK_FALSE(found(power17, "Pure18"));
+        OIIO_CHECK_FALSE(found(power17, "Pure22"));
+
+        // A renamed camera log, with no declared identity anywhere.
+        options.transfer_functions = { "ocio:arrilogc3_awg3_scene" };
+        auto log                   = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(log, "RenamedLog"));
+        OIIO_CHECK_FALSE(found(log, "Pure22"));
+        // Both statements of that curve agree with the published one, and the
+        // one that does not is not in its family.
+        OIIO_CHECK_ASSERT(found(log, "LogEdgeLow"));
+        OIIO_CHECK_ASSERT(found(log, "LogEdgeHigh"));
+        OIIO_CHECK_FALSE(found(log, "LogOutside"));
+
+        // A measured search answers identically warm, and identically to
+        // another wrapper over the same configuration -- which is what the
+        // retained per-target evidence has to leave unchanged, since it is the
+        // second and third call that read it rather than measure.
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options) == log);
+        ColorConfig warm(filename);
+        OIIO_CHECK_EQUAL(warm.geterror(false), "");
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(warm, options) == log);
+        OIIO_CHECK_EQUAL(warm.geterror(false), "");
+
+        // The published family two candidates share answers for both, even
+        // where their own measurements disagree: LogEdgeHigh is found from
+        // LogEdgeLow although the measurement alone does not reach it -- it
+        // does not even reach the nearer LogOutside, which shares no family.
+        options.transfer_functions = { "LogEdgeLow" };
+        auto edge                  = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(edge, "LogEdgeHigh"));
+        OIIO_CHECK_FALSE(found(edge, "LogOutside"));
+        options.transfer_functions = { "LogOutside" };
+        auto outside               = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(outside, "LogOutside"));
+        OIIO_CHECK_FALSE(found(outside, "LogEdgeLow"));
+        // The tolerance a measurement comparison runs at is the one the
+        // candidate's own encoding sets, never the hint's. These two carry
+        // one curve and differ only in what they say they are, so the same
+        // distance from this hint is inside the wide-varying budget and
+        // outside the video one.
+        OIIO_CHECK_ASSERT(found(outside, "NearLogWide"));
+        OIIO_CHECK_FALSE(found(outside, "NearLogTight"));
+
+        // Asked the other way round, the hint's own encoding does not widen
+        // the comparison for a candidate that states one: NearLogWide finds
+        // the space that shares its curve and not the one it was found from.
+        options.transfer_functions = { "NearLogWide" };
+        auto wide                  = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(wide, "NearLogTight"));
+        OIIO_CHECK_FALSE(found(wide, "LogOutside"));
+        // A candidate that states no encoding borrows the hint's: the same
+        // curve as LogOutside is inside this hint's wide budget, and outside
+        // the video budget of the hint that carries the same curve as this.
+        OIIO_CHECK_ASSERT(found(wide, "LogOutsideBare"));
+        options.transfer_functions = { "NearLogTight" };
+        auto tight                 = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(tight, "NearLogWide"));
+        OIIO_CHECK_FALSE(found(tight, "LogOutsideBare"));
+
+        // A local space named as the example asks the same question of the
+        // same definition a candidate does, and finds itself among the answers.
+        options.transfer_functions = { "Pure17" };
+        auto by_example            = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(by_example, "Pure17"));
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(warm, options) == by_example);
+        OIIO_CHECK_EQUAL(warm.geterror(false), "");
+    }
+
+    // --- Named transforms and raw transform text -----------------------------
+    {
+        pvt::ColorSpaceSearchOptions options;
+        options.transfer_functions = { "crv_g24_tx" };
+        auto gamma24               = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(gamma24, "~Tilde"));
+        OIIO_CHECK_FALSE(found(gamma24, "Pure22"));
+
+        // The published vocabulary states one curve under two family names:
+        // the identity is `crv_lin` and, for the display side,
+        // `crv_identity_display`. A measurement is filed under the first of
+        // those it agrees with, so a hint naming the other one meets it only
+        // because a family the two disagree about is no verdict against the
+        // curve they share -- the measurement is what the search is for.
+        options.transfer_functions = { "crv_identity_display" };
+        auto identity              = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(identity, "ACES"));
+        OIIO_CHECK_ASSERT(found(identity, "Rec709Linear"));
+        OIIO_CHECK_FALSE(found(identity, "Pure22"));
+
+        // A local curve aliased for a published family it does not implement
+        // does not borrow that family: it is measured, and finds the spaces
+        // that carry what it actually does.
+        options.transfer_functions = { "LyingCurve" };
+        auto lying                 = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(lying, "Pure22"));
+        OIIO_CHECK_FALSE(found(lying, "~Tilde"));
+
+        // Raw OpenColorIO text, read as a from-reference transform and
+        // realized in this configuration.
+        options.transfer_functions
+            = { "<ExponentTransform> {value: 2.2, direction: inverse}" };
+        auto text22 = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(text22, "Pure22"));
+        OIIO_CHECK_FALSE(found(text22, "TrueSRGB"));
+        // The tagged spelling parses to the same transform.
+        options.transfer_functions
+            = { "!<ExponentTransform> {value: 2.2, direction: inverse}" };
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options) == text22);
+
+        // Block-form text nests under the key whatever the caller's own
+        // indentation was.
+        options.transfer_functions = {
+            "<GroupTransform>\n  children:\n"
+            "    - <ExponentTransform> {value: 2.2, direction: inverse}\n"
+        };
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options) == text22);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+
+        // A double quote escaped inside a quoted scalar does not end it. The
+        // scan that keeps a quoted FileTransform path from being re-tagged has
+        // to stay synchronized past one: mistaking the escape for the close
+        // leaves the scan believing the rest of the text is inside a scalar,
+        // and every transform tag after it goes untagged and stops parsing.
+        options.transfer_functions = {
+            "<GroupTransform>\n  children:\n"
+            "    # a path such as \"/vol/odd\\\"name<v1>.spi1d\"\n"
+            "    - <ExponentTransform> {value: 2.2, direction: inverse}\n"
+        };
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options) == text22);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+
+#ifndef _WIN32
+        // A '<' inside a quoted FileTransform path belongs to the path and is
+        // not re-tagged. (Windows file names cannot contain '<'.)
+        OIIO_CHECK_ASSERT(
+            Filesystem::write_text_file(directory + "/g22<v1>.cube", cube));
+        options.transfer_functions
+            = { "<FileTransform> {src: \"g22<v1>.cube\", interpolation: "
+                "linear, direction: inverse}" };
+        auto tabulated = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(tabulated, "Pure22"));
+        OIIO_CHECK_ASSERT(found(tabulated, "TableEncoded"));
+        OIIO_CHECK_FALSE(found(tabulated, "TrueSRGB"));
+#endif
+
+        // An explicit unit exponent is an operation, not a no-op OpenColorIO
+        // elides, and it measures as the linear curve the linear spaces carry.
+        options.transfer_functions = { "<ExponentTransform> {value: 1}" };
+        auto linear                = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(linear, "ACES"));
+        OIIO_CHECK_ASSERT(found(linear, "Rec709Linear"));
+        OIIO_CHECK_FALSE(found(linear, "Pure22"));
+
+        // Text that is not a transform is an error, and it does not disturb
+        // the next search.
+        options.transfer_functions = { "<NotATransform> {nonsense: 1}" };
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options).empty());
+        OIIO_CHECK_ASSERT(config.geterror().size());
+        options.transfer_functions = { "<ExponentTransform> {value: 1}" };
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options) == linear);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+    }
+
+    // --- Encoding is a set ---------------------------------------------------
+    {
+        pvt::ColorSpaceSearchOptions options;
+        options.encodings = { "sdr-cinema" };
+        auto cinema       = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(cinema, "Pure22Tagged"));
+
+        options.encodings = { "sdr-video" };
+        auto video        = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(video, "Pure22"));
+        // Authored for cinema, identified with a definition encoded for
+        // video: both are true of it.
+        OIIO_CHECK_ASSERT(found(video, "Pure22Tagged"));
+
+        options.authored_encoding_only = true;
+        auto authored = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(authored, "Pure22"));
+        OIIO_CHECK_FALSE(found(authored, "Pure22Tagged"));
+
+        // No authored attribute at all: the identified reference definition
+        // supplies one, and `authored_encoding_only` withholds it.
+        options           = pvt::ColorSpaceSearchOptions();
+        options.encodings = { "scene-linear" };
+        auto linear       = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(linear, "ACES"));
+        OIIO_CHECK_ASSERT(found(linear, "Rec709Linear"));
+        options.authored_encoding_only = true;
+        auto strict = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(strict, "ACES"));
+        OIIO_CHECK_FALSE(found(strict, "Rec709Linear"));
+
+        // Hint by example reads the named space's own effective encoding.
+        options           = pvt::ColorSpaceSearchOptions();
+        options.encodings = { "Pure22" };
+        OIIO_CHECK_ASSERT(
+            found(pvt::find_color_spaces(config, options), "TrueSRGB"));
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+    }
+
+    // --- Image state ---------------------------------------------------------
+    {
+        // Begin cold: state searches derive semantic evidence themselves and
+        // must not depend on an earlier property/search query warming it.
+        ColorConfig state_config(filename);
+        OIIO_CHECK_EQUAL(state_config.geterror(false), "");
+        // Alias spelling alone is not state evidence. Once ordinary property
+        // derivation accepts and publishes its portable identity, however,
+        // dependent state and provenance belong in that same record.
+        const auto alias_info = state_config.derive_color_space_info(
+            "DisplayIdentity");
+        OIIO_CHECK_EQUAL(ColorSpaceInfoAccess::color_interop_id(alias_info),
+                         "srgb_rec709_display");
+        OIIO_CHECK_EQUAL(ColorSpaceInfoAccess::image_state(alias_info),
+                         "display");
+        OIIO_CHECK_ASSERT(
+            ColorSpaceInfoAccess::available(alias_info,
+                                            ColorSpaceInfoField::ImageState));
+        OIIO_CHECK_ASSERT(
+            ColorSpaceInfoAccess::derived(alias_info,
+                                          ColorSpaceInfoField::ImageState));
+        const auto alias_warm = state_config.derive_color_space_info(
+            "DisplayIdentity");
+        OIIO_CHECK_EQUAL(ColorSpaceInfoAccess::image_state(alias_warm),
+                         ColorSpaceInfoAccess::image_state(alias_info));
+        OIIO_CHECK_ASSERT(
+            ColorSpaceInfoAccess::derived(alias_warm,
+                                          ColorSpaceInfoField::ImageState));
+        pvt::ColorSpaceSearchOptions options;
+        options.image_states = { "scene" };
+        auto scene_spaces    = pvt::find_color_spaces(state_config, options);
+        OIIO_CHECK_EQUAL(state_config.geterror(false), "");
+        // sdr-video does not establish image state from either topology.
+        OIIO_CHECK_FALSE(found(scene_spaces, "UnknownState"));
+        OIIO_CHECK_FALSE(found(scene_spaces, "UnknownDisplay"));
+        // Pure22 acquires scene state only when its measured identity is
+        // enriched; this state query must do that work even when cold.
+        OIIO_CHECK_ASSERT(found(scene_spaces, "Pure22"));
+        OIIO_CHECK_ASSERT(found(scene_spaces, "g22_rec709_scene"));
+        OIIO_CHECK_FALSE(found(scene_spaces, "DisplayEvidence"));
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(state_config, options)
+                          == scene_spaces);
+        ColorConfig second(filename);
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(second, options)
+                          == scene_spaces);
+        const auto alias_elsewhere = second.derive_color_space_info(
+            "DisplayIdentity");
+        OIIO_CHECK_EQUAL(ColorSpaceInfoAccess::color_interop_id(alias_elsewhere),
+                         "srgb_rec709_display");
+        OIIO_CHECK_EQUAL(ColorSpaceInfoAccess::image_state(alias_elsewhere),
+                         "display");
+        OIIO_CHECK_ASSERT(
+            ColorSpaceInfoAccess::derived(alias_elsewhere,
+                                          ColorSpaceInfoField::ImageState));
+        options.image_states = { "display" };
+        auto display_spaces  = pvt::find_color_spaces(state_config, options);
+        OIIO_CHECK_ASSERT(found(display_spaces, "DisplayEvidence"));
+        OIIO_CHECK_ASSERT(found(display_spaces, "DisplayIdentity"));
+        OIIO_CHECK_ASSERT(found(display_spaces, "g24_rec709_display"));
+        OIIO_CHECK_FALSE(found(display_spaces, "UnknownState"));
+        OIIO_CHECK_FALSE(found(display_spaces, "UnknownDisplay"));
+        OIIO_CHECK_EQUAL(state_config.geterror(false), "");
+        options.image_states = { "~display" };
+        auto not_display     = pvt::find_color_spaces(state_config, options);
+        OIIO_CHECK_FALSE(found(not_display, "UnknownState"));
+        OIIO_CHECK_FALSE(found(not_display, "UnknownDisplay"));
+        OIIO_CHECK_ASSERT(found(not_display, "g22_rec709_scene"));
+        OIIO_CHECK_FALSE(found(not_display, "DisplayEvidence"));
+        options.image_states = { "-display" };
+        auto without_display = pvt::find_color_spaces(state_config, options);
+        OIIO_CHECK_ASSERT(found(without_display, "UnknownState"));
+        OIIO_CHECK_ASSERT(found(without_display, "UnknownDisplay"));
+        OIIO_CHECK_FALSE(found(without_display, "DisplayEvidence"));
+        options.image_states = { "all" };
+        auto known_states    = pvt::find_color_spaces(state_config, options);
+        OIIO_CHECK_FALSE(found(known_states, "UnknownState"));
+        OIIO_CHECK_FALSE(found(known_states, "UnknownDisplay"));
+        OIIO_CHECK_ASSERT(found(known_states, "DisplayEvidence"));
+        // A local hint with no semantic state is underivable, not topology.
+        options.image_states = { "UnknownState" };
+        OIIO_CHECK_ASSERT(
+            pvt::find_color_spaces(state_config, options).empty());
+        OIIO_CHECK_ASSERT(state_config.geterror().size());
+
+        // Retained evidence belongs to its effective context.
+        options                           = pvt::ColorSpaceSearchOptions();
+        options.include_context_sensitive = true;
+        options.image_states              = { "scene" };
+        OIIO_CHECK_ASSERT(
+            found(pvt::find_color_spaces(state_config, options), "ShotSpace"));
+        options.context_key   = "SHOTSPACE";
+        options.context_value = "UnknownState";
+        OIIO_CHECK_FALSE(
+            found(pvt::find_color_spaces(state_config, options), "ShotSpace"));
+    }
+
+    // --- A native selector beats a reference one ------------------------------
+    {
+        // `p3d65` is a gamut component of an interop ID and a role in this
+        // configuration. The role decides.
+        pvt::ColorSpaceSearchOptions options;
+        options.chromaticities = { "p3d65" };
+        auto by_role           = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(by_role, "Pure22"));
+        OIIO_CHECK_FALSE(found(by_role, "Pure17Wide"));
+
+        // The component spelling nothing local claims still resolves.
+        options.chromaticities = { "rec709" };
+        auto by_component      = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(by_component, "Pure22"));
+        OIIO_CHECK_FALSE(found(by_component, "ACES"));
+
+        // A curve authored as an external one-dimensional table, with its
+        // primaries authored as an external matrix beside it, and no name,
+        // alias or interop ID pointing anywhere. Neither operation restates as
+        // curve parameters, so the reader that separates a definition into a
+        // curve and a matrix reports nothing at all about the curve -- and the
+        // matrix beside it is still the matrix, so the primaries it carries are
+        // reported anyway.
+        OIIO_CHECK_ASSERT(found(by_component, "TableEncoded"));
+        // The same evidence with the table mixing channels instead. There is no
+        // per-channel curve to separate from the matrix, so the matrix is not
+        // the space's linear part and no gamut follows from it.
+        OIIO_CHECK_FALSE(found(by_component, "MixEncoded"));
+        // And the same again with a curve standing between two matrices. Both
+        // are readable and the one nearest the reference is exactly the Rec.709
+        // matrix the spaces above carry, but no single linear part exists here,
+        // so neither matrix is reported as this space's primaries.
+        OIIO_CHECK_FALSE(found(by_component, "InsetChain"));
+        // And with a table that bends green differently from red and blue. It
+        // is per-channel, which is not the same as one curve on three channels.
+        OIIO_CHECK_FALSE(found(by_component, "SkewTable"));
+
+        // Hint by example agrees with the component.
+        options.chromaticities = { "Rec709Linear" };
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options)
+                          == by_component);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+
+        // Warm, and from a second wrapper over the same configuration, the
+        // recovered primaries answer identically: what was measured about a
+        // definition is retained under the key the configuration itself gives.
+        options.chromaticities = { "rec709" };
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options)
+                          == by_component);
+        ColorConfig again(filename);
+        OIIO_CHECK_EQUAL(again.geterror(false), "");
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(again, options)
+                          == by_component);
+
+        // The same fact read directly. The primaries recovered are the
+        // published Rec.709 ones exactly, not a plausible reconstruction near
+        // them, and the two shapes beside it report none at all.
+        const float rec709_xy[8] = { .64f, .33f, .30f,   .60f,
+                                     .15f, .06f, .3127f, .3290f };
+        auto tabulated = config.derive_color_space_info("TableEncoded");
+        OIIO_CHECK_ASSERT(tabulated.valid());
+        auto tabulated_xy = tabulated.chromaticities();
+        OIIO_CHECK_EQUAL(tabulated_xy.size(), 8);
+        if (tabulated_xy.size() == 8)
+            for (int i = 0; i < 8; ++i)
+                OIIO_CHECK_EQUAL_THRESH(tabulated_xy[i], rec709_xy[i], 1e-4f);
+        OIIO_CHECK_ASSERT(config.derive_color_space_info("MixEncoded")
+                              .chromaticities()
+                              .empty());
+        OIIO_CHECK_ASSERT(config.derive_color_space_info("InsetChain")
+                              .chromaticities()
+                              .empty());
+        OIIO_CHECK_ASSERT(config.derive_color_space_info("SkewTable")
+                              .chromaticities()
+                              .empty());
+
+        // OpenColorIO builds ACEScc from a range, a one-dimensional table and
+        // the AP1 matrix, so the reader that restates operations as parameters
+        // stops before the matrix -- in the bundled reference config as much
+        // as in this configuration, which is why the identity it is recognized
+        // as cannot supply the gamut by measurement either. That config's other
+        // AP1 definitions can, and they all measure the same primaries.
+        options.chromaticities = { "ap1" };
+        auto ap1               = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(ap1, "TabulatedLog"));
+        // The primaries decide, not the spelling: it answers to one gamut.
+        OIIO_CHECK_FALSE(found(ap1, "Pure22"));
+        OIIO_CHECK_FALSE(found(ap1, "ACES"));
+        OIIO_CHECK_FALSE(found(by_component, "TabulatedLog"));
+    }
+
+    // --- exhaustive ----------------------------------------------------------
+    {
+        pvt::ColorSpaceSearchOptions options;
+        options.transfer_functions = { "Pure22" };
+        auto bounded               = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_FALSE(found(bounded, "CdlEncoded"));
+        options.exhaustive = true;
+        auto probed        = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(probed, "CdlEncoded"));
+        OIIO_CHECK_ASSERT(found(probed, "Pure22"));
+
+        // Evidence only `exhaustive` was willing to produce is retained where
+        // a bounded search cannot read it. Warm, the bounded search still
+        // declines the definition the structural walk does not admit, and both
+        // modes still answer what they answered cold.
+        options.exhaustive = false;
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options) == bounded);
+        options.exhaustive = true;
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options) == probed);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+    }
+
+    // --- Context -------------------------------------------------------------
+    {
+        pvt::ColorSpaceSearchOptions options;
+        options.include_context_sensitive = true;
+        options.transfer_functions        = { "Pure22" };
+        auto standard = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(standard, "ShotSpace"));
+
+        options.context_key   = "SHOTSPACE";
+        options.context_value = "TrueSRGB";
+        auto overridden       = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_FALSE(found(overridden, "ShotSpace"));
+        OIIO_CHECK_ASSERT(found(overridden, "Pure22"));
+
+        options.transfer_functions = { "TrueSRGB" };
+        auto as_srgb               = pvt::find_color_spaces(config, options);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(found(as_srgb, "ShotSpace"));
+
+        // The configuration's own context is unchanged by any of that.
+        options.context_key   = "";
+        options.context_value = "";
+        OIIO_CHECK_ASSERT(
+            !found(pvt::find_color_spaces(config, options), "ShotSpace"));
+        options.transfer_functions = { "Pure22" };
+        OIIO_CHECK_ASSERT(pvt::find_color_spaces(config, options) == standard);
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+    }
+
+    // --- A structural query needs no interchange role -------------------------
+    {
+        const std::string bare_name = directory + "/bare.ocio";
+        OIIO_CHECK_ASSERT(Filesystem::write_text_file(
+            bare_name,
+            "ocio_profile_version: 2.3\n"
+            "roles: {default: Plate}\n"
+            "file_rules:\n  - !<Rule> {name: Default, colorspace: default}\n"
+            "colorspaces:\n"
+            "  - !<ColorSpace>\n    name: Plate\n    encoding: sdr-video\n"
+            "  - !<ColorSpace>\n    name: Working\n"
+            "    encoding: scene-linear\n"));
+        ColorConfig bare(bare_name);
+        OIIO_CHECK_EQUAL(bare.geterror(false), "");
+        pvt::ColorSpaceSearchOptions options;
+        options.encodings    = { "scene-linear" };
+        options.image_states = { "scene" };
+        auto names           = pvt::find_color_spaces(bare, options);
+        OIIO_CHECK_EQUAL(bare.geterror(false), "");
+        OIIO_CHECK_EQUAL(names.size(), 1);
+        OIIO_CHECK_ASSERT(found(names, "Working"));
+    }
+
+    Filesystem::remove_all(directory);
+}
+
+
 
 // The facts the library reads through the private access, for the built-in
 // interop-identities config and for built-in identities a config does not
@@ -1934,6 +2890,7 @@ main(int argc, char* argv[])
     test_numeric_recognition();
     test_gamut_recognition();
     test_naming_versus_measurement();
+    test_color_space_search();
     test_spi_conventions();
     test_color_space_info_context();
     test_encoding_tie_break();

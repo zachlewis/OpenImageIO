@@ -1,0 +1,2 @@
+OIIO DEBUG: OpenImageIO WARNING: raw:ColorSpace "Adobe" is deprecated; use "g22_adobergb_scene"
+OIIO DEBUG: OpenImageIO WARNING: raw:ColorSpace "Wide" is deprecated

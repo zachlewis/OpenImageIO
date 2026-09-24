@@ -5639,6 +5639,16 @@ input_file(Oiiotool& ot, cspan<const char*> argv)
             break;
         }
         int exists = 1;
+        if (autocc && !ot.input_config.find_attribute("raw:ColorSpace")) {
+            // Decode RAW to the widest gamut LibRaw can write, then convert.
+            auto rawexts = OIIO::get_extension_map()["raw"];
+            if (std::count(rawexts.begin(), rawexts.end(),
+                           Strutil::lower(
+                               Filesystem::extension(filename, false)))) {
+                ot.input_config.attribute("raw:ColorSpace", "lin_ap0_scene");
+                ot.input_config_set = true;
+            }
+        }
         if (ot.input_config_set) {
             // User has set some input configuration, so seed the cache with
             // that information.

@@ -9,6 +9,14 @@ nope: 0.5,0.5,0.5 half
 raw: 0.5,0.5,0.5 half
 acescg: 0.5,0.5,0.5 half
 srgb_tx: 0.735352,0.735352,0.735352 half
+gamma-only gamma: 2.19998
+gamma-only chromaticities: <>
+Resolver rule numeric metadata: matched
+Resolver rule numeric metadata: matched
+Computing diff of "exr_numeric_actual.exr" vs "exr_numeric_expected.exr"
+PASS
+Computing diff of "look_numeric.exr" vs "exr_numeric_expected.exr"
+PASS
 Computing diff of "autocc_adobe_g22.exr" vs "expected_adobe_g22.exr"
 PASS
 Computing diff of "retagged_adobe.exr" vs "expected_adobe_g22.exr"
@@ -125,6 +133,21 @@ failover mistake: <> unknown marker <>
 Computing diff of "undefined_var_failover.exr" vs "expected_terminal_unknown.exr"
 PASS
 failover undefined variable: <> unknown marker <>
+Computing diff of "autocc_icc.exr" vs "expected_icc.exr"
+PASS
+Computing diff of "autocc_odd.exr" vs "expected_odd.exr"
+PASS
+into a selector: unknown unknown
+Computing diff of "autocc_unsupported_icc.exr" vs "expected_unsupported_icc.exr"
+PASS
+copied numeric: g22_adobergb_display
+Computing diff of "copy_adobe_actual.exr" vs "copy_adobe_expected.exr"
+PASS
+copied known ICC: srgb_rec709_display
+copied unmatched ICC: <>
+copied unsupported ICC: <>
+copied explicit: lin_ap1_scene
+copied retag: lin_ap1_scene
 Computing diff of "autocc_shot_match.exr" vs "expected_shot_match.exr"
 PASS
 Computing diff of "autocc_rules_shot_match.exr" vs "expected_shot_match.exr"
@@ -153,13 +176,22 @@ terminal facts: unknown unknown chroma <> sRGB <>
 Computing diff of "terminal_reread.exr" vs "expected_terminal_facts.exr"
 PASS
 exr color claim: srgb_rec709_scene srgb_rec709_scene chroma <>
-chroma_rec709: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329>
-chroma_rec709_copy: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329>
-chroma_rec709_iconvert: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329>
-chroma_d60white: lin_rec709_scene chroma <>
-chroma_d65white: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.31271, 0.32902>
-chroma_ap0: lin_rec709_scene chroma <>
-chroma_unknown: unknown chroma <>
+g22 rec709 raw copy: <g22_rec709_scene> chroma <>
+PNG numerics copied: <g22_rec709_display>
+PNG numerics asserted: <g22_rec709_scene>
+input-context id: <srgb_rec709_display>
+no input-context id: <>
+Computing diff of "unknown_icc_actual.exr" vs "unknown_icc_expected.exr"
+PASS
+chroma_rec709: <lin_rec709_scene> chroma <>
+chroma_rec709_copy: <lin_rec709_scene> chroma <>
+chroma_rec709_iconvert: <lin_rec709_scene> chroma <>
+chroma_d60white: <lin_rec709_scene> chroma <>
+chroma_d65white: <lin_rec709_scene> chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.31271, 0.32902>
+chroma_ap0: <lin_rec709_scene> chroma <>
+chroma_unknown: <unknown> chroma <>
+chroma_label_ap0: <unknown> chroma <>
+chroma_label_ap0_copy: <unknown> chroma <>
 assert over AP0: lin_rec709_scene chroma <0.64, 0.33, 0.3, 0.6, 0.15, 0.06, 0.3127, 0.329> aces <> mdcv <1000>
 aces_flag_ap0 core 0: lin_ap0_scene aces <1> chroma <0.7347, 0.2653, 0, 1, 0.0001, -0.077, 0.32168, 0.33767>
 aces_flag_ap0 core 1: lin_ap0_scene aces <1> chroma <0.7347, 0.2653, 0, 1, 0.0001, -0.077, 0.32168, 0.33767>

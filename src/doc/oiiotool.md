@@ -1440,16 +1440,31 @@ These are all non-positional flags that affect how all images are read in the
 
     An **input** file's color space is resolved from, in order: an explicit
     assignment; an ACES container flag; the filename step when
-    `filerules=first`; `colorInteropID`; cICP; the PNG sRGB chunk; numeric
-    metadata; the filename step in the default `fallback` mode; the
-    reader's ``"oiio:ColorSpace"`` label; and finally `:failover=`. The
-    filename step is non-default OCIO FileRules together with OpenImageIO's
-    own convention of a color space name embedded in the filename, and
-    `filerules=metadata` turns both off. A full PNG cICP claim suppresses the
-    weaker in-file PNG facts and the reader label even when the claim cannot
-    be identified. Known encodings absent from the active configuration are
-    converted through OpenImageIO's internal reference and the configuration's
-    OCIO interchange role.
+    `filerules=first`; `colorInteropID`; cICP; a supported ICC profile; the
+    PNG sRGB chunk; numeric metadata; the filename step in the
+    default `fallback` mode; the reader's ``"oiio:ColorSpace"`` label; and
+    finally `:failover=`. The filename step is non-default OCIO FileRules
+    together with OpenImageIO's own convention of a color space name embedded
+    in the filename, and `filerules=metadata` turns both off. A full PNG cICP
+    claim suppresses the weaker in-file PNG facts and the reader label even
+    when the claim cannot be identified. PNG cICP also stays above ICC in that
+    container's precedence, and gamma alone never establishes a gamut. Known
+    encodings absent from the active configuration are converted through
+    OpenImageIO's internal reference and the configuration's OCIO interchange
+    role. Supported RGB matrix/TRC ICC profiles and complete unmatched numeric
+    descriptions resolve to process-local selectors, which are not portable
+    color interop IDs.
+
+    An unconverted OpenEXR output resolves retained source metadata using the
+    input file's format and the active color configuration. When that result
+    has a portable identity, it is recorded as `colorInteropID` so a later
+    reader does not have to reinterpret a lossy reader label. Explicit identity
+    metadata remains authoritative, while process-local `<synthetic>` selectors
+    are omitted and their ICC or numeric evidence is retained. A label supplies
+    the ID only where the other color metadata agrees with it, and then
+    chromaticities that agree with it are dropped as redundant; metadata that
+    contradicts the label wins. If that leaves no portable ID, OpenEXR records
+    `colorInteropID` as `unknown` rather than making no statement.
 
     A file that states a color space this configuration cannot use, including
     a `colorInteropID` of `unknown`, does not stop there: the rest of its
@@ -1539,8 +1554,9 @@ These are all non-positional flags that affect how all images are read in the
     With `--debug`, automatic input conversion prints each resolver rule it
     reaches, its outcome and reason, followed by the summary for that same
     resolution. Debug tracing does not perform another resolution or change
-    the result. Invalid numeric evidence includes non-finite chromaticities
-    and negative or non-finite gamma; resolution then continues.
+    the result. Invalid evidence includes malformed ICC bytes, non-finite
+    chromaticities, and negative or non-finite gamma; resolution then
+    continues.
 
     Example:
 
@@ -5229,7 +5245,8 @@ will be printed with the command `oiiotool --colorconfiginfo`.
     interop ID, CICP, chromaticities, gamma, PNG sRGB facts, the ACES
     container flag and Exif and TIFF color tags) is kept where it agrees with
     the named space, rewritten where the name determines it, and removed
-    otherwise, and ICC profiles are removed, so subsequent color resolution
+    otherwise, and an ICC profile is kept only when it identifies as the named
+    space, so subsequent color resolution
     and writers use the newly assigned space. This happens even when the name
     is already the image's color space. Mastering display metadata is not
     changed. An empty name only removes `oiio:ColorSpace`.
@@ -5344,14 +5361,16 @@ will be printed with the command `oiiotool --colorconfiginfo`.
     - `from=` *val*
 
       Assume the image is in the named color space. If no `from=` is
-      supplied, it will try to deduce it from the image's metadata or
-      previous `--iscolorspace` directives. If no such hints are available,
-      it will assume the pixel data are in the default linear scene-referred
-      color space.
+      supplied, the shared color metadata resolver selects the source using
+      the active color configuration and any `key=`/`value=` context. This
+      includes embedded ICC profiles and complete numeric color descriptions.
+      If no source evidence is available, it assumes the default linear
+      scene-referred color space.
 
     - `to=` *val*
 
-      Convert to the named space after applying the look.
+      Convert to the named space after applying the look. If omitted or set to
+      `current`, keep the image's resolved current color space.
 
     - `inverse=` *val*
 

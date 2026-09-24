@@ -368,6 +368,18 @@ decode_icc_profile(cspan<uint8_t> iccdata, ImageSpec& spec, std::string& error)
             spec.attribute(tagname, string_view((const char*)iccdata.data()
                                                     + tag.offset + 12,
                                                 tag.size - 12));
+        } else if (typesignature == "cicp") {
+            // ICC.1:2022 cicpType: "cicp", 4 reserved bytes, then the four
+            // H.273 code points (primaries, transfer, matrix, full range).
+            if (tag.size < 12) {
+                error = format(
+                    "ICC profile tag {} appears to contain corrupted/invalid data",
+                    signature);
+                return false;
+            }
+            const uint8_t* codes = iccdata.data() + tag.offset + 8;
+            const int cicp[4]    = { codes[0], codes[1], codes[2], codes[3] };
+            spec.attribute(tagname, TypeDesc(TypeDesc::INT, 4), cicp);
         } else if (typesignature == "mluc") {
             // Multi-localized unicode text.  First 4 bytes are "mluc", next 4
             // are 0, next 4 are the number of records, then 12-end are the

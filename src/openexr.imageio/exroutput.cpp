@@ -32,6 +32,9 @@ OIIO_PRAGMA_WARNING_PUSH
 OIIO_GCC_PRAGMA(GCC diagnostic ignored "-Wunused-parameter")
 #include <OpenEXR/IexBaseExc.h>
 #include <OpenEXR/ImfBoxAttribute.h>
+#if OPENEXR_CODED_VERSION >= 30400
+#    include <OpenEXR/ImfBytesAttribute.h>
+#endif
 #include <OpenEXR/ImfCRgbaFile.h>  // JUST to get symbols to figure out version!
 #include <OpenEXR/ImfChromaticitiesAttribute.h>
 #include <OpenEXR/ImfCompressionAttribute.h>
@@ -69,6 +72,8 @@ OIIO_PRAGMA_VISIBILITY_POP
 #include <OpenImageIO/strutil.h>
 #include <OpenImageIO/sysutil.h>
 #include <OpenImageIO/thread.h>
+
+#include "imageio_pvt.h"
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
 
@@ -1127,10 +1132,31 @@ OpenEXROutput::spec_to_header(ImageSpec& spec, int subimage,
     // Set color interop ID from colorspace
     if (spec.get_string_attribute("colorInteropID").empty()) {
         const ColorConfig& colorconfig(ColorConfig::default_colorconfig());
-        string_view colorspace = spec.get_string_attribute("oiio:ColorSpace");
-        string_view interop_id = colorconfig.get_color_interop_id(colorspace);
-        if (!interop_id.empty())
-            spec.attribute("colorInteropID", interop_id);
+        if (spec.find_attribute("ICCProfile")) {
+            // ICC interpretation is independent of the source container.
+            // Known profiles acquire an ID; process-local selectors publish
+            // none, and the profile bytes below remain the reread evidence.
+            // Beside a profile this build cannot interpret, complete
+            // chromaticities and gamma, read without container rules, can
+            // still supply one.
+            pvt::finalize_resolved_color_metadata(spec, colorconfig, {}, {}, {},
+                                                  {}, true);
+        } else {
+            // The label may be a reader's derived guess, so color metadata
+            // that contradicts it wins and the missing identity is recorded
+            // as unknown. Beside the ID of a label they agree with,
+            // chromaticities are redundant (CIF
+            // Recommendation 04). An ST 2065-4 container got its ID above.
+            string_view colorspace = spec.get_string_attribute(
+                "oiio:ColorSpace");
+            string_view interop_id = colorconfig.get_color_interop_id(
+                colorspace);
+            if (!interop_id.empty()
+                && pvt::colorspace_label_agrees(colorconfig, spec, colorspace)) {
+                spec.attribute("colorInteropID", interop_id);
+                spec.erase_attribute("chromaticities");
+            }
+        }
     }
 
     // CIF Recommendation 04: an ID and a chromaticities attribute are two
@@ -1431,6 +1457,19 @@ OpenEXROutput::put_parameter(const std::string& name, TypeDesc type,
     // OpenEXR has no CICP attribute.
     if (Strutil::iequals(xname, "CICP"))
         return false;
+
+    // OpenEXR 3.4 added a native arbitrary-byte attribute. Preserve the ICC
+    // payload as bytes rather than disguising binary data as text or opaque.
+    // Older OpenEXR has no attribute for it.
+    if (xname == "ICCProfile" && type.basetype == TypeDesc::UINT8
+        && type.aggregate == TypeDesc::SCALAR && type.arraylen > 0) {
+#if OPENEXR_CODED_VERSION >= 30400
+        header.insert(xname.c_str(), Imf::BytesAttribute(type.size(), data));
+        return true;
+#else
+        return false;
+#endif
+    }
 
     if (!xname.length())
         return false;  // Skip suppressed names

@@ -26,6 +26,7 @@ tahoe-cicp-pq.jxl    :  128 x   96, 3 channel, uint8 jpegxl
     CICP: 9, 16, 0, 1
     ICCProfile: 0, 0, 16, 248, 106, 120, 108, 32, 4, 64, 0, 0, 109, 110, 116, 114, ... [4344 x uint8]
     ICCProfile:attributes: "Reflective, Glossy, Positive, Color"
+    ICCProfile:cicp: 9, 16, 0, 1
     ICCProfile:cmm_type: 1786276896
     ICCProfile:color_space: "RGB"
     ICCProfile:copyright: "CC0"
@@ -49,6 +50,7 @@ tahoe-cicp-dcip3.jxl :  128 x   96, 3 channel, uint8 jpegxl
     CICP: 11, 17, 0, 1
     ICCProfile: 0, 0, 2, 24, 106, 120, 108, 32, 4, 64, 0, 0, 109, 110, 116, 114, ... [536 x uint8]
     ICCProfile:attributes: "Reflective, Glossy, Positive, Color"
+    ICCProfile:cicp: 11, 17, 0, 1
     ICCProfile:cmm_type: 1786276896
     ICCProfile:color_space: "RGB"
     ICCProfile:copyright: "CC0"
@@ -71,6 +73,7 @@ tahoe-cicp-displayp3.jxl :  128 x   96, 3 channel, uint8 jpegxl
     CICP: 12, 13, 0, 1
     ICCProfile: 0, 0, 2, 24, 106, 120, 108, 32, 4, 64, 0, 0, 109, 110, 116, 114, ... [536 x uint8]
     ICCProfile:attributes: "Reflective, Glossy, Positive, Color"
+    ICCProfile:cicp: 12, 13, 0, 1
     ICCProfile:cmm_type: 1786276896
     ICCProfile:color_space: "RGB"
     ICCProfile:copyright: "CC0"
@@ -88,7 +91,7 @@ tahoe-cicp-displayp3.jxl :  128 x   96, 3 channel, uint8 jpegxl
     ICCProfile:rendering_intent: "Perceptual"
     oiio:ColorSpace: "srgb_p3d65_scene"
 Reading tahoe-cicp-p3d65dci.jxl
-
+    ICCProfile:cicp: 12, 17, 0, 1
 oiiotool ERROR: read : "src/crash-bfd2220.jxl": jpegxl image dimension 328438676x164219338 exceeds "limits:resolution" = 1048576 for a single dimension. Possible corrupt input?
 If you're sure this is a valid file, raise the OIIO global attribute "limits:resolution".
 Full command line was:

@@ -635,7 +635,12 @@ write_info(png_structp& sp, png_infop& ip, int& color_type, ImageSpec& spec,
     convert_alpha = spec.alpha_channel != -1
                     && !spec.get_int_attribute("oiio:UnassociatedAlpha", 0);
 
+    // Looked up before the color chunks because an embedded profile states
+    // the primaries and transfer function itself.
+    std::vector<uint8_t> icc_profile        = get_colorspace_icc_profile(spec);
     OIIO_MAYBE_UNUSED bool wrote_colorspace = false;
+    // gAMA alone reads back as Rec.709 primaries, so CICP may still be needed.
+    OIIO_MAYBE_UNUSED bool wrote_gamma_only = false;
     srgb                                    = false;
     if (is_colorspace_srgb(spec)) {
         gamma = 1.0f;
@@ -646,11 +651,77 @@ write_info(png_structp& sp, png_infop& ip, int& color_type, ImageSpec& spec,
         wrote_colorspace = true;
     } else {
         gamma = pvt::get_colorspace_rec709_gamma(spec);
+        // A color space this file cannot carry as cICP is not lost: cHRM
+        // carries the primaries and gAMA a pure-power transfer function, so
+        // write them from the color space's own properties. Asked
+        // only when cICP cannot describe the space, so an ordinary sRGB or
+        // Rec.709 write measures nothing.
+#ifdef PNG_cICP_SUPPORTED
+        const bool cicp_covers = !get_colorspace_cicp(spec, true).empty();
+#else
+        const bool cicp_covers = false;
+#endif
+        // An embedded profile states the primaries and the transfer function
+        // itself, and PNG requires cHRM and gAMA to agree with it, so it
+        // suppresses these as it suppresses the cICP fallback below.
+        if (!cicp_covers && icc_profile.empty()) {
+            // The span borrows from the info, which must outlive it.
+            const ColorSpaceInfo info = pvt::get_colorspace_info(spec, true);
+            cspan<float> xy           = info.chromaticities();
+            float rec709[8];
+            // Rec.709 primaries, and the unknown primaries of a Rec.709 gamma
+            // or linear name, need no cHRM beside the gAMA written for them.
+            const bool compared
+                = xy.size() == 8
+                  && pvt::get_cicp_primaries_chromaticities(1, rec709);
+            bool other = false;
+            for (int i = 0; compared && i < 8; ++i)
+                other |= std::abs(xy[i] - rec709[i]) > 1.0e-4f;
+            // cHRM stores each coordinate as an unsigned count of 1/100000,
+            // so it holds no negative coordinate, such as ACES AP0's blue y,
+            // and no zero one either. Those primaries really are lost.
+            bool representable = other;
+            for (int i = 0; i < 8 && representable; ++i)
+                representable = xy[i] > 0.0f && xy[i] <= 1.0f;
+            // A pure power only the color space's own properties give is not
+            // a Rec.709 gamma, and gAMA alone reads back as one, so it is
+            // written only beside cHRM or for primaries known to be Rec.709.
+            const float own = gamma == 0.0f ? info.transfer_function_gamma()
+                                            : 0.0f;
+            if (own != 0.0f && (representable || (compared && !other)))
+                gamma = own;
+            if (representable && gamma != 0.0f) {
+                if (setjmp(png_jmpbuf(sp)))  // NOLINT(cert-err52-cpp)
+                    return "Could not set PNG cHRM chunk";
+                png_set_cHRM(sp, ip, xy[6], xy[7], xy[0], xy[1], xy[2], xy[3],
+                             xy[4], xy[5]);
+                wrote_colorspace = true;
+            } else if ((other && !representable)
+                       || (own != 0.0f && gamma == 0.0f)) {
+                debugfmt("OpenImageIO WARNING: PNG cannot represent the "
+                         "primaries of \"{}\"; the file carries {} and reads "
+                         "back as Rec.709\n",
+                         spec.get_string_attribute("oiio:ColorSpace"),
+                         gamma != 0.0f ? "gAMA alone"
+                                       : "no color chunk at all");
+            } else if (gamma == 0.0f
+                       && !ColorConfig::default_colorconfig().isData(
+                           spec.get_string_attribute("oiio:ColorSpace"))) {
+                // cHRM is written only beside a transfer function the file
+                // also carries, and a log or piecewise curve has no exponent
+                // for gAMA, so primaries alone would be half a description.
+                debugfmt("OpenImageIO WARNING: PNG cannot represent the "
+                         "transfer function of \"{}\", so the file carries "
+                         "no color chunk\n",
+                         spec.get_string_attribute("oiio:ColorSpace"));
+            }
+        }
         if (gamma != 0.0f) {
             if (setjmp(png_jmpbuf(sp)))  // NOLINT(cert-err52-cpp)
                 return "Could not set PNG gAMA chunk";
             png_set_gAMA(sp, ip, 1.0 / gamma);
             srgb             = false;
+            wrote_gamma_only = !wrote_colorspace;
             wrote_colorspace = true;
         } else {
             gamma = 1.0f;
@@ -658,13 +729,13 @@ write_info(png_structp& sp, png_infop& ip, int& color_type, ImageSpec& spec,
     }
 
     // Write ICC profile, if we have anything
-    std::vector<uint8_t> icc_profile = get_colorspace_icc_profile(spec);
     if (icc_profile.size()) {
         if (setjmp(png_jmpbuf(sp)))  // NOLINT(cert-err52-cpp)
             return "Could not set PNG iCCP chunk";
         png_set_iCCP(sp, ip, "Embedded Profile", 0, icc_profile.data(),
                      icc_profile.size());
         wrote_colorspace = true;
+        wrote_gamma_only = false;
     }
 
     if (false && !spec.find_attribute("DateTime")) {
@@ -723,6 +794,12 @@ write_info(png_structp& sp, png_infop& ip, int& color_type, ImageSpec& spec,
     // Only automatically determine CICP from oiio::ColorSpace if we didn't
     // write colorspace metadata yet.
     cspan<int> cicp = get_colorspace_cicp(spec, !wrote_colorspace);
+    if (cicp.empty() && wrote_gamma_only) {
+        // Keep primaries other than Rec.709 that the gAMA chunk cannot carry.
+        cicp = get_colorspace_cicp(spec, true);
+        if (!cicp.empty() && cicp[0] == 1)
+            cicp = cspan<int>();  // Rec.709: gAMA alone loses nothing
+    }
     if (!cicp.empty()) {
         png_byte vals[4];
         for (int i = 0; i < 4; ++i)

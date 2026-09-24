@@ -77,6 +77,15 @@ selected first, even when its transform measures as another encoding, and a
 space named for the identity remains the fallback when measurement finds
 none.
 
+When the active configuration does not define them, `lin_srgb` and
+`lin_rec709` resolve as `lin_rec709_scene`, and `srgb_tx` as
+`srgb_rec709_scene`; the built-in interop-identities config carries these
+aliases. The generic `sRGB`, `Rec709`, and `linear` requests are deprecated,
+and `linear` follows the `scene_linear` role, so OIIO no longer gives it two
+meanings. OIIO's own PNM tags and `--autocc` PNM output use
+`ocio:itu709_rec709_scene` for integer files and `lin_rec709_scene` for
+float PFM files.
+
 Builds explicitly configured with `OIIO_SITE=spi` retain that site's naming
 conventions: `cgln*` names identify ACEScg; `srgbf`, `srgbh`, `srgb16`, and
 `srgb8` identify scene sRGB; `srgblnf`, `srgblnh`, `srgbln16`, and `srgbln8`

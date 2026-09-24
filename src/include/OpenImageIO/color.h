@@ -470,6 +470,14 @@ public:
     /// named transform or authored Color Interop ID; or it may match a
     /// config-local ID formed from sanitized config and color-space names.
     /// If the name is not recognized, return it unchanged.
+    ///
+    /// For names the config does not define, "lin_srgb" and "lin_rec709"
+    /// resolve as "lin_rec709_scene", and "srgb_tx" as "srgb_rec709_scene".
+    /// The generic names "sRGB", "Rec709" and "linear" are DEPRECATED(3.3)
+    /// in that case, and "linear" resolves as the "scene_linear" role. Use
+    /// "srgb_rec709_scene", "ocio:itu709_rec709_scene" or "scene_linear"
+    /// instead. None of this applies, and nothing warns, when no OpenColorIO
+    /// config is in use.
     OIIO_NODISCARD string_view resolve(string_view name) const;
 
     /// Are the two color space names/aliases/roles equivalent?

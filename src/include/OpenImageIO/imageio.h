@@ -915,7 +915,7 @@ public:
     ///        ImageSpec spec;
     ///        spec["foo"] = 42;                   // int
     ///        spec["pi"] = float(M_PI);           // float
-    ///        spec["oiio:ColorSpace"] = "sRGB";   // string
+    ///        spec["oiio:ColorSpace"] = "srgb_rec709_scene";   // string
     ///        spec["cameratoworld"] = Imath::Matrix44(...);  // matrix
     ///
     ///    Be very careful, the attribute's type will be implied by the C++

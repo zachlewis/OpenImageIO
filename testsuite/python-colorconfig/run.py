@@ -10,7 +10,8 @@ import os
 command += run_app(pythonbin + " src/test_colorconfig.py")
 command += run_app(
     pythonbin + ' src/test_normalization.py "' + OIIO_PROJECT_ROOT
-    + '/src/libOpenImageIO/interop-identities-config.ocio"')
+    + '/src/libOpenImageIO/interop-identities-config.ocio" "'
+    + oiio_app("oiiotool").strip() + '"')
 command += run_app(
     pythonbin + ' src/test_properties_api.py "' + OIIO_PROJECT_ROOT
     + '/src/libOpenImageIO/interop-identities-config.ocio"')

@@ -2127,9 +2127,35 @@ ColorConfig::Impl::resolve(string_view name, bool* success,
         return authored;
     const auto colon = name.find(':');
     if (colon == string_view::npos || !valid_interop_id(Strutil::lower(name))) {
+        // Deprecated in 3.3, removal no earlier than 4.0. Once per process
+        // per name.
+        static std::atomic<int> warned { 0 };
+        static const char* deprecated[][2] = {
+            { "sRGB", "srgb_rec709_scene" },
+            { "linear", "scene_linear" },
+            { "Rec709", "ocio:itu709_rec709_scene" },
+        };
+        for (int i = 0; i < 3; ++i)
+            if (Strutil::iequals(name, deprecated[i][0])
+                && !(warned.fetch_or(1 << i) & (1 << i)))
+                debugfmt("OpenImageIO WARNING: color space name \"{}\" is "
+                         "deprecated when the OCIO config does not define "
+                         "it; use \"{}\"\n",
+                         name, deprecated[i][1]);
         auto exact = resolve_exact(name, success, required_recognition,
                                    allow_identification);
-        return exact.empty() ? name : exact;
+        if (!exact.empty())
+            return exact;
+        // lin_srgb, lin_rec709 and srgb_tx are aliases in the built-in
+        // identities config; select the identity they name.
+        if (config_ && !disable_ocio
+            && (Strutil::iequals(name, "lin_srgb")
+                || Strutil::iequals(name, "lin_rec709")
+                || Strutil::iequals(name, "srgb_tx")))
+            if (auto cs = internal_reference()->getColorSpace(c_str(name)))
+                return resolve(ustring(cs->getName()), success,
+                               required_recognition, allow_identification);
+        return name;
     }
 
     // A qualified spelling falls back in native-ownership order: strip one
@@ -2184,11 +2210,10 @@ ColorConfig::Impl::resolve_exact(string_view name, bool* success,
             // OIIO's generic selectors keep their established meanings.
             identity = 1;
             flag     = CSInfo::is_srgb_scene;
-        } else if (Strutil::iequals(name, "lin_srgb")
-                   || Strutil::iequals(name, "lin_rec709")
-                   || Strutil::iequals(name, "linear")) {
-            identity = 2;
-            flag     = CSInfo::is_lin_srgb;
+        } else if (Strutil::iequals(name, "linear")) {
+            // "linear" means the configured scene_linear role.
+            const CSInfo* cs = find("scene_linear");
+            return cs ? string_view(cs->name) : string_view();
         } else if (Strutil::iequals(name, "ACEScg")) {
             identity = 3;
             flag     = CSInfo::is_ACEScg;
@@ -8397,11 +8422,17 @@ pvt::get_colorspace_rec709_gamma(const ImageSpec& spec)
     if (gamma != 0.0f)
         return gamma;
 
-    // Backwards compatibility, scene_linear is not necessarily Rec.709. Any
-    // other encoding with a linear transfer function is also gamma 1.0,
-    // including one this configuration describes too thinly to measure but
-    // whose color interop ID names a linear identity.
-    if (colorconfig.equivalent(colorspace, "linear")
+    // Backwards compatibility, scene_linear is not necessarily Rec.709. Ask
+    // for "linear" by role and compare what that names only if the config
+    // defines it; otherwise the lookup returns "linear" itself, compared by
+    // name only, since resolving it could warn that a name the caller never
+    // used is deprecated. Any other encoding with a linear transfer function
+    // is also gamma 1.0, including one this configuration describes too
+    // thinly to measure but whose color interop ID names a linear identity.
+    const char* linear = colorconfig.getColorSpaceNameByRole("linear");
+    if ((colorconfig.getColorSpaceFamilyByName(linear)
+             ? colorconfig.equivalent(colorspace, linear)
+             : Strutil::iequals(colorspace, linear))
         || colorconfig.equivalent(colorspace, "scene_linear")
         || interop_id == "lin_rec709_scene"
         || ColorSpaceInfoAccess::transfer_function_kind(

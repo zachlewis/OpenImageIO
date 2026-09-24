@@ -1536,7 +1536,8 @@ test_spi_conventions()
     OIIO_CHECK_ASSERT(config.isData("nc_pixels"));
     OIIO_CHECK_EQUAL(config.get_color_interop_id("nc_pixels"), "data");
     OIIO_CHECK_EQUAL(config.resolve("data"), "data");
-    OIIO_CHECK_EQUAL(config.resolve("linear"), "srgblnf");
+    // No scene_linear role, so the deprecated "linear" selects nothing.
+    OIIO_CHECK_EQUAL(config.resolve("linear"), "linear");
     OIIO_CHECK_EQUAL(config.resolve("sRGB"), "srgbf");
     OIIO_CHECK_EQUAL(config.get_color_interop_id("cgln_a"), "lin_ap1_scene");
     OIIO_CHECK_EQUAL(config.get_color_interop_id("cgln_b"), "lin_ap1_scene");

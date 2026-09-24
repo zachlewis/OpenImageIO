@@ -33,18 +33,21 @@ pixels = np.array([[[0.1, 0.5, 0.9]]], dtype=np.float32)
 
 # Generic-name answers captured from OpenImageIO 68dda81c1 (before identity
 # recognition): name -> (resolve, getColorSpaceNameByRole,
-# get_color_interop_id, isColorSpaceLinear).
+# get_color_interop_id, isColorSpaceLinear). Changed since: lin_srgb,
+# lin_rec709 and srgb_tx are aliases of their interop IDs, and the deprecated
+# "linear" selects the scene_linear role.
 NORMALIZATION = {
     "ACEScg": ("ACEScg", None, "", False),
     "Rec709": ("Rec709", None, "", False),
     "lin_ap1_scene": ("lin_ap1_scene", None, "lin_ap1_scene", False),
-    "lin_rec709": ("lin_rec709", None, "lin_rec709_scene", False),
+    "lin_rec709": ("Reference", None, "lin_rec709_scene", False),
     "lin_rec709_scene": ("Reference", "Reference", "lin_rec709_scene", True),
-    "lin_srgb": ("lin_srgb", None, "", False),
-    "linear": ("linear", "Reference", "", False),
+    "lin_srgb": ("Reference", None, "lin_rec709_scene", False),
+    "linear": ("Reference", "Reference", "lin_rec709_scene", False),
     "sRGB": ("sRGB", None, "", False),
     "scene_linear": ("Reference", "Reference", "lin_rec709_scene", True),
     "srgb_rec709_scene": ("Encoded", "Encoded", "srgb_rec709_scene", False),
+    "srgb_tx": ("Encoded", None, "srgb_rec709_scene", False),
 }
 # A legacy config: generic space names and no interchange roles, so nothing
 # can be measured and the names remain the evidence.
@@ -73,6 +76,7 @@ LEGACY = {
     "sRGB": ("sRGB", "sRGB", "srgb_rec709_scene", False),
     "scene_linear": ("linear", "linear", "lin_rec709_scene", True),
     "srgb_rec709_scene": ("sRGB", None, "srgb_rec709_scene", False),
+    "srgb_tx": ("sRGB", None, "srgb_rec709_scene", False),
 }
 
 
@@ -114,6 +118,14 @@ with tempfile.TemporaryDirectory() as directory:
     assert srgb_index >= 0, srgb_index
     for spelling in ("srgb_rec709_scene", "acme:sRGB", "SRGB"):
         assert legacy.getColorSpaceIndex(spelling) == srgb_index, spelling
+    # With no local counterpart, an alias names its interop ID, which converts
+    # through the built-in identities.
+    bare_path = Path(directory) / "bare.ocio"
+    bare_path.write_text(text.replace("    aliases: [lin_rec709_scene]\n", "")
+                         .replace("    aliases: [srgb_rec709_scene]\n", ""))
+    bare = oiio.ColorConfig(str(bare_path))
+    assert bare.resolve("lin_srgb") == "lin_rec709_scene"
+    assert bare.resolve("srgb_tx") == "srgb_rec709_scene"
     converted = oiio.ImageBufAlgo.colorconvert(
         oiio.ImageBuf(pixels), "lin_rec709_scene", "srgb_rec709_scene",
         colorconfig=str(path))
@@ -139,7 +151,7 @@ with tempfile.TemporaryDirectory() as directory:
 
 # Reuse the actual authored reference, renaming only the BT.709 space and
 # removing its selectors. All transforms and interchange roles remain intact.
-reference = sys.argv[1]
+reference, oiiotool = sys.argv[1:3]
 reference_text = Path(reference).read_text()
 video_row = ("    name: ocio:itu709_rec709_scene\n"
              "    aliases: [itu709_rec709_scene]\n"
@@ -161,9 +173,9 @@ with tempfile.TemporaryDirectory() as directory:
             "gamma: 2.22222222222222, offset: 0.099",
             "gamma: 2.4, offset: 0.055"), BT709, 1),
         # Direct authored aliases retain their meaning before identification.
-        (studio.replace("    name: lin_rec709_scene\n",
-                        "    name: lin_rec709_scene\n"
-                        "    aliases: [ocio:itu709_rec709_scene]\n"),
+        (studio.replace("    aliases: [lin_srgb, lin_rec709]\n",
+                        "    aliases: [lin_srgb, lin_rec709, "
+                        "ocio:itu709_rec709_scene]\n"),
          "lin_rec709_scene", 0),
     ):
         path.write_text(text)
@@ -173,6 +185,90 @@ with tempfile.TemporaryDirectory() as directory:
             env=dict(os.environ, OIIO_DEBUG_COLOR="1"))
         assert probe.stdout.count(cold) == count, probe.stdout + probe.stderr
         assert probe.stdout.count(shared) == count, probe.stdout + probe.stderr
+
+    # oiiotool's PPM output default and the PNM reader both name BT.709,
+    # which reaches the renamed local space through native identification.
+    path.write_text(studio)
+    output = Path(directory) / "converted.ppm"
+    subprocess.run(
+        [oiiotool, "--colorconfig", str(path), "--pattern",
+         "constant:color=.18,.18,.18", "1x1", "3", "--iscolorspace",
+         "lin_rec709_scene", "--autocc", "-d", "uint16", "-o", str(output)],
+        check=True, capture_output=True, text=True)
+    image = oiio.ImageBuf(str(output))
+    assert image.read(), image.geterror()
+    assert image.spec().get_string_attribute("oiio:ColorSpace") == BT709
+    expected = 1.099 * 0.18 ** (1 / 2.22222222222222) - 0.099
+    assert np.allclose(image.get_pixels(oiio.FLOAT), expected, atol=2e-5)
+    # --autocc converts PNM input from that tag back to scene linear.
+    restored = Path(directory) / "restored.exr"
+    subprocess.run(
+        [oiiotool, "--colorconfig", str(path), "--autocc", str(output),
+         "-d", "float", "-o", str(restored)],
+        check=True, capture_output=True, text=True)
+    image = oiio.ImageBuf(str(restored))
+    assert image.read(), image.geterror()
+    assert np.allclose(image.get_pixels(oiio.FLOAT), 0.18, atol=1e-4)
+    # --autocc picks the PNM output encoding from the data format written,
+    # whatever the extension: float is PFM, which the reader tags linear.
+    source = oiio.ImageBufAlgo.fill((0.3, 0.2, 0.1),
+                                    roi=oiio.ROI(0, 1, 0, 1, 0, 1, 0, 3))
+    source.specmod().attribute("oiio:ColorSpace", "lin_ap1_scene")
+    assert source.write(str(Path(directory) / "source.exr"))
+    for name, dtype, magic, space, atol in (
+            ("float.ppm", [], b"PF", "lin_rec709_scene", 1e-5),
+            ("integer.pfm", ["-d", "uint16"], b"P6", BT709, 1e-4)):
+        output = Path(directory) / name
+        subprocess.run(
+            [oiiotool, "--colorconfig", str(path), "--autocc",
+             str(Path(directory) / "source.exr")] + dtype + ["-o", str(output)],
+            check=True, capture_output=True, text=True)
+        assert output.read_bytes().startswith(magic), name
+        image = oiio.ImageBuf(str(output))
+        assert image.read(), image.geterror()
+        assert image.spec().get_string_attribute("oiio:ColorSpace") == space
+        expected = oiio.ImageBufAlgo.colorconvert(
+            source, "lin_ap1_scene", space, colorconfig=str(path))
+        assert np.allclose(image.get_pixels(oiio.FLOAT),
+                           expected.get_pixels(oiio.FLOAT), atol=atol), name
+        subprocess.run(
+            [oiiotool, "--colorconfig", str(path), "--autocc", str(output),
+             "-d", "float", "-o", str(restored)],
+            check=True, capture_output=True, text=True)
+        image = oiio.ImageBuf(str(restored))
+        assert image.read(), image.geterror()
+        assert np.allclose(image.get_pixels(oiio.FLOAT),
+                           source.get_pixels(oiio.FLOAT), atol=atol), name
+
+    # A later direct-read input supplies the native output type even when the
+    # first input was float. The conversion and the PNM reader tag must agree.
+    linear8 = Path(directory) / "linear8.png"
+    subprocess.run(
+        [oiiotool, "--colorconfig", str(path), "--pattern",
+         "constant:color=.18,.18,.18", "1x1", "3", "--iscolorspace",
+         "lin_rec709_scene", "-d", "uint8", "-o", str(linear8)],
+        check=True, capture_output=True, text=True)
+    output = Path(directory) / "mixed.ppm"
+    subprocess.run(
+        [oiiotool, "--colorconfig", str(path), "--autocc",
+         str(Path(directory) / "source.exr"), "-i:autocc=0", str(linear8),
+         "-o", str(output)], check=True, capture_output=True, text=True)
+    assert output.read_bytes().startswith(b"P6")
+    image = oiio.ImageBuf(str(output))
+    assert image.read(), image.geterror()
+    assert image.spec().get_string_attribute("oiio:ColorSpace") == BT709
+    expected = oiio.ImageBufAlgo.colorconvert(
+        oiio.ImageBuf(str(linear8)), "lin_rec709_scene", BT709,
+        colorconfig=str(path))
+    assert np.allclose(image.get_pixels(oiio.FLOAT),
+                       expected.get_pixels(oiio.FLOAT), atol=1 / 255)
+    subprocess.run(
+        [oiiotool, "--colorconfig", str(path), "--autocc", str(output),
+         "-d", "float", "-o", str(restored)],
+        check=True, capture_output=True, text=True)
+    image = oiio.ImageBuf(str(restored))
+    assert image.read(), image.geterror()
+    assert np.allclose(image.get_pixels(oiio.FLOAT), 46 / 255, atol=1 / 255)
 
 
 # CIF Rec 03: a namespaced name resolves through its remainder, in any case,
@@ -364,3 +460,78 @@ assert c.get_color_interop_id("Rec709") == ""
 """], capture_output=True, text=True,
     env=dict(os.environ, OIIO_DISABLE_OCIO="1"))
 assert disabled.returncode == 0, disabled.stdout + disabled.stderr
+
+# A config's own "linear" (a space name, an alias or a role) always wins and
+# never warns. Otherwise OIIO's deprecated fallback selects the scene_linear
+# role and warns once per process. A namespace-stripped remainder selects
+# neither a role nor a generic name. One process per case, so each warning is
+# observable.
+# The second query spells the name differently, and the warnings are counted
+# without regard to case, so warning again would be visible here.
+LINEAR_TEXT = """ocio_profile_version: 2.1
+roles: {{default: ACEScg, scene_linear: ACEScg{role}}}
+file_rules:
+  - !<Rule> {{name: Default, colorspace: default}}
+colorspaces:
+  - !<ColorSpace> {{name: ACEScg}}
+  - !<ColorSpace> {{name: {name}{aliases}}}
+"""
+warning = 'OpenImageIO WARNING: color space name "linear" is deprecated'
+with tempfile.TemporaryDirectory() as directory:
+    path = Path(directory) / "linear.ocio"
+    for role, name, aliases, expected, stripped, warnings in (
+        ("", "linear", "", "linear", "linear", 0),
+        ("", "Lin", ", aliases: [linear]", "Lin", "Lin", 0),
+        (", linear: Lin", "Lin", "", "Lin", "x:linear", 0),
+        ("", "Lin", "", "ACEScg", "x:linear", 1),
+    ):
+        path.write_text(LINEAR_TEXT.format(role=role, name=name,
+                                           aliases=aliases))
+        probe = subprocess.run([sys.executable, "-c", """
+import sys
+import OpenImageIO as oiio
+c = oiio.ColorConfig(sys.argv[1])
+assert not c.geterror(), c.geterror()
+print(c.resolve("linear"), c.resolve("Linear"), c.resolve("x:linear"),
+      c.resolve("x:lin_srgb"), c.resolve("x:srgb_tx"))
+""", str(path)], capture_output=True, text=True,
+                               env=dict(os.environ, OPENIMAGEIO_DEBUG="1"))
+        assert probe.returncode == 0, probe.stdout + probe.stderr
+        assert probe.stdout.split() == [expected, expected, stripped,
+                                         "x:lin_srgb", "x:srgb_tx"], name
+        assert probe.stderr.lower().count(warning.lower()) == warnings, \
+            probe.stderr
+
+# Writers ask for the Rec.709 gamma of every color space they tag. That query
+# never resolves a "linear" the config does not define, so it never warns,
+# whatever the image is tagged, with or without a scene_linear role. A
+# config's own "linear", here tagged by an alias, still writes gamma 1.0,
+# which PNG reads back as lin_rec709_scene.
+with tempfile.TemporaryDirectory() as directory:
+    path = Path(directory) / "linear.ocio"
+    aliases = ", aliases: [lin_alias]"
+    with_role = LINEAR_TEXT.format(role="", name="Lin", aliases=aliases)
+    for text, lin_is_linear in (
+        (with_role, False),
+        (with_role.replace(", scene_linear: ACEScg", ""), False),
+        (LINEAR_TEXT.format(role=", linear: Lin", name="Lin",
+                            aliases=aliases), True),
+    ):
+        path.write_text(text)
+        probe = subprocess.run([sys.executable, "-c", """
+import sys
+import OpenImageIO as oiio
+for name in ("ACEScg", "lin_alias"):
+    spec = oiio.ImageSpec(1, 1, 3, "uint8")
+    spec.attribute("oiio:ColorSpace", name)
+    buf = oiio.ImageBuf(spec)
+    oiio.ImageBufAlgo.zero(buf)
+    assert buf.write(sys.argv[1]), buf.geterror()
+print(oiio.ImageBuf(sys.argv[1]).spec().get_string_attribute("oiio:ColorSpace"))
+""", str(Path(directory) / "gamma.png")], capture_output=True, text=True,
+                               env=dict(os.environ, OCIO=str(path),
+                                        OPENIMAGEIO_DEBUG="1"))
+        assert probe.returncode == 0, probe.stdout + probe.stderr
+        assert warning.lower() not in probe.stderr.lower(), probe.stderr
+        assert (probe.stdout.split() == ["lin_rec709_scene"]) \
+            == lin_is_linear, probe.stdout

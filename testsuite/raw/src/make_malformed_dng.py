@@ -25,13 +25,19 @@ The malformed variants exercise the reader's open-time guards:
                       file, which only the decompression-ratio guard rejects
                       (the per-dimension and total-size limits pass).
   truncated.dng       Valid header, pixel data cut short.
+
+mono-32x32.dng is the valid control described as a one-plane CFA carrying a
+ColorMatrix1. LibRaw reads that as a monochrome sensor -- idata.colors == 1,
+no filters -- with a camera matrix, which is the state its monochrome bodies
+are in and the one where it hands back camera-native pixels even though it
+has a matrix to convert with.
 """
 
 import os
 import struct
 import sys
 
-BYTE, ASCII, SHORT, LONG = 1, 2, 3, 4
+BYTE, ASCII, SHORT, LONG, SRATIONAL = 1, 2, 3, 4, 10
 
 PHOTOMETRIC_CFA = 32803
 
@@ -51,11 +57,13 @@ def pack_ifd(entries):
     return struct.pack('<H', len(entries)) + bytes(body) + struct.pack('<I', 0)
 
 
-def make_dng(path, width=32, height=32, exif=None, pixels=True, truncate=None):
+def make_dng(path, width=32, height=32, exif=None, pixels=True, truncate=None,
+             mono=False):
     """Write a single-IFD uncompressed CFA DNG. `exif` is an optional
-    (tag, tifftype, count) triple to put in an Exif sub-IFD."""
+    (tag, tifftype, count) triple to put in an Exif sub-IFD. `mono` describes
+    a one-plane CFA and adds a color matrix."""
     make_str, model_str = b'OIIO\0', b'Testcam\0'
-    n_entries = 15 + (exif is not None)
+    n_entries = 15 + (exif is not None) + 2 * mono
     ifd_off = 8
     heap_off = ifd_off + 2 + 12 * n_entries + 4
 
@@ -74,6 +82,13 @@ def make_dng(path, width=32, height=32, exif=None, pixels=True, truncate=None):
                     + struct.pack('<HHII', exif[0], exif[1], exif[2], 0)
                     + struct.pack('<I', 0))
         exif_off = place(exif_ifd)
+    if mono:
+        # ColorMatrix1. Its values are arbitrary: only that the camera has a
+        # matrix matters. LibRaw only reads a 9- or 12-entry matrix, and uses
+        # just the first row when there is one plane, so the row is written
+        # three times.
+        matrix_off = place(struct.pack('<6i', 2127, 10000, 7152, 10000,
+                                       722, 10000) * 3)
     pixel_off = heap_off + len(heap)
 
     entries = [
@@ -89,12 +104,17 @@ def make_dng(path, width=32, height=32, exif=None, pixels=True, truncate=None):
         (0x0115, SHORT, 1, 1),                           # SamplesPerPixel
         (0x0116, LONG, 1, height),                       # RowsPerStrip
         (0x0117, LONG, 1, width * height * 2),           # StripByteCounts
-        (0x828d, SHORT, 2, struct.pack('<HH', 2, 2)),    # CFARepeatPatternDim
-        (0x828e, BYTE, 4, bytes([0, 1, 1, 2])),          # CFAPattern: RGGB
+        (0x828d, SHORT, 2,                               # CFARepeatPatternDim
+         struct.pack('<HH', *((1, 1) if mono else (2, 2)))),
+        (0x828e, BYTE, 1 if mono else 4,                 # CFAPattern
+         b'\0' if mono else bytes([0, 1, 1, 2])),        # (mono, or RGGB)
         (0xc612, BYTE, 4, bytes([1, 4, 0, 0])),          # DNGVersion
     ]
     if exif is not None:
         entries.append((0x8769, LONG, 1, exif_off))
+    if mono:
+        entries.append((0xc616, BYTE, 1, b'\0'))         # CFAPlaneColor
+        entries.append((0xc621, SRATIONAL, 9, matrix_off))  # ColorMatrix1
 
     ifd = pack_ifd(entries)
     out = bytearray(b'II' + struct.pack('<HI', 42, ifd_off) + ifd + bytes(heap))
@@ -116,6 +136,7 @@ def main(dir):
     make_dng(os.path.join(dir, 'bomb-32000x32000.dng'),
              width=32000, height=32000, pixels=False)
     make_dng(os.path.join(dir, 'truncated.dng'), truncate=1024)
+    make_dng(os.path.join(dir, 'mono-32x32.dng'), mono=True)
 
 
 if __name__ == '__main__':

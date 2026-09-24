@@ -1431,6 +1431,9 @@ These are all non-positional flags that affect how all images are read in the
 
     2. For input files, if the ImageInput set the ``"oiio:ColorSpace"``
        metadata, it will be honored if the filename did not override it.
+       RAW camera files read without a ``raw:ColorSpace`` input
+       configuration are decoded as ``lin_ap0_scene``, the widest gamut
+       LibRaw can write.
 
     3. When outputting to JPEG files, assume that sRGB is the desired output
        color space (since JPEG requires sRGB), but still this only occurs if

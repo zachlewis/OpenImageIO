@@ -672,13 +672,26 @@ write_info(png_structp& sp, png_infop& ip, int& color_type, ImageSpec& spec,
     // gAMA alone reads back as Rec.709 primaries, so CICP may still be needed.
     OIIO_MAYBE_UNUSED bool wrote_gamma_only = false;
     srgb                                    = false;
-    if (is_colorspace_srgb(spec)) {
+    // An unnamed image whose color interop ID is "unknown" makes no color
+    // claim, so it is not written as sRGB. What it does state, its own
+    // chromaticities and oiio:Gamma, is still written. A named image's
+    // primaries come from its name, so a stale attribute cannot contradict it.
+    const bool explicit_unknown
+        = spec.get_string_attribute("oiio:ColorSpace").empty()
+          && spec.get_string_attribute("colorInteropID") == "unknown";
+    const ParamValue* native
+        = explicit_unknown ? spec.find_attribute("chromaticities",
+                                                 TypeDesc(TypeDesc::FLOAT, 8))
+                           : nullptr;
+    if (is_colorspace_srgb(spec, !explicit_unknown)) {
         gamma = 1.0f;
         srgb  = true;
         if (setjmp(png_jmpbuf(sp)))  // NOLINT(cert-err52-cpp)
             return "Could not set PNG gAMA and cHRM chunk";
         png_set_sRGB_gAMA_and_cHRM(sp, ip, PNG_sRGB_INTENT_ABSOLUTE);
         wrote_colorspace = true;
+    } else if (explicit_unknown && !native) {
+        gamma = 1.0f;  // Nothing to write, and nothing lost.
     } else {
         gamma = pvt::get_colorspace_rec709_gamma(spec);
         // A color space this file cannot carry as cICP is not lost: cHRM
@@ -695,9 +708,10 @@ write_info(png_structp& sp, png_infop& ip, int& color_type, ImageSpec& spec,
         // itself, and PNG requires cHRM and gAMA to agree with it, so it
         // suppresses these as it suppresses the cICP fallback below.
         if (!cicp_covers && icc_profile.empty()) {
-            // The span borrows from the info, which must outlive it.
+            // The span borrows from the info or the spec, which outlive it.
             const ColorSpaceInfo info = pvt::get_colorspace_info(spec, true);
-            cspan<float> xy           = info.chromaticities();
+            cspan<float> xy           = native ? native->as_cspan<float>()
+                                               : info.chromaticities();
             float rec709[8];
             // Rec.709 primaries, and the unknown primaries of a Rec.709 gamma
             // or linear name, need no cHRM beside the gAMA written for them.

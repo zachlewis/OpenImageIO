@@ -2293,6 +2293,33 @@ test_metadata_resolution()
         Filesystem::remove(caught_name);
     }
 
+    // The DPX and Cineon readers state "unknown" and label nothing. That is
+    // evidence which does not help, so a FileRule still resolves the image,
+    // an ID a caller did state still outranks the filename, and with nothing
+    // else the answer is "unknown" rather than the configuration's default.
+    {
+        ImageSpec film;
+        film.attribute("colorInteropID", "unknown");
+        provenance = pvt::resolve_colorspace_source(config, film,
+                                                    "plate_a.dpx");
+        OIIO_CHECK_EQUAL(provenance.name, "sRGB");
+        OIIO_CHECK_ASSERT(provenance.source == Source::FileRulesFallback);
+        OIIO_CHECK_EQUAL(resolve_colorspace(config, film, "plate_a.cin"),
+                         "sRGB");
+        OIIO_CHECK_EQUAL(resolve_colorspace(config, film, "plate_a.dpx", "", "",
+                                            "", "", Rules::MetadataOnly),
+                         "unknown");
+        provenance = pvt::resolve_colorspace_source(config, film, "shot.dpx");
+        OIIO_CHECK_EQUAL(provenance.name, "unknown");
+        OIIO_CHECK_ASSERT(provenance.terminal_unknown);
+        OIIO_CHECK_ASSERT(provenance.status == Status::TerminalUnknown);
+        film.attribute("colorInteropID", "g22_rec709_scene");
+        provenance = pvt::resolve_colorspace_source(config, film,
+                                                    "plate_a.dpx");
+        OIIO_CHECK_EQUAL(provenance.name, "Gamma22");
+        OIIO_CHECK_ASSERT(provenance.source == Source::InteropID);
+    }
+
     Filesystem::remove(filename);
 }
 

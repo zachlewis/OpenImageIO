@@ -417,6 +417,12 @@ ColorSpaceInfoAccess::color_interop_id(const ColorSpaceInfo& info) noexcept
     return m_impl ? string_view(m_impl->color_interop_id) : string_view();
 }
 string_view
+ColorSpaceInfoAccess::encoding(const ColorSpaceInfo& info) noexcept
+{
+    const auto& m_impl = info.m_impl;
+    return m_impl ? string_view(m_impl->encoding) : string_view();
+}
+string_view
 ColorSpaceInfoAccess::image_state(const ColorSpaceInfo& info) noexcept
 {
     const auto& m_impl = info.m_impl;

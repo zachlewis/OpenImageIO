@@ -33,6 +33,11 @@ without chromaticities selects a configured space by transfer function,
 display-referred first and then scene-referred, without asserting a gamut.
 The resolver preserves but does not select an ICC profile.
 
+The DPX and Cineon readers identify no color space at all, so they state
+`colorInteropID` `unknown` and leave the label unset. That is evidence, so
+resolution continues: a FileRule or a color space name in the filename still
+answers, and otherwise the image ends as `unknown`.
+
 The resolver evaluates names, roles, FileRules, and transforms under the
 caller's effective OCIO context. Automatic conversion uses that same context,
 so resolution and processor creation cannot select different context-dependent

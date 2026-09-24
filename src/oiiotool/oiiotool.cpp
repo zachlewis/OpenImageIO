@@ -6686,6 +6686,60 @@ join_with_quotes(const Sequence& seq, string_view sep = "")
 }
 
 
+// --colortransfer
+static void
+print_color_transfer(Oiiotool& ot, cspan<const char*> argv)
+{
+    OIIO_DASSERT(argv.size() == 2);
+    string_view command    = ot.express(argv[0]);
+    const std::string name = ot.express(argv[1]);
+    auto options           = ot.extract_options(command);
+
+    static const char* known[] = { "format", "key", "value", "oneline" };
+    for (const auto& option : options) {
+        bool recognized = false;
+        for (const char* modifier : known)
+            recognized |= option.name() == modifier;
+        if (!recognized) {
+            ot.errorfmt(command, "Unknown modifier \"{}\"", option.name());
+            return;
+        }
+    }
+
+    // An empty format is the library's default, which is CTF.
+    const std::string format = options.get_string("format");
+    const std::string key    = options.get_string("key");
+    const std::string value  = options.get_string("value");
+    // CTF and CLF are documents, never one line, so only the configuration
+    // grammar has an inline spelling to ask for.
+    const bool one_line = options.get_int("oneline") != 0;
+    if (one_line && !format.empty() && format != "ocio") {
+        ot.errorfmt(command,
+                    "Only the \"ocio\" format can be written on one line, "
+                    "not \"{}\"",
+                    format);
+        return;
+    }
+    ColorConfig& colorconfig = ot.colorconfig();
+    // The same context the conversion would run under, because a space whose
+    // definition varies with a context variable has a different curve under
+    // each one.
+    const std::string text
+        = one_line
+              ? pvt::transfer_function_transform(colorconfig, name, key, value)
+              : pvt::serialize_transfer_function(colorconfig, name, format, key,
+                                                 value);
+    if (colorconfig.has_error()) {
+        ot.errorfmt(command, "{}", colorconfig.geterror());
+        return;
+    }
+    // The native writers end their documents with a newline and the
+    // configuration grammar does not, so exactly one is written here.
+    Strutil::print("{}\n", Strutil::rstrip(text, "\n"));
+    ot.printed_info = true;
+}
+
+
 static void
 print_ocio_info(Oiiotool& ot, std::ostream& out)
 {
@@ -7630,6 +7684,9 @@ Oiiotool::getargs(int argc, char* argv[])
             print_ocio_info(ot, std::cout);
             ot.printed_info = true;
         });
+    ap.arg("--colortransfer %s:COLORSPACE")
+      .help("Print the color space's transfer function as a transform document (options: format=ctf|clf|ocio, oneline=, key=, value=)")
+      .OTACTION(print_color_transfer);
     ap.arg("--colorconfig %s:FILENAME")
       .help("Explicitly specify an OCIO configuration file")
       .OTACTION(set_colorconfig);

@@ -1,0 +1,17 @@
+# Copyright Contributors to the OpenImageIO project.
+# SPDX-License-Identifier: Apache-2.0
+# https://github.com/AcademySoftwareFoundation/OpenImageIO
+
+# The --colortransfer examples src/doc/oiiotool.md displays. This is the only
+# copy of them: the manual includes the marked lines and this test runs them,
+# so an example that stops working stops the test. They name color spaces the
+# built-in OpenColorIO configuration defines, which is the configuration
+# oiiotool uses when no other one is set.
+
+# BEGIN-oiiotool-colortransfer
+oiiotool --colortransfer "ACES - ACEScct"
+oiiotool --colortransfer:format=clf "sRGB - Display"
+oiiotool --colortransfer:format=ocio "sRGB - Display"
+oiiotool --colortransfer:oneline=1 "ACES - ACEScct"
+oiiotool --colortransfer:key=PLATE:value="ACES - ACEScct" '$PLATE'
+# END-oiiotool-colortransfer

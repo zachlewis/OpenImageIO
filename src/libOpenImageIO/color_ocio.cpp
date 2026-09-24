@@ -851,6 +851,14 @@ public:
     ColorSpaceInfo enriched(const CSInfo& cs, const ColorSpaceInfo& base,
                             const std::pair<std::string, std::string>& key,
                             bool publish) const;
+    // One definition's transfer curve, written out in a native grammar.
+    // Evaluated on whichever view of this configuration the caller's
+    // overrides selected. `flow` compacts the `ocio` grammar onto one line.
+    // Anything the separation or the grammar cannot state raises
+    // std::invalid_argument for the pvt adapter to report.
+    std::string serialize_transfer_function(string_view colorspace,
+                                            string_view format,
+                                            bool flow = false) const;
 
     // Note: Uses std::format syntax
     template<typename... Args>
@@ -2342,6 +2350,10 @@ struct ColorConfigAccess {
     static ColorSpaceInfo color_space_info(const ColorConfig& config,
                                            string_view colorspace, bool derive,
                                            string_view key, string_view value);
+
+    // The configuration's implementation, for the pvt entry points that take
+    // a ColorConfig.
+    static auto impl(const ColorConfig& config) { return config.getImpl(); }
 };
 
 
@@ -7103,6 +7115,86 @@ measured_family(const TransferSignature& signature, string_view encoding)
 
 
 // ---------------------------------------------------------------------------
+// OpenColorIO publishes no API for emitting a bare transform, so the
+// transform is added to a raw configuration as a color space's
+// from-reference value, OpenColorIO's own
+// configuration writer serializes it, and the value is taken back out. The
+// text is therefore what a `.ocio` file would carry, up to indentation, and
+// what the configuration reader parses. There is no second emitter here, and
+// no debug rendering of an operation standing in for one.
+//
+// A transform the configuration grammar cannot spell -- an inline
+// one-dimensional table is the case that arises here, since the grammar names
+// external resources rather than tabulating them -- makes the native writer
+// throw. That throw is the answer.
+std::string
+transform_to_text(OCIO::ConstTransformRcPtr transform)
+{
+    auto config = OCIO::Config::CreateRaw()->createEditableCopy();
+    config->setMajorVersion(OCIO_VERSION_MAJOR);
+    config->setMinorVersion(OCIO_VERSION_MINOR);
+    auto cs = OCIO::ColorSpace::Create();
+    cs->setName("oiio_transform_text");
+    cs->setTransform(transform, OCIO::COLORSPACE_DIR_FROM_REFERENCE);
+    config->addColorSpace(cs);
+    std::ostringstream stream;
+    config->serialize(stream);
+    const std::string serialized = stream.str();
+    // This color space is added last and carries only this one transform, so
+    // the key's value runs to the end of the serialization.
+    static const char key[] = "from_scene_reference:";
+    const auto position     = serialized.rfind(key);
+    if (position == std::string::npos)
+        throw std::invalid_argument(
+            "OpenColorIO did not serialize the transform");
+    // Continuation lines also carry the key's own indentation. Removing it
+    // leaves the value as it would follow a key that starts a line, rather
+    // than wherever this throwaway configuration happened to put it.
+    const size_t line   = serialized.rfind('\n', position);
+    const size_t column = line == std::string::npos ? position
+                                                    : position - line - 1;
+    const std::string value(Strutil::strip(
+        string_view(serialized).substr(position + sizeof(key) - 1)));
+    return Strutil::replace(value, "\n" + std::string(column, ' '), "\n", true);
+}
+
+
+// The same value on one line, in the flow syntax a mapping can carry inline.
+// OpenColorIO writes a group's children as a block sequence and writes each
+// operation on one line, so compacting is turning that one sequence into a
+// flow one; a group of a single operation is that operation, which is what a
+// caller asking for the transfer function means by it. Every operation is
+// serialized by the same writer as the block form, so nothing is
+// re-punctuated here, and an operation that does not come back on one line is
+// left as it is for the caller to refuse.
+std::string
+flow_transform_text(OCIO::ConstGroupTransformRcPtr group)
+{
+    const int count = group->getNumTransforms();
+    if (count == 1)
+        return transform_to_text(group->getTransform(0));
+    std::vector<std::string> children;
+    for (int i = 0; i < count; ++i)
+        children.emplace_back(transform_to_text(group->getTransform(i)));
+    return "!<GroupTransform> {children: [" + Strutil::join(children, ", ")
+           + "]}";
+}
+
+
+// The native writer registered for a file extension, or null. Asking
+// OpenColorIO which writers it has, rather than naming them, keeps the answer
+// the linked library's own -- and keeps a format it does not write from being
+// accepted by spelling.
+const char*
+native_transform_writer(string_view format)
+{
+    for (int i = 0, n = OCIO::GroupTransform::GetNumWriteFormats(); i < n; ++i)
+        if (format == OCIO::GroupTransform::GetFormatExtensionByIndex(i))
+            return OCIO::GroupTransform::GetFormatNameByIndex(i);
+    return nullptr;
+}
+
+
 // What to call an operation in a refusal.
 const char*
 native_transform_kind(OCIO::ConstTransformRcPtr t)
@@ -7490,6 +7582,135 @@ ColorConfig::Impl::enriched(const CSInfo& cs, const ColorSpaceInfo& base,
         DBG("Color transfer classification unavailable: {}\n", e.what());
         return current;  // Retry interrupted acquisition on the next derivation.
     }
+}
+
+
+
+// One definition's curve, written out in a native grammar. The name is this
+// view's to resolve, and the direction is the encoding one every comparison
+// here is stated in: from the interchange role of the space's own image state
+// toward the space.
+std::string
+ColorConfig::Impl::serialize_transfer_function(string_view colorspace,
+                                               string_view format,
+                                               bool flow) const
+{
+    if (!config_ || disable_ocio)
+        throw std::invalid_argument(
+            "There is no OpenColorIO configuration to export a transfer "
+            "function from");
+    // Refuse an unwritable grammar before acquiring anything, so a misspelled
+    // format costs a message rather than a processor.
+    const string_view kind = format.empty() ? string_view("ctf") : format;
+    const char* writer     = kind == "ctf" || kind == "clf"
+                                 ? native_transform_writer(kind)
+                                 : nullptr;
+    if (!writer && kind != "ocio")
+        throw std::invalid_argument(Strutil::fmt::format(
+            "Unknown transfer function format \"{}\"; expected \"ctf\", "
+            "\"clf\" or \"ocio\"",
+            format));
+    // OpenColorIO rejects `$` and `%` in every name, alias and role, so
+    // expanding under this view's own context changes only a spelling that is
+    // a context variable.
+    const std::string name = config_->getCurrentContext()->resolveStringVar(
+        std::string(colorspace).c_str());
+    auto target = config_->getColorSpace(name.c_str());
+    if (!target)
+        throw std::invalid_argument(
+            Strutil::fmt::format("Unknown color space \"{}\"", colorspace));
+    if (target->isData())
+        throw std::invalid_argument(Strutil::fmt::format(
+            "Color space \"{}\" is a data space, which has no transfer "
+            "function",
+            colorspace));
+    const bool display = target->getReferenceSpaceType()
+                         == OCIO::REFERENCE_SPACE_DISPLAY;
+    const char* role = display ? "cie_xyz_d65_interchange" : "aces_interchange";
+    if (!config_->hasRole(role))
+        throw std::invalid_argument(Strutil::fmt::format(
+            "This configuration has no \"{}\" role, so there is no encoding "
+            "direction to export \"{}\" in",
+            role, colorspace));
+    // One export acquires one processor and walks it once. Nothing is
+    // retained: a transfer document is not a property any cache here holds,
+    // and a caller asking twice is asking twice.
+    auto group = native_transfer_transform(
+        config_->getProcessor(config_->getCurrentContext(), role,
+                              target->getName()),
+        display);
+    if (!writer) {
+        if (!flow)
+            return transform_to_text(group);
+        // One line is the whole promise of the inline spelling, and an
+        // operation OpenColorIO writes over several -- one carrying its own
+        // description, say -- cannot keep it. Say so rather than emit
+        // something no configuration reader would accept.
+        std::string text = flow_transform_text(group);
+        if (text.find('\n') != std::string::npos)
+            throw std::invalid_argument(Strutil::fmt::format(
+                "OpenColorIO writes \"{}\"'s transfer function over more than "
+                "one line, which no inline transform can carry",
+                colorspace));
+        return text;
+    }
+    std::ostringstream stream;
+    group->write(OCIO::Config::CreateRaw(), writer, stream);
+    return stream.str();
+}
+
+
+
+// The one acquisition both entry points below make, and the same rule: a view
+// this build could not acquire is not a verdict about the configuration, and
+// answering from the configuration's own context instead would export a curve
+// the caller's conversion does not carry. Empty overrides select the
+// configuration's own view, and the name is offered with them because a
+// variable the configuration never reads can still be the whole of what the
+// caller asked for.
+static std::string
+export_transfer_function(const ColorConfig& config, string_view colorspace,
+                         string_view format, string_view context_key,
+                         string_view context_value, bool flow)
+{
+    const auto impl = ColorConfigAccess::impl(config);
+    const auto view = impl->context_view(context_key, context_value,
+                                         colorspace);
+    if (!view) {
+        impl->error("Could not export a transfer function under the "
+                    "requested context");
+        return {};
+    }
+    try {
+        return view->serialize_transfer_function(colorspace, format, flow);
+    } catch (const std::exception& e) {
+        impl->error("{}", e.what());
+        return {};
+    }
+}
+
+
+
+std::string
+pvt::serialize_transfer_function(const ColorConfig& config,
+                                 string_view colorspace, string_view format,
+                                 string_view context_key,
+                                 string_view context_value)
+{
+    return export_transfer_function(config, colorspace, format, context_key,
+                                    context_value, false);
+}
+
+
+
+std::string
+pvt::transfer_function_transform(const ColorConfig& config,
+                                 string_view colorspace,
+                                 string_view context_key,
+                                 string_view context_value)
+{
+    return export_transfer_function(config, colorspace, "ocio", context_key,
+                                    context_value, true);
 }
 
 

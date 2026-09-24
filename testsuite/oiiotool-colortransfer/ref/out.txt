@@ -1,0 +1,53 @@
+=== power / ctf ===
+1
+0
+newlines: 1
+=== power / clf ===
+1
+0
+newlines: 1
+=== power / ocio ===
+1
+0
+newlines: 1
+=== headroom / ctf ===
+1
+1
+newlines: 1
+=== headroom / ocio ===
+1
+1
+newlines: 1
+=== headroom / oneline ===
+1
+1
+1
+newlines: 1
+=== identity / ctf ===
+1
+1
+newlines: 1
+context-default:yes
+context-override:yes
+context-oneline:yes
+=== manual examples ===
+manual examples: 5 of 5
+=== refusals ===
+oiiotool ERROR: --colortransfer : the conversion mixes the color channels after its curve has begun, so no curve of the space's own linear RGB separates from it
+Full command line was:
+> oiiotool --nostderr --colorconfig transfer.ocio --colortransfer InsetChain
+oiiotool ERROR: --colortransfer : Color space "Plain" is a data space, which has no transfer function
+Full command line was:
+> oiiotool --nostderr --colorconfig transfer.ocio --colortransfer Plain
+oiiotool ERROR: --colortransfer : Unknown color space "NotASpace"
+Full command line was:
+> oiiotool --nostderr --colorconfig transfer.ocio --colortransfer NotASpace
+oiiotool ERROR: --colortransfer:format=cube : Unknown transfer function format "cube"; expected "ctf", "clf" or "ocio"
+Full command line was:
+> oiiotool --nostderr --colorconfig transfer.ocio --colortransfer:format=cube Pure22
+oiiotool ERROR: --colortransfer:format=clf:oneline=1 : Only the "ocio" format can be written on one line, not "clf"
+Full command line was:
+> oiiotool --nostderr --colorconfig transfer.ocio --colortransfer:format=clf:oneline=1 Pure22
+oiiotool ERROR: --colortransfer:bogus=1 : Unknown modifier "bogus"
+Full command line was:
+> oiiotool --nostderr --colorconfig transfer.ocio --colortransfer:bogus=1 Pure22

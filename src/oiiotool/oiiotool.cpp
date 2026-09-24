@@ -6686,6 +6686,245 @@ join_with_quotes(const Sequence& seq, string_view sep = "")
 }
 
 
+// Whether a quote character arriving with `current` already accumulated
+// opens a quoted run. Oiiotool::extract_options treats a quote as a quote
+// only where a value starts, just after the `=`, and this scan has to agree
+// with it: a quote anywhere else -- an apostrophe in a color space name, say
+// -- is an ordinary character, so it cannot swallow the separators written
+// after it. A list item starts a quoted run as well, so a quote also opens
+// one just after a comma, and where nothing but space precedes it.
+static bool
+quote_opens_run(const std::string& current)
+{
+    const size_t last = current.find_last_not_of(" \t");
+    return last == std::string::npos || current[last] == '='
+           || current[last] == ',';
+}
+
+
+
+// Split `text` on the separators that are at top level, meaning outside
+// quotes and outside grouped OpenColorIO transform text. The pieces are
+// returned as they were written, quotes included.
+static std::vector<std::string>
+split_top_level(string_view text, char separator)
+{
+    std::vector<std::string> pieces;
+    std::string current;
+    int depth  = 0;
+    char quote = 0;
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (quote) {
+            if (c == quote)
+                quote = 0;
+        } else if ((c == '\'' || c == '"') && quote_opens_run(current)) {
+            quote = c;
+        } else if (c == '{' || c == '[' || c == '(') {
+            ++depth;
+        } else if (c == '}' || c == ']' || c == ')') {
+            depth = std::max(0, depth - 1);
+        } else if (c == separator && depth == 0) {
+            pieces.push_back(current);
+            current.clear();
+            continue;
+        }
+        current += c;
+    }
+    pieces.push_back(current);
+    return pieces;
+}
+
+
+
+// The contents of `text` if the whole of it is one quoted run, otherwise
+// `text` itself.
+static string_view
+unquote_whole(string_view text)
+{
+    if (text.size() >= 2 && (text.front() == '\'' || text.front() == '"')
+        && text.back() == text.front()
+        && text.find(text.front(), 1) == text.size() - 1)
+        text = text.substr(1, text.size() - 2);
+    return text;
+}
+
+
+
+// Split one modifier value into hint terms on top-level commas while commas
+// inside quotes or grouped OpenColorIO transform text remain in their term.
+static std::vector<std::string>
+split_search_terms(string_view value)
+{
+    std::vector<std::string> terms;
+    for (const std::string& piece : split_top_level(value, ',')) {
+        std::string term(Strutil::strip(piece));
+        if (term.size() >= 2 && (term.front() == '\'' || term.front() == '"')
+            && term.back() == term.front())
+            term = term.substr(1, term.size() - 2);
+        if (term.size())
+            terms.push_back(std::move(term));
+    }
+    return terms;
+}
+
+
+
+// The modifiers of --colorspacesearch, whose values are lists rather than the
+// single values every other command's modifiers take. Oiiotool::extract_options
+// ends a value at the closing quote of a quoted item, which is right for one
+// value but would drop the rest of a list, so this command splits its own
+// modifiers with the same top-level scan it splits the lists with. Values
+// keep their quotes here: a list unquotes each of its items instead, and
+// unquoting the whole of one would turn a quoted item's own comma into a
+// separator.
+static ParamValueList
+extract_search_options(string_view command)
+{
+    ParamValueList optlist;
+    const std::vector<std::string> pieces = split_top_level(command, ':');
+    for (size_t i = 1; i < pieces.size(); ++i) {
+        const string_view piece(pieces[i]);
+        const size_t equals = piece.find('=');
+        if (equals == string_view::npos || equals == 0)
+            continue;
+        const string_view value = piece.substr(equals + 1);
+        if (value.size())
+            optlist[piece.substr(0, equals)] = value;
+    }
+    return optlist;
+}
+
+
+
+// --colorspacesearch
+static void
+print_color_space_search(Oiiotool& ot, cspan<const char*> argv)
+{
+    OIIO_DASSERT(argv.size() == 1);
+    string_view command        = ot.express(argv[0]);
+    auto options               = extract_search_options(command);
+    static const char* known[] = { "gamut",
+                                   "transfer",
+                                   "encoding",
+                                   "state",
+                                   "only",
+                                   "exclude",
+                                   "active",
+                                   "inactive",
+                                   "contextsensitive",
+                                   "exhaustive",
+                                   "authoredencoding",
+                                   "properties",
+                                   "key",
+                                   "value" };
+    for (const auto& option : options) {
+        bool recognized = false;
+        for (const char* name : known)
+            recognized |= option.name() == name;
+        if (!recognized) {
+            ot.errorfmt(command, "Unknown modifier \"{}\"", option.name());
+            return;
+        }
+    }
+
+    // A value that takes a list is unquoted item by item; one that takes a
+    // single value is unquoted as a whole, like every other command's
+    // modifiers. `single` parses like ParamValueList::get_int: a value that
+    // is not exactly an integer leaves the default in place.
+    const auto single = [&](string_view name) {
+        return unquote_whole(options.get_string(name));
+    };
+    const auto flag = [&](string_view name, bool dflt) {
+        string_view text = single(name);
+        int value        = 0;
+        return (Strutil::parse_int(text, value) && text.empty()) ? value != 0
+                                                                 : dflt;
+    };
+
+    pvt::ColorSpaceSearchOptions search;
+    search.chromaticities     = split_search_terms(options.get_string("gamut"));
+    search.transfer_functions = split_search_terms(
+        options.get_string("transfer"));
+    search.encodings    = split_search_terms(options.get_string("encoding"));
+    search.image_states = split_search_terms(options.get_string("state"));
+    if (options.contains("only"))
+        search.only = split_search_terms(options.get_string("only"));
+    search.exclude          = split_search_terms(options.get_string("exclude"));
+    search.include_active   = flag("active", true);
+    search.include_inactive = flag("inactive", false);
+    search.include_context_sensitive = flag("contextsensitive", false);
+    search.exhaustive                = flag("exhaustive", false);
+    search.authored_encoding_only    = flag("authoredencoding", false);
+    search.context_key               = single("key");
+    search.context_value             = single("value");
+
+    ColorConfig& colorconfig = ot.colorconfig();
+    auto names               = pvt::find_color_spaces(colorconfig, search);
+    if (colorconfig.has_error()) {
+        ot.errorfmt(command, "{}", colorconfig.geterror());
+        return;
+    }
+    const bool properties = flag("properties", false);
+    for (const auto& name : names) {
+        if (!properties) {
+            Strutil::print("{}\n", name);
+            continue;
+        }
+        const ColorSpaceInfo info = pvt::color_space_info(colorconfig, name,
+                                                          true,
+                                                          search.context_key,
+                                                          search.context_value);
+        string_view transfer;
+        switch (ColorSpaceInfoAccess::transfer_function_kind(info)) {
+        case ColorTransferFunctionKind::Linear:
+            // A declared linear encoding is honored rather than measured,
+            // while transfer= always measures, so say which this is.
+            transfer = ColorSpaceInfoAccess::derived(
+                           info, ColorSpaceInfoField::TransferFunction)
+                           ? "linear"
+                           : "declared-linear";
+            break;
+        case ColorTransferFunctionKind::Power: transfer = "power"; break;
+        case ColorTransferFunctionKind::Named:
+            transfer = ColorSpaceInfoAccess::transfer_function_name(info);
+            break;
+        case ColorTransferFunctionKind::Transform:
+            transfer = "transform";
+            break;
+        case ColorTransferFunctionKind::Unrecognized:
+            transfer = "unrecognized";
+            break;
+        default: transfer = "undetermined"; break;
+        }
+        std::string line = Strutil::fmt::format("{}  transfer={}", name,
+                                                transfer);
+        if (info.transfer_function_gamma() != 0.0f)
+            line += Strutil::fmt::format("  gamma={:g}",
+                                         info.transfer_function_gamma());
+        const auto shown = [](string_view value) {
+            return value.empty() ? string_view("-") : value;
+        };
+        line += Strutil::fmt::format(
+            "  equality={}  interop={}  encoding={}  state={}",
+            shown(ColorSpaceInfoAccess::equality_id(info)),
+            shown(ColorSpaceInfoAccess::color_interop_id(info)),
+            shown(ColorSpaceInfoAccess::encoding(info)),
+            shown(ColorSpaceInfoAccess::image_state(info)));
+        line += Strutil::fmt::format(
+            "  computed={}  available={}  derived={}",
+            int(ColorSpaceInfoAccess::computed(
+                info, ColorSpaceInfoField::TransferFunction)),
+            int(ColorSpaceInfoAccess::available(
+                info, ColorSpaceInfoField::TransferFunction)),
+            int(ColorSpaceInfoAccess::derived(
+                info, ColorSpaceInfoField::TransferFunction)));
+        Strutil::print("{}\n", line);
+    }
+    ot.printed_info = true;
+}
+
+
 static void
 print_ocio_info(Oiiotool& ot, std::ostream& out)
 {
@@ -7630,6 +7869,9 @@ Oiiotool::getargs(int argc, char* argv[])
             print_ocio_info(ot, std::cout);
             ot.printed_info = true;
         });
+    ap.arg("--colorspacesearch")
+      .help("Print color spaces matching requested properties; properties=1 reports an authored linear encoding as declared-linear (options: gamut=, transfer=, encoding=, state=, only=, exclude=, active=1, inactive=0, contextsensitive=0, exhaustive=0, authoredencoding=0, properties=0, key=, value=)")
+      .OTACTION(print_color_space_search);
     ap.arg("--colorconfig %s:FILENAME")
       .help("Explicitly specify an OCIO configuration file")
       .OTACTION(set_colorconfig);

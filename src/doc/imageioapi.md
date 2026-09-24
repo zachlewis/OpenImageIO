@@ -271,9 +271,8 @@ returns only what is already known, and does not accept a name that
 the color space's transforms with OIIO's built-in interop-identities config,
 so it can describe a color space whose config states none of this. What the
 config does state is honored rather than measured: a color space declaring a
-linear encoding reports gamma 1.0 unless measurement contradicts it with a
-pure-power exponent of its own. Neither call changes the config, an image, or
-its metadata.
+linear encoding reports gamma 1.0 even if its transform measures as another
+pure power. Neither call changes the config, an image, or its metadata.
 
 ::::{tabs}
 :::{tab} C++
@@ -452,4 +451,3 @@ inside the source code.
     In other words, to reproduce the default Python-module-loading behavior of
     earlier versions of OIIO, set ``OPENIMAGEIO_PYTHON_LOAD_DLLS_FROM_PATH=1``.
 ```
-

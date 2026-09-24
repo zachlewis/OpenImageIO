@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <limits>
 #include <map>
@@ -415,6 +416,12 @@ ColorSpaceInfoAccess::color_interop_id(const ColorSpaceInfo& info) noexcept
 {
     const auto& m_impl = info.m_impl;
     return m_impl ? string_view(m_impl->color_interop_id) : string_view();
+}
+string_view
+ColorSpaceInfoAccess::encoding(const ColorSpaceInfo& info) noexcept
+{
+    const auto& m_impl = info.m_impl;
+    return m_impl ? string_view(m_impl->encoding) : string_view();
 }
 string_view
 ColorSpaceInfoAccess::image_state(const ColorSpaceInfo& info) noexcept
@@ -851,6 +858,11 @@ public:
     ColorSpaceInfo enriched(const CSInfo& cs, const ColorSpaceInfo& base,
                             const std::pair<std::string, std::string>& key,
                             bool publish) const;
+    // The color space search, evaluated on whichever view of this
+    // configuration the caller's overrides selected. Malformed or unresolvable
+    // terms raise std::invalid_argument for pvt::find_color_spaces to report.
+    std::vector<std::string>
+    find_color_spaces(const pvt::ColorSpaceSearchOptions& options) const;
 
     // Note: Uses std::format syntax
     template<typename... Args>
@@ -2342,6 +2354,10 @@ struct ColorConfigAccess {
     static ColorSpaceInfo color_space_info(const ColorConfig& config,
                                            string_view colorspace, bool derive,
                                            string_view key, string_view value);
+
+    // The configuration's implementation, for the pvt entry points that take
+    // a ColorConfig.
+    static auto impl(const ColorConfig& config) { return config.getImpl(); }
 };
 
 
@@ -6482,7 +6498,7 @@ ColorConfig::Impl::color_space_info(string_view colorspace, bool derive,
         return result;
     }
     // A declared linear encoding is honored, not measured: it seeds gamma 1.0
-    // here, and only a measured pure-power exponent replaces it below. A
+    // here and remains the reported property even if measurement disagrees. A
     // measured query declares nothing of its own, so it starts from no
     // transfer hypothesis at all; seeding one there would also let the
     // declaration pass the reference-transfer check at the end of this
@@ -6493,8 +6509,9 @@ ColorConfig::Impl::color_space_info(string_view colorspace, bool derive,
             value->gamma = 1.0f;
         value->transfer_computed = value->gamma > 0.0f;
     }
-    // A gamma seeded from the declared encoding alone yields to a measured
-    // one, but an identity must still agree with the declaration.
+    // Keep the declaration separate from measured identity evidence: the
+    // property reports the declaration, while an identity must still agree
+    // with it.
     const float encoding_gamma = value->gamma;
     if (!derive) {
         // Derivation may still establish an ID and the state it names.
@@ -6631,16 +6648,10 @@ ColorConfig::Impl::color_space_info(string_view colorspace, bool derive,
             }
             value->analytic_evaluated = evaluated;
             publish                   = publishable;
-            // The measured exponent is recorded whatever the identity turned
-            // out to be. It is a fact about the definition, it is what the
-            // check at the end of this function tests a candidate identity
-            // against, and for an identity the authored-definition reader
-            // cannot describe it is the only transfer fact available.
-            if (encoding_gamma > 0.0f && gamma > 0.0f
-                && gamma != value->gamma) {
-                value->gamma            = gamma;
-                value->transfer_derived = true;
-            } else if (value->gamma == 0.0f)
+            // The measured exponent is recorded when the config did not
+            // declare linear. Measurement still tests identity below, but it
+            // does not replace the authored transfer property.
+            if (value->gamma == 0.0f)
                 value->gamma = gamma;
             else if ((identity.empty() || legacy_identity) && gamma != 0.0f
                      && gamma != value->gamma)
@@ -6968,8 +6979,219 @@ namespace {
 
 
 // ---------------------------------------------------------------------------
+// Color space search hint term grammar
+// ---------------------------------------------------------------------------
+//
+// Three-valued by construction, and kept in one place: an exclusion term
+// subtracts candidates proven to match while preserving one whose property
+// could not be derived, whereas an inverse term selects candidates proven to
+// differ and rejects the underivable. Those two are easy to confuse, so every
+// axis routes through the one evaluator below rather than restating the rule.
+//
+// Nothing here knows about OpenColorIO, a configuration or a catalog. The
+// search supplies the domain predicates and the properties; this owns only
+// what a term means.
+
+enum class TermMode {
+    include,  // select candidates that match
+    exclude,  // subtract proven matches, keep an underivable property
+    inverse,  // select candidates proven to differ, reject the underivable
+};
+
+// Split a hint term into its operator and its value. A leading `-` is an
+// exclusion and a leading `~` an inverse; a leading `\` escapes one of `-`,
+// `~` or `\` so a value may begin with one literally. A bare operator, a
+// dangling escape, or an escape of anything else is an error rather than a
+// literal backslash, so a typo cannot silently become a value.
+std::pair<TermMode, std::string>
+parse_term(string_view text)
+{
+    if (text.empty())
+        return { TermMode::include, {} };
+    size_t pos    = 0;
+    TermMode mode = TermMode::include;
+    if (text[0] == '-') {
+        mode = TermMode::exclude;
+        ++pos;
+    } else if (text[0] == '~') {
+        mode = TermMode::inverse;
+        ++pos;
+    }
+    if (pos == text.size())
+        throw std::invalid_argument(Strutil::fmt::format(
+            "color space search hint may not be a bare operator: {}", text));
+    std::string value(text.substr(pos));
+    if (value.front() == '\\') {
+        if (value.size() == 1)
+            throw std::invalid_argument(Strutil::fmt::format(
+                "color space search hint has a dangling escape: {}", text));
+        if (value[1] == '-' || value[1] == '~' || value[1] == '\\')
+            value.erase(value.begin());
+        else
+            throw std::invalid_argument(Strutil::fmt::format(
+                "color space search hint has an invalid escape: {}", text));
+    }
+    return { mode, std::move(value) };
+}
+
+// Decide one axis for one candidate. `matches` answers whether a term names
+// the property; `known` answers whether the property was derivable at all.
+// Splitting those two is what makes the three-valued logic expressible.
+//
+// An axis with no terms accepts everything. An axis carrying only exclusions
+// starts selected and subtracts; any other term makes selection opt-in.
+// Exclusions are applied last and override, so `-x` beats `~x`.
+template<class Term, class Property, class Matches, class Known>
+bool
+evaluate_axis(const std::vector<Term>& terms, const Property& property,
+              Matches matches, Known known)
+{
+    if (terms.empty())
+        return true;
+    bool has_selector = false;
+    for (const auto& term : terms)
+        has_selector |= term.mode != TermMode::exclude;
+    bool selected = !has_selector;
+    for (const auto& term : terms) {
+        const bool term_matched = matches(term, property);
+        if (term.mode == TermMode::include && term_matched)
+            selected = true;
+        else if (term.mode == TermMode::inverse && known(property)
+                 && !term_matched)
+            selected = true;
+    }
+    for (const auto& term : terms)
+        if (term.mode == TermMode::exclude && matches(term, property))
+            return false;
+    return selected;
+}
+
+
+struct ResolvedTerm {
+    TermMode mode = TermMode::include;
+    std::vector<std::string> values;
+};
+
+// A property that is not present is unknown and matches nothing.
+bool
+term_matches(const ResolvedTerm& term,
+             const std::optional<std::string>& property)
+{
+    if (!property)
+        return false;
+    for (const auto& value : term.values)
+        if (value == *property)
+            return true;
+    return false;
+}
+
+bool
+axis_accepts(const std::vector<ResolvedTerm>& terms,
+             const std::optional<std::string>& property)
+{
+    return evaluate_axis(
+        terms, property,
+        [](const ResolvedTerm& term, const std::optional<std::string>& value) {
+            return term_matches(term, value);
+        },
+        [](const std::optional<std::string>& value) {
+            return value.has_value();
+        });
+}
+
+
+using SearchChromaticities = std::array<float, 8>;
+
+struct ResolvedChromaticityTerm {
+    TermMode mode = TermMode::include;
+    std::vector<SearchChromaticities> values;
+};
+
+bool
+chromaticity_axis_accepts(const std::vector<ResolvedChromaticityTerm>& terms,
+                          const std::optional<SearchChromaticities>& property)
+{
+    return evaluate_axis(
+        terms, property,
+        [](const ResolvedChromaticityTerm& term,
+           const std::optional<SearchChromaticities>& value) {
+            if (!value)
+                return false;
+            return std::find(term.values.begin(), term.values.end(), *value)
+                   != term.values.end();
+        },
+        [](const std::optional<SearchChromaticities>& value) {
+            return value.has_value();
+        });
+}
+
+
+// What a transfer hint resolved to, and what a candidate was measured to be.
+// The two facts are not interchangeable: a family is the published curve the
+// measurement agrees with, and a signature is the measurement itself, which is
+// the only fact available for a curve no published one describes.
+struct ResolvedTransferTerm {
+    TermMode mode = TermMode::include;
+    std::string family;
+    std::string encoding;  // states how much this curve varies, for tolerance
+    std::vector<TransferSignature> signatures;
+};
+
+struct TransferProperty {
+    std::string family;
+    std::string encoding;
+    TransferSignature signature;
+
+    // A family is only ever adopted from a measurement, so the measurement is
+    // what says whether anything was established at all.
+    bool known() const { return signature.valid(); }
+};
+
+bool
+transfer_term_matches(const ResolvedTransferTerm& term,
+                      const TransferProperty& property)
+{
+    // One published family both agree on decides outright. Comparing
+    // signatures instead would let a curve accepted into a family be separated
+    // from another member of it by the very tolerance that admitted them both.
+    // Disagreeing families are not a verdict the other way: two curves the
+    // vocabulary describes differently may still measure the same, and the
+    // measurement is what the search is for.
+    if (!term.family.empty() && term.family == property.family)
+        return true;
+    if (!property.signature.valid())
+        return false;
+    // The space under test states how much its own curve varies across its
+    // profile, which is what the tolerance is for; the hint's label stands in
+    // only where the candidate carries none. Same rule as the reference pass.
+    const string_view tolerance = property.encoding.empty()
+                                      ? string_view(term.encoding)
+                                      : string_view(property.encoding);
+    for (const auto& signature : term.signatures)
+        if (same_transfer_signature(signature, property.signature, tolerance))
+            return true;
+    return false;
+}
+
+bool
+transfer_axis_accepts(const std::vector<ResolvedTransferTerm>& terms,
+                      const TransferProperty& property)
+{
+    return evaluate_axis(
+        terms, property,
+        [](const ResolvedTransferTerm& term, const TransferProperty& value) {
+            return transfer_term_matches(term, value);
+        },
+        [](const TransferProperty& value) { return value.known(); });
+}
+
+
+// ---------------------------------------------------------------------------
 // Vocabulary shared with the built-in config
 // ---------------------------------------------------------------------------
+
+// `gamut_component` is stated with the identity properties above, beside the
+// other reader of the artifact's ID spelling.
 
 // The family key of a reference curve name: `crv_g24_tx` and `crv_g24` are
 // both `g24`. The pass-through and mirrored variants describe the same
@@ -6987,6 +7209,73 @@ curve_family(string_view catalog_name)
             break;
         }
     return family;
+}
+
+
+std::string
+without_curve_suffix(string_view value)
+{
+    std::string lowered = Strutil::lower(value);
+    const string_view suffix(" - curve");
+    if (Strutil::ends_with(lowered, suffix))
+        lowered.resize(lowered.size() - suffix.size());
+    return lowered;
+}
+
+// The keys a NamedTransform answers a curve hint by: its own name, that name
+// without a trailing " - curve", and -- for the `crv_` convention the
+// reference config uses -- the bare family. Aliases follow the same two
+// spellings, in either order.
+std::vector<std::string>
+named_transform_keys(OCIO::ConstNamedTransformRcPtr nt)
+{
+    std::vector<std::string> keys;
+    if (!nt)
+        return keys;
+    const auto add = [&](std::string key) {
+        key = Strutil::lower(key);
+        if (!key.empty()
+            && std::find(keys.begin(), keys.end(), key) == keys.end())
+            keys.push_back(std::move(key));
+    };
+    const std::string name = nt->getName() ? nt->getName() : "";
+    add(name);
+    add(without_curve_suffix(name));
+    if (Strutil::starts_with(Strutil::lower(name), "crv_"))
+        add(curve_family(name));
+    for (decltype(nt->getNumAliases()) i = 0; i < nt->getNumAliases(); ++i) {
+        const std::string alias   = nt->getAlias(i);
+        const std::string lowered = Strutil::lower(alias);
+        if (Strutil::starts_with(lowered, "crv_")) {
+            add(alias);
+            add(curve_family(lowered));
+        } else if (lowered.size() > 4 && Strutil::ends_with(lowered, "_crv")) {
+            add(alias);
+            add(lowered.substr(0, lowered.size() - 4));
+        }
+    }
+    return keys;
+}
+
+OCIO::ConstNamedTransformRcPtr
+find_named_transform(OCIO::ConstConfigRcPtr config, const std::string& query)
+{
+    if (!config)
+        return {};
+    const std::string wanted = Strutil::lower(query);
+    try {
+        const int count = config->getNumNamedTransforms();
+        for (int i = 0; i < count; ++i) {
+            const char* name = config->getNamedTransformNameByIndex(i);
+            auto nt          = name ? config->getNamedTransform(name)
+                                    : OCIO::ConstNamedTransformRcPtr();
+            const auto keys  = named_transform_keys(nt);
+            if (std::find(keys.begin(), keys.end(), wanted) != keys.end())
+                return nt;
+        }
+    } catch (const std::exception&) {
+    }
+    return {};
 }
 
 
@@ -7099,6 +7388,82 @@ measured_family(const TransferSignature& signature, string_view encoding)
             return curve.family;
     }
     return {};
+}
+
+
+// ---------------------------------------------------------------------------
+// Transform text
+// ---------------------------------------------------------------------------
+
+// OpenColorIO publishes no API for parsing a bare transform, and its own
+// configuration reader is the canonical grammar for one -- so the text is
+// embedded as a color space's from-reference value and read back through
+// Config::CreateFromStream. There is no second parser here, and no regular
+// expression standing in for one.
+OCIO::ConstTransformRcPtr
+transform_from_text(const std::string& text)
+{
+    // `<Kind>` becomes `!<Kind>` so the untagged spelling parses, but only
+    // outside a quoted scalar: a FileTransform source path may legitimately
+    // contain a literal '<', and re-tagging it would corrupt the path.
+    //
+    // A quoted scalar ends at its own quote and only there. YAML escapes a
+    // quote with a backslash inside double quotes and by doubling it inside
+    // single quotes, so treating either spelling as the close would leave the
+    // scan believing it was outside the scalar for the rest of the path -- and
+    // re-tag the very '<' this is here to protect.
+    std::string tagged;
+    tagged.reserve(text.size() + 8);
+    char quote = 0;
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (quote) {
+            const bool escaped = quote == '"'
+                                     ? c == '\\'
+                                     : (c == quote && i + 1 < text.size()
+                                        && text[i + 1] == '\'');
+            if (escaped && i + 1 < text.size()) {
+                tagged += c;
+                tagged += text[++i];
+                continue;
+            }
+            if (c == quote)
+                quote = 0;
+        } else if (c == '\'' || c == '"') {
+            quote = c;
+        } else if (c == '<' && (i == 0 || text[i - 1] != '!')) {
+            tagged += '!';
+        }
+        tagged += c;
+    }
+    // Continuation lines get a uniform extra indent, so block-form text nests
+    // under the key whatever the caller's own indentation was; a uniform shift
+    // preserves the relative structure.
+    std::string body;
+    body.reserve(tagged.size() + 32);
+    for (size_t i = 0; i < tagged.size(); ++i) {
+        body += tagged[i];
+        if (tagged[i] == '\n' && i + 1 < tagged.size())
+            body += "      ";
+    }
+    // Declare the linked library's own profile version, so every builtin this
+    // build knows is parseable.
+    std::istringstream stream(
+        Strutil::fmt::format("ocio_profile_version: {}.{}\n"
+                             "roles: {{default: text}}\n"
+                             "colorspaces:\n"
+                             "  - !<ColorSpace>\n"
+                             "    name: text\n"
+                             "    from_scene_reference: {}\n",
+                             OCIO_VERSION_MAJOR, OCIO_VERSION_MINOR, body));
+    auto config    = OCIO::Config::CreateFromStream(stream);
+    auto cs        = config->getColorSpace("text");
+    auto transform = cs ? cs->getTransform(OCIO::COLORSPACE_DIR_FROM_REFERENCE)
+                        : OCIO::ConstTransformRcPtr();
+    if (!transform)
+        throw std::invalid_argument(
+            "text did not parse to an OpenColorIO transform: " + text);
+    return transform;
 }
 
 
@@ -7271,6 +7636,202 @@ native_transfer_transform(OCIO::ConstProcessorRcPtr processor, bool display)
 }
 
 
+// ---------------------------------------------------------------------------
+// Context sensitivity
+// ---------------------------------------------------------------------------
+
+// Whether a string names a context variable in any of OpenColorIO's three
+// spellings. The shape test answers first because it also catches a variable
+// the context does not define -- which is still a definition that varies with
+// a context, and the one a caller most needs excluded by default.
+bool
+spells_context_var(string_view value)
+{
+    const auto identifier = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+               || (c >= '0' && c <= '9') || c == '_';
+    };
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (value[i] == '$') {
+            if (i + 1 < value.size()
+                && (value[i + 1] == '{' || identifier(value[i + 1])))
+                return true;
+        } else if (value[i] == '%') {
+            size_t end = i + 1;
+            while (end < value.size() && identifier(value[end]))
+                ++end;
+            if (end > i + 1 && end < value.size() && value[end] == '%')
+                return true;
+        }
+    }
+    return false;
+}
+
+bool
+uses_context_var(OCIO::ConstContextRcPtr context, string_view value)
+{
+    if (value.empty())
+        return false;
+    if (spells_context_var(value))
+        return true;
+    try {
+        // OpenColorIO's own resolution reports exactly which variables a
+        // string used, which is what makes this independent of the spelling.
+        auto used = OCIO::Context::Create();
+        (void)context->resolveStringVar(std::string(value).c_str(), used);
+        return used->getNumStringVars() > 0;
+    } catch (const std::exception&) {
+        // A resolution this build could not complete is not proof of
+        // invariance.
+        return true;
+    }
+}
+
+// The structural walk that decides whether a definition varies with a context
+// variable. It is the traversal the measuring passes already make -- the two
+// authored transforms, groups, transitive color space and named transform
+// links, with a cycle refused rather than followed -- reading the strings
+// instead of the operations. No processor is built and no file is opened, so
+// a search that asks nothing measurable stays a structural query.
+class ContextClosure {
+public:
+    explicit ContextClosure(OCIO::ConstConfigRcPtr config)
+        : m_config(config)
+        , m_context(config->getCurrentContext())
+    {
+        // A relative file reference resolves through the search path, so a
+        // search path naming a variable makes every such reference sensitive
+        // whatever the reference itself spells. Deciding which path would win
+        // needs the filesystem; refusing outright needs nothing.
+        try {
+            const int count = m_context->getNumSearchPaths();
+            for (int i = 0; i < count; ++i) {
+                const char* path = m_context->getSearchPath(i);
+                m_variable_search_path |= uses_context_var(m_context,
+                                                           path ? path : "");
+            }
+        } catch (const std::exception&) {
+            m_variable_search_path = true;
+        }
+    }
+
+    bool sensitive(string_view name)
+    {
+        try {
+            return space(m_config->getColorSpace(std::string(name).c_str()));
+        } catch (const std::exception&) {
+            return true;
+        }
+    }
+
+private:
+    bool space(OCIO::ConstColorSpaceRcPtr cs)
+    {
+        if (!cs)
+            return true;  // A link nothing resolves is not proof of invariance.
+        const std::string name = cs->getName();
+        auto found             = m_verdict.find(name);
+        if (found != m_verdict.end())
+            return found->second;
+        if (!m_pending.insert(name).second)
+            return true;  // A chain that returns to itself is refused.
+        bool result = true;
+        try {
+            result = transform(
+                         cs->getTransform(OCIO::COLORSPACE_DIR_TO_REFERENCE))
+                     || transform(
+                         cs->getTransform(OCIO::COLORSPACE_DIR_FROM_REFERENCE));
+        } catch (const std::exception&) {
+            result = true;
+        }
+        m_pending.erase(name);
+        m_verdict.emplace(name, result);
+        return result;
+    }
+
+    bool named(OCIO::ConstNamedTransformRcPtr nt)
+    {
+        if (!nt)
+            return true;
+        const std::string name = std::string("!nt:") + nt->getName();
+        auto found             = m_verdict.find(name);
+        if (found != m_verdict.end())
+            return found->second;
+        if (!m_pending.insert(name).second)
+            return true;
+        bool result = true;
+        try {
+            result = transform(nt->getTransform(OCIO::TRANSFORM_DIR_FORWARD))
+                     || transform(
+                         nt->getTransform(OCIO::TRANSFORM_DIR_INVERSE));
+        } catch (const std::exception&) {
+            result = true;
+        }
+        m_pending.erase(name);
+        m_verdict.emplace(name, result);
+        return result;
+    }
+
+    bool link(const char* raw)
+    {
+        const std::string spelled = raw ? raw : "";
+        if (spelled.empty())
+            return false;
+        if (uses_context_var(m_context, spelled))
+            return true;
+        std::string resolved = spelled;
+        try {
+            resolved = m_context->resolveStringVar(spelled.c_str());
+        } catch (const std::exception&) {
+            return true;
+        }
+        if (auto cs = m_config->getColorSpace(resolved.c_str()))
+            return space(cs);
+        if (auto nt = m_config->getNamedTransform(resolved.c_str()))
+            return named(nt);
+        return false;  // Nothing this configuration defines carries a context.
+    }
+
+    bool transform(OCIO::ConstTransformRcPtr t)
+    {
+        if (!t)
+            return false;
+        if (auto group = OCIO::DynamicPtrCast<const OCIO::GroupTransform>(t)) {
+            for (int i = 0; i < group->getNumTransforms(); ++i)
+                if (transform(group->getTransform(i)))
+                    return true;
+            return false;
+        }
+        if (auto file = OCIO::DynamicPtrCast<const OCIO::FileTransform>(t)) {
+            const std::string src   = file->getSrc() ? file->getSrc() : "";
+            const std::string cccid = file->getCCCId() ? file->getCCCId() : "";
+            if (uses_context_var(m_context, src)
+                || uses_context_var(m_context, cccid))
+                return true;
+            std::string resolved = src;
+            try {
+                resolved = m_context->resolveStringVar(src.c_str());
+            } catch (const std::exception&) {
+                return true;
+            }
+            return m_variable_search_path
+                   && !std::filesystem::path(resolved).is_absolute();
+        }
+        if (auto cst = OCIO::DynamicPtrCast<const OCIO::ColorSpaceTransform>(t))
+            return link(cst->getSrc()) || link(cst->getDst());
+        if (auto look = OCIO::DynamicPtrCast<const OCIO::LookTransform>(t))
+            return uses_context_var(m_context,
+                                    look->getLooks() ? look->getLooks() : "")
+                   || link(look->getSrc()) || link(look->getDst());
+        return false;
+    }
+
+    OCIO::ConstConfigRcPtr m_config;
+    OCIO::ConstContextRcPtr m_context;
+    bool m_variable_search_path = false;
+    std::map<std::string, bool> m_verdict;
+    std::unordered_set<std::string> m_pending;
+};
 
 // A curve measured from the interchange role toward the space, which is the
 // encoding direction every comparison here is stated in.
@@ -7489,6 +8050,549 @@ ColorConfig::Impl::enriched(const CSInfo& cs, const ColorSpaceInfo& base,
     } catch (const std::exception& e) {
         DBG("Color transfer classification unavailable: {}\n", e.what());
         return current;  // Retry interrupted acquisition on the next derivation.
+    }
+}
+
+
+
+std::vector<std::string>
+ColorConfig::Impl::find_color_spaces(
+    const pvt::ColorSpaceSearchOptions& options) const
+{
+    if (!options.include_active && !options.include_inactive)
+        return {};
+
+    // Canonical local names, exactly as this configuration spells them. No
+    // alias, role or identity resolution runs here: `only` and `exclude` name
+    // the candidate universe, and inventing a name for a spelling nothing
+    // defines would silently widen it.
+    std::optional<std::unordered_set<std::string>> only;
+    if (options.only)
+        only.emplace(options.only->begin(), options.only->end());
+    const std::unordered_set<std::string> exclude(options.exclude.begin(),
+                                                  options.exclude.end());
+
+    // Without a native catalog the inventory is the synthetic fallback naming,
+    // which states no encoding, no state and nothing measurable. Every axis
+    // property is then unknown, and the three-valued rule above decides -- so
+    // the query still answers, it just cannot answer from evidence it has not
+    // got.
+    const bool native = m_catalog && config_ && !disable_ocio;
+
+    // The reference config, acquired at most once for the whole search and
+    // only where something actually reads a reference definition. A search
+    // whose terms are structural -- names, activity, image state, authored
+    // encoding attributes -- reaches no reference definition and must not pay
+    // to prepare one, and a failure to prepare it belongs to the hint that
+    // needed it rather than to every query that did not.
+    OCIO::ConstConfigRcPtr reference_config;
+    const auto reference = [&]() -> const OCIO::ConstConfigRcPtr& {
+        if (!reference_config)
+            reference_config = internal_reference();
+        return reference_config;
+    };
+
+    // The local color space a hint names, through this view's own selectors:
+    // names, aliases and roles, and a spelling that is itself a context
+    // variable. Consulted before any portable identity, so a configuration
+    // that spells one of its own names like an interop ID decides what that
+    // hint means.
+    const auto local_hint = [&](const std::string& value) -> const CSInfo* {
+        if (!native)
+            return nullptr;
+        if (const CSInfo* cs = find(value))
+            return cs;
+        if (value.find_first_of("$%") == std::string::npos)
+            return nullptr;
+        try {
+            return find(
+                config_->getCurrentContext()->resolveStringVar(value.c_str()));
+        } catch (const std::exception&) {
+            return nullptr;
+        }
+    };
+
+    // The reference definition a hint names, or null for an ordinary spelling.
+    const auto reference_hint =
+        [&](const std::string& value) -> OCIO::ConstColorSpaceRcPtr {
+        const std::string id = requested_identity(value);
+        if (id.empty())
+            return {};
+        try {
+            return reference()->getColorSpace(id.c_str());
+        } catch (const std::exception&) {
+            return {};
+        }
+    };
+
+    // The encoding of the reference definition this space is identified with.
+    // The identification is the established one -- declared where the author
+    // declared it, measured otherwise -- so this adopts an encoding a
+    // configuration left unstated rather than inventing one.
+    const auto twin_encoding =
+        [&](const CSInfo& cs) -> std::optional<std::string> {
+        if (!native)
+            return std::nullopt;
+        auto info = color_space_info(cs.name, true);
+        if (!info.m_impl || info.m_impl->identity.empty())
+            return std::nullopt;
+        try {
+            auto twin = reference()->getColorSpace(
+                info.m_impl->identity.c_str());
+            if (twin && twin->getEncoding() && twin->getEncoding()[0])
+                return Strutil::lower(twin->getEncoding());
+        } catch (const std::exception&) {
+        }
+        return std::nullopt;
+    };
+
+    // The authored encoding attribute, with the identified reference
+    // definition's encoding standing in when the attribute is unset.
+    // `authored_encoding_only` limits this to the attribute, which is what a
+    // caller asking what a configuration *says* wants -- and it is also the
+    // cheap answer, because it reads the catalog and stops. Adopting the
+    // reference encoding instead identifies the definition, which may derive
+    // and measure; that is the price of asking what a space *is* where its
+    // author said nothing.
+    const auto effective_encoding =
+        [&](const CSInfo& cs) -> std::optional<std::string> {
+        std::string authored = Strutil::lower(cs.encoding);
+        if (!authored.empty())
+            return authored;
+        if (options.authored_encoding_only)
+            return std::nullopt;
+        return twin_encoding(cs);
+    };
+
+    const auto resolve_encoding =
+        [&](const std::string& raw) -> std::vector<std::string> {
+        if (const CSInfo* cs = local_hint(raw)) {
+            if (auto encoding = effective_encoding(*cs))
+                return { *encoding };
+            throw std::invalid_argument(
+                "encoding hint has no derivable encoding: " + raw);
+        }
+        if (auto twin = reference_hint(raw)) {
+            std::string encoding = twin->getEncoding() ? twin->getEncoding()
+                                                       : "";
+            if (encoding.empty())
+                throw std::invalid_argument(
+                    "encoding hint has no derivable encoding: " + raw);
+            return { Strutil::lower(encoding) };
+        }
+        // A literal is accepted only if this configuration or the reference
+        // actually uses it, so a misspelling is an error rather than a term
+        // that silently matches nothing.
+        const std::string literal = Strutil::lower(raw);
+        if (m_catalog)
+            for (const auto& row : m_catalog->spaces)
+                if (!row.encoding.empty()
+                    && Strutil::lower(row.encoding) == literal)
+                    return { literal };
+        try {
+            auto ref = reference();
+            const int count
+                = ref->getNumColorSpaces(OCIO::SEARCH_REFERENCE_SPACE_ALL,
+                                         OCIO::COLORSPACE_ALL);
+            for (int i = 0; i < count; ++i) {
+                auto cs = ref->getColorSpace(ref->getColorSpaceNameByIndex(
+                    OCIO::SEARCH_REFERENCE_SPACE_ALL, OCIO::COLORSPACE_ALL, i));
+                if (cs && cs->getEncoding()
+                    && Strutil::lower(cs->getEncoding()) == literal)
+                    return { literal };
+            }
+        } catch (const std::exception&) {
+        }
+        throw std::invalid_argument("unresolved encoding hint: " + raw);
+    };
+
+    const auto resolve_state =
+        [&](const std::string& raw) -> std::vector<std::string> {
+        if (const CSInfo* cs = local_hint(raw)) {
+            // State is semantic evidence, not OCIO reference topology.
+            // Derive it under this effective context so a cold query and a
+            // query following unrelated property work answer identically.
+            auto info = color_space_info(cs->name, true, false, true);
+            if (info.m_impl && !info.m_impl->image_state.empty())
+                return { info.m_impl->image_state };
+            throw std::invalid_argument(
+                "image-state hint has no derivable value: " + raw);
+        }
+        const std::string literal = Strutil::lower(raw);
+        if (literal == "scene" || literal == "display")
+            return { literal };
+        if (literal == "all")
+            return { "scene", "display" };
+        if (auto twin = reference_hint(raw)) {
+            const string_view state
+                = known_image_state(twin->getName(), twin->getEncoding()
+                                                         ? twin->getEncoding()
+                                                         : "");
+            if (!state.empty())
+                return { std::string(state) };
+            throw std::invalid_argument(
+                "image-state hint has no derivable value: " + raw);
+        }
+        throw std::invalid_argument("unresolved image-state hint: " + raw);
+    };
+
+    const auto resolve_chromaticities =
+        [&](const std::string& raw) -> std::vector<SearchChromaticities> {
+        if (const CSInfo* cs = local_hint(raw)) {
+            auto info = color_space_info(cs->name, true);
+            if (info.m_impl && info.m_impl->has_chromaticities)
+                return { info.m_impl->chromaticities };
+            throw std::invalid_argument(
+                "chromaticities hint has no derivable value: " + raw);
+        }
+        if (auto twin = reference_hint(raw)) {
+            SearchChromaticities xy {};
+            if (identity_chromaticities(reference(), twin->getName(), xy))
+                return { xy };
+            throw std::invalid_argument(
+                "chromaticities hint has no derivable value: " + raw);
+        }
+        // A gamut component of an interop ID stands for every published set of
+        // primaries spelled that way, which is how `rec709` names one gamut
+        // across the several encodings that carry it.
+        const std::string component = Strutil::lower(raw);
+        std::vector<SearchChromaticities> values;
+        try {
+            auto ref = reference();
+            const int count
+                = ref->getNumColorSpaces(OCIO::SEARCH_REFERENCE_SPACE_ALL,
+                                         OCIO::COLORSPACE_ALL);
+            for (int i = 0; i < count; ++i) {
+                const char* id = ref->getColorSpaceNameByIndex(
+                    OCIO::SEARCH_REFERENCE_SPACE_ALL, OCIO::COLORSPACE_ALL, i);
+                if (!id || gamut_component(id) != component)
+                    continue;
+                SearchChromaticities xy {};
+                if (!identity_chromaticities(ref, id, xy))
+                    continue;
+                if (std::find(values.begin(), values.end(), xy) == values.end())
+                    values.push_back(xy);
+            }
+        } catch (const std::exception&) {
+        }
+        if (values.empty())
+            throw std::invalid_argument("unresolved chromaticities hint: "
+                                        + raw);
+        return values;
+    };
+
+    // A curve hint reached through a NamedTransform. A local one may borrow
+    // the reference's family spelling, so whether it implements that family is
+    // a question about the curve: the family is adopted only once the local
+    // definition and the reference definition measure the same.
+    const auto named_transform_term =
+        [&](OCIO::ConstConfigRcPtr config, OCIO::ConstNamedTransformRcPtr nt,
+            bool from_reference, ResolvedTransferTerm& term) {
+            term.encoding = Strutil::lower(nt->getEncoding() ? nt->getEncoding()
+                                                             : "");
+            auto signature = named_transform_signature(config, nt->getName());
+            if (!signature.valid())
+                return;
+            std::string family_key;
+            for (const auto& key : named_transform_keys(nt))
+                if (Strutil::starts_with(key, "crv_")) {
+                    family_key = key;
+                    break;
+                }
+            bool published = from_reference;
+            if (!published && !family_key.empty())
+                if (auto registered = find_named_transform(reference(),
+                                                           family_key)) {
+                    auto expected = reference_curve_signature(
+                        registered->getName());
+                    published = expected && expected->valid()
+                                && same_transfer_signature(signature, *expected,
+                                                           term.encoding);
+                }
+            if (published && !family_key.empty())
+                term.family = curve_family(family_key);
+            term.signatures.push_back(std::move(signature));
+        };
+
+    const auto resolve_transfer_terms = [&]() {
+        std::vector<ResolvedTransferTerm> terms;
+        for (const auto& input : options.transfer_functions) {
+            auto parsed = parse_term(input);
+            if (parsed.second.empty())
+                continue;
+            const std::string& value = parsed.second;
+            ResolvedTransferTerm term;
+            term.mode = parsed.first;
+
+            const CSInfo* local = local_hint(value);
+            OCIO::ConstColorSpaceRcPtr twin;
+            OCIO::ConstNamedTransformRcPtr local_nt, reference_nt;
+            if (!local) {
+                twin = reference_hint(value);
+                if (!twin && native)
+                    local_nt = find_named_transform(config_, value);
+                if (!twin && !local_nt)
+                    reference_nt = find_named_transform(reference(), value);
+            }
+
+            if (local || twin) {
+                OCIO::ConstColorSpaceRcPtr cs = twin;
+                if (local)
+                    cs = config_->getColorSpace(local->name.c_str());
+                term.encoding = Strutil::lower(
+                    local ? string_view(local->encoding)
+                          : string_view(cs && cs->getEncoding()
+                                            ? cs->getEncoding()
+                                            : ""));
+                // A hint given by example asks the same question of the same
+                // definition that a candidate does, so it goes through the
+                // same retained evidence: naming a local space as the example
+                // and then finding it among the results measures it once. The
+                // example itself is measured whatever the structural walk says
+                // -- the caller named it.
+                TransferSignature signature;
+                if (local) {
+                    signature = retained_transfer(local->name, cs);
+                } else if (cs && !cs->isData()) {
+                    // A reference definition belongs to the fixed reference
+                    // config, so it is retained on the reference side, beside
+                    // the recognition pass that measures the same thing.
+                    const char* role = cs->getReferenceSpaceType()
+                                               == OCIO::REFERENCE_SPACE_SCENE
+                                           ? "aces_interchange"
+                                           : "cie_xyz_d65_interchange";
+                    signature = *reference_transfer_signature(reference(), role,
+                                                              cs->getName());
+                }
+                if (signature.valid()) {
+                    term.family = measured_family(signature, term.encoding);
+                    term.signatures.push_back(std::move(signature));
+                }
+            } else if (local_nt) {
+                named_transform_term(config_, local_nt, false, term);
+            } else if (reference_nt) {
+                named_transform_term(reference(), reference_nt, true, term);
+            } else {
+                // Last: raw OpenColorIO transform text, parsed by the library
+                // and evaluated in this configuration under the effective
+                // context, so ColorSpaceTransform links, roles and file search
+                // paths resolve the way a conversion here would resolve them.
+                OCIO::ConstTransformRcPtr text;
+                try {
+                    text = transform_from_text(value);
+                } catch (const std::exception&) {
+                    text.reset();
+                }
+                if (!text)
+                    throw std::invalid_argument(
+                        "unresolved or unprobeable transfer function hint: "
+                        + value);
+                auto config = native ? OCIO::ConstConfigRcPtr(config_)
+                                     : reference();
+                TransferSignature signature;
+                try {
+                    signature = transfer_signature(
+                        config->getProcessor(config->getCurrentContext(), text,
+                                             OCIO::TRANSFORM_DIR_FORWARD));
+                } catch (const std::exception&) {
+                }
+                if (signature.valid())
+                    term.signatures.push_back(std::move(signature));
+            }
+
+            if (term.family.empty() && term.signatures.empty())
+                throw std::invalid_argument(
+                    "unresolved or unprobeable transfer function hint: "
+                    + value);
+            terms.push_back(std::move(term));
+        }
+        return terms;
+    };
+
+    const auto resolve_terms = [&](const std::vector<std::string>& inputs,
+                                   const auto& resolver) {
+        std::vector<ResolvedTerm> terms;
+        for (const auto& input : inputs) {
+            auto parsed = parse_term(input);
+            if (parsed.second.empty())
+                continue;
+            auto values = resolver(parsed.second);
+            if (values.empty())
+                throw std::invalid_argument(
+                    "unresolved color space search hint: " + parsed.second);
+            terms.push_back({ parsed.first, std::move(values) });
+        }
+        return terms;
+    };
+
+    // Every term is resolved before any candidate is examined, so a malformed
+    // search costs no measurement and reports the term that was wrong.
+    std::vector<ResolvedChromaticityTerm> chromaticity_terms;
+    for (const auto& input : options.chromaticities) {
+        auto parsed = parse_term(input);
+        if (parsed.second.empty())
+            continue;
+        chromaticity_terms.push_back(
+            { parsed.first, resolve_chromaticities(parsed.second) });
+    }
+    const auto transfer_terms = resolve_transfer_terms();
+    const auto encoding_terms = resolve_terms(options.encodings,
+                                              resolve_encoding);
+    const auto state_terms = resolve_terms(options.image_states, resolve_state);
+
+    std::optional<ContextClosure> context_closure;
+    if (native)
+        context_closure.emplace(OCIO::ConstConfigRcPtr(config_));
+
+    struct Row {
+        int sensitive;
+        int inactive;
+        const std::string* name;
+    };
+    std::vector<Row> selected;
+    const std::vector<CSInfo>& universe = m_catalog ? m_catalog->spaces
+                                                    : colorspaces;
+    for (const CSInfo& cs : universe) {
+        if ((only && !only->count(cs.name)) || exclude.count(cs.name))
+            continue;
+        if ((cs.active && !options.include_active)
+            || (!cs.active && !options.include_inactive))
+            continue;
+        // A data space has no color properties to match, and a configuration
+        // that marks a space unique has said no shared description applies to
+        // it. Neither is a candidate for any term.
+        if ((cs.flags() & CSInfo::is_data) || cs.is_unique)
+            continue;
+
+        const bool sensitive = context_closure
+                               && context_closure->sensitive(cs.name);
+        if (sensitive && !options.include_context_sensitive)
+            continue;
+
+        // A candidate's encoding is a set of up to two values: the effective
+        // one, plus -- unless the caller asked for authored attributes only --
+        // the encoding of the reference definition this space is identified
+        // with, even where an attribute is authored. A look-up-table space
+        // tagged for cinema but authored `sdr-video` answers to both.
+        std::vector<std::string> encoding_values;
+        if (!encoding_terms.empty() && native) {
+            if (auto literal = effective_encoding(cs))
+                encoding_values.push_back(*literal);
+            if (!options.authored_encoding_only)
+                if (auto inferred = twin_encoding(cs))
+                    if (std::find(encoding_values.begin(),
+                                  encoding_values.end(), *inferred)
+                        == encoding_values.end())
+                        encoding_values.push_back(*inferred);
+        }
+        if (!evaluate_axis(
+                encoding_terms, encoding_values,
+                [](const ResolvedTerm& term,
+                   const std::vector<std::string>& values) {
+                    for (const auto& value : values)
+                        if (term_matches(term,
+                                         std::optional<std::string>(value)))
+                            return true;
+                    return false;
+                },
+                [](const std::vector<std::string>& values) {
+                    return !values.empty();
+                }))
+            continue;
+
+        std::optional<std::string> state;
+        if (!state_terms.empty() && native) {
+            // Read the same bounded semantic evidence the derived public
+            // property exposes. A structural-only search never asks, and the
+            // effective-context cache makes cold, warm and cross-wrapper
+            // queries agree.
+            auto info = color_space_info(cs.name, true, false, true);
+            if (info.m_impl && !info.m_impl->image_state.empty())
+                state = info.m_impl->image_state;
+        }
+        if (!axis_accepts(state_terms, state))
+            continue;
+
+        // Only now, and only for a candidate that survived every native axis,
+        // is anything measured.
+        std::optional<SearchChromaticities> chromaticities;
+        if (!chromaticity_terms.empty() && native) {
+            auto info = color_space_info(cs.name, true);
+            if (info.m_impl && info.m_impl->has_chromaticities)
+                chromaticities = info.m_impl->chromaticities;
+        }
+        if (!chromaticity_axis_accepts(chromaticity_terms, chromaticities))
+            continue;
+
+        TransferProperty transfer;
+        if (!transfer_terms.empty() && native) {
+            auto target = config_->getColorSpace(cs.name.c_str());
+            // Structural admission bounds what a measurement of an arbitrary
+            // configured definition may mean. It reaches a definition backed by
+            // an external resource -- a matrix or a one-dimensional table in
+            // any container -- without an extension list ever deciding, and
+            // refuses one whose operations make a neutral-axis probe mean
+            // nothing. `exhaustive` sets the whole bound aside and lets
+            // OpenColorIO's own realization answer instead. A definition it
+            // still cannot probe reports an unknown curve; nothing is
+            // fabricated, and nothing about the rest of the encoding is claimed
+            // either way.
+            if (options.exhaustive || structurally_admitted(target)) {
+                transfer.encoding = Strutil::lower(cs.encoding);
+                auto signature    = retained_transfer(cs.name, target);
+                if (signature.valid()) {
+                    transfer.family    = measured_family(signature,
+                                                         transfer.encoding);
+                    transfer.signature = std::move(signature);
+                }
+            }
+        }
+        if (!transfer_axis_accepts(transfer_terms, transfer))
+            continue;
+
+        selected.push_back({ sensitive ? 1 : 0, cs.active ? 0 : 1, &cs.name });
+    }
+
+    // Deterministic: context-invariant spaces first, then active before
+    // inactive, then by name.
+    std::sort(selected.begin(), selected.end(), [](const Row& a, const Row& b) {
+        if (a.sensitive != b.sensitive)
+            return a.sensitive < b.sensitive;
+        if (a.inactive != b.inactive)
+            return a.inactive < b.inactive;
+        return *a.name < *b.name;
+    });
+    std::vector<std::string> result;
+    result.reserve(selected.size());
+    for (const Row& row : selected)
+        result.push_back(*row.name);
+    DBG("Color space search selected {} of {}\n", result.size(),
+        universe.size());
+    return result;
+}
+
+
+
+std::vector<std::string>
+pvt::find_color_spaces(const ColorConfig& config,
+                       const ColorSpaceSearchOptions& options)
+{
+    // One acquisition of the view for the whole search, never one per
+    // candidate. A view this build could not acquire is not a verdict about
+    // the configuration: nothing is retained and the next call tries again.
+    const auto impl = ColorConfigAccess::impl(config);
+    const auto view = impl->context_view(options.context_key,
+                                         options.context_value);
+    if (!view) {
+        impl->error(
+            "Could not evaluate a color space search under the requested context");
+        return {};
+    }
+    try {
+        return view->find_color_spaces(options);
+    } catch (const std::exception& e) {
+        impl->error("{}", e.what());
+        return {};
     }
 }
 

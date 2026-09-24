@@ -222,6 +222,15 @@ set_source_provenance(ImageSpec& spec, string_view format_name,
     spec.attribute("oiio:SourcePath", filename);
 }
 
+/// The display-referred identity of the built-in interop-identities config
+/// with these RGBW xy chromaticities and this curve token (the part of its
+/// name before the gamut, such as "srgb", "g22" or "lin"), or empty.
+OIIO_API string_view get_display_interop_id(cspan<float> xy, string_view curve);
+
+/// RGBW xy chromaticities of a CICP primaries code, read from the built-in
+/// interop-identities config. False when that config does not describe them.
+OIIO_API bool get_cicp_primaries_chromaticities(int primaries, float xy[8]);
+
 /// `ColorConfig::get_color_space_info()` or, with `derive`,
 /// `derive_color_space_info()`, answered under the config's own context plus
 /// `context_key` and `context_value` (the comma-separated convention of

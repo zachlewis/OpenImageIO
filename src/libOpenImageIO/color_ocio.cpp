@@ -8368,6 +8368,10 @@ pvt::get_colorspace_info(const ImageSpec& spec, bool derive,
                                  derive, context_key, context_value);
 }
 
+using v3_1::colordebug;
+using v3_1::disable_builtin_configs;
+using v3_1::disable_ocio;
+
 // Parse a color space name of the form "g<NN>_rec709_(scene|display)".
 static float
 rec709_colorspace_gamma(string_view colorspace)
@@ -8380,6 +8384,81 @@ rec709_colorspace_gamma(string_view colorspace)
     if (colorspace != "_rec709_scene" && colorspace != "_rec709_display")
         return 0.0f;
     return float(g10) / 10.0f;
+}
+
+
+
+string_view
+pvt::get_display_interop_id(cspan<float> xy, string_view curve)
+{
+    if (xy.size() != 8 || curve.empty() || disable_ocio
+        || disable_builtin_configs)
+        return {};
+    try {
+        auto reference = v3_1::internal_reference();
+        const int count
+            = reference->getNumColorSpaces(OCIO::SEARCH_REFERENCE_SPACE_DISPLAY,
+                                           OCIO::COLORSPACE_ALL);
+        for (int i = 0; i < count; ++i) {
+            const char* id = reference->getColorSpaceNameByIndex(
+                OCIO::SEARCH_REFERENCE_SPACE_DISPLAY, OCIO::COLORSPACE_ALL, i);
+            // The identity's curve token is the one before its gamut.
+            string_view base = id;
+            if (size_t colon = base.find(':'); colon != string_view::npos)
+                base.remove_prefix(colon + 1);
+            if (!Strutil::starts_with(base, curve)
+                || base.substr(curve.size(), 1) != "_")
+                continue;
+            std::array<float, 8> candidate;
+            bool has_xy = false;
+            float gamma = 0.0f;
+            if (!(v3_1::reference_properties(reference, id, candidate, has_xy,
+                                             gamma)
+                  && has_xy)
+                && !v3_1::identity_chromaticities(reference, id, candidate))
+                continue;
+            bool same = true;
+            for (int c = 0; c < 8; ++c)
+                same &= std::abs(candidate[c] - xy[c]) <= 1.0e-3f;
+            if (same)
+                return id;
+        }
+    } catch (const std::exception& e) {
+        DBG("Color display identity unavailable: {}\n", e.what());
+    }
+    return {};
+}
+
+
+
+// For file format writers. Answers nothing when the environment disables
+// color management, and an OpenColorIO exception never escapes into a plugin.
+bool
+pvt::get_cicp_primaries_chromaticities(int primaries, float xy[8])
+{
+    if (disable_ocio || disable_builtin_configs)
+        return false;
+    try {
+        const int code = v3_1::normalized_cicp_pair(primaries, 0).primaries;
+        for (const auto& entry : v3_1::color_interop_ids) {
+            if (!entry.has_cicp || entry.cicp[0] != code
+                || entry.cicp[1] != int(v3_1::CICPTransfer::Linear))
+                continue;
+            std::array<float, 8> values;
+            bool has_xy = false;
+            float gamma = 0.0f;
+            if (!v3_1::reference_properties(v3_1::internal_reference(),
+                                            entry.interop_id, values, has_xy,
+                                            gamma)
+                || !has_xy)
+                return false;
+            std::copy(values.begin(), values.end(), xy);
+            return true;
+        }
+    } catch (const std::exception& e) {
+        DBG("Color CICP primaries unavailable: {}\n", e.what());
+    }
+    return false;
 }
 
 float

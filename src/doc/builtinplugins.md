@@ -1363,6 +1363,52 @@ and to provide better compression and quality. JPEG XL files use the file
 extension {file}`.jxl`. The official JPEG XL format specification and other
 helpful info may be found at: <https://jpeg.org/jpegxl/>
 
+When writing, JPEG XL preserves a valid supplied ICC profile or supported CICP
+encoding. Otherwise the CICP code of the color space is written when one
+represents it exactly (for example 1,1 for `g24_rec709_display`), and a
+recognized color space with complete RGB primary and white-point coordinates
+and a pure-power transfer function with no such code is stored as a custom
+JPEG XL color encoding. A color interop identity the active config does not
+define is described by the built-in interop-identities config, as color
+conversions are. JPEG XL stores the encoding exponent, the reciprocal
+of OIIO's decoding exponent. An exponent alone does not supply missing
+primaries, and color metadata does not alter lossless sample values.
+
+A CICP with no JPEG XL code is stored as a custom encoding when one
+represents it: known primaries as coordinates, H.273 transfers 6, 14, and 15
+as the BT.709 curve, and transfers 4 and 5 as gamma 2.2 and 2.8. Otherwise no
+color encoding is written, and for an explicit CICP request a warning is
+printed when the `OPENIMAGEIO_DEBUG` environment variable is set. That
+includes transfer 17 (SMPTE ST 428-1), because libjxl's DCI transfer is a
+pure gamma 2.6 without its white scaling. The CICP matrix and range are not
+part of a JPEG XL color encoding.
+
+When reading, libjxl treats every color encoding except HLG as
+display-referred. So a file whose color encoding gives both its primaries and
+white point (named or as coordinates) and its transfer function (named or a
+pure gamma) sets `oiio:ColorSpace` to the display-referred color interop
+identity with those properties, such as `srgb_rec709_display` for an sRGB
+file or `g22_rec709_display` for Rec.709 primaries with gamma 2.2. When there
+is no such identity (for example linear ACEScg primaries), the label remains
+unset and the reader records RGB primary and white-point coordinates as
+`chromaticities` and an exact linear or pure-power decoding exponent as
+`oiio:Gamma`. Other enumerated transfers have no standalone attribute and are
+retained as `CICP` only when the complete encoding has an exact code. The
+BT.709 transfer reads as BT.1886 (`g24_*_display`), and the DCI transfer, a
+pure gamma 2.6 in libjxl, as `g26_*_display`. HLG keeps its CICP identity. The
+`CICP` attribute is set when the encoding names its
+primaries, white point and transfer function and that combination has a CICP
+code; every code fixes a white point as well as a gamut, so enumerated
+primaries paired with another white point set none, and P3 primaries give 11
+at the DCI white point and 12 at D65. The DCI transfer sets none. libjxl
+reduces coordinates and a pure gamma back to an enumerated primaries set,
+white point or curve when they match one, so a custom encoding it still
+reports as custom sets no `CICP` attribute even where an equivalent code
+exists: a file written from an explicit CICP 1,4, stored as gamma 2.2, reads
+back as `g22_rec709_display` with no `CICP` attribute. One it reduces
+entirely does set the attribute, so `oiio:lin_p3dci_display`, written as
+coordinates with gamma 1.0, reads back as itself with `CICP` 11,8.
+
 **Configuration settings for JPEG XL input**
 
 When opening a JPEG XL ImageInput with a *configuration* (see

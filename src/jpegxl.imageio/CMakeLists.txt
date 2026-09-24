@@ -7,6 +7,15 @@ if (JXL_FOUND)
                      INCLUDE_DIRS ${JXL_INCLUDES}
                      LINK_LIBRARIES ${JXL_LIBRARIES}
                      DEFINITIONS "USE_JXL")
+    if (OIIO_BUILD_TESTS AND BUILD_TESTING)
+        fancy_add_executable (
+            NAME jxl_profile_test
+            SRC ${PROJECT_SOURCE_DIR}/testsuite/jxl/src/jxl_profile_test.cpp
+            INCLUDE_DIRS ${JXL_INCLUDES}
+            LINK_LIBRARIES OpenImageIO ${JXL_LIBRARIES}
+            FOLDER "Unit Tests"
+            NO_INSTALL)
+    endif ()
 else()
     message (WARNING "JPEG XL plugin will not be built")
 endif()

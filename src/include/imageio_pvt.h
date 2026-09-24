@@ -17,6 +17,7 @@
 
 
 OIIO_NAMESPACE_3_1_BEGIN
+class ColorConfig;
 class ColorSpaceInfo;
 
 /// How much of a color space's decoding transfer function has been
@@ -404,13 +405,110 @@ OIIO_API bool test_read_image(ImageInput& inp, int subimage, int miplevel,
 /// Read all subimage and MIP levels of the open file.
 OIIO_API bool test_read_all_images(ImageInput& inp,
                                    TypeDesc format = TypeUInt8);
+
+/// A color space's transfer function in `config`, written out as a transform
+/// document OpenColorIO itself can read back.
+///
+/// What is exported is the *encoding* curve, and only the curve: the
+/// per-channel operations OpenColorIO builds for the conversion from the
+/// interchange role of the space's own image state -- `aces_interchange`
+/// for a scene-referred definition, `cie_xyz_d65_interchange` for a
+/// display-referred one -- toward the space, with the channel-mixing
+/// matrix that carries the interchange primaries into the space's own
+/// linear RGB left out of the result. The exported text is therefore a
+/// function of the *space's own linear RGB*, which is what a transfer
+/// function is; it is not the conversion from the interchange, and
+/// applying it to interchange pixels performs neither operation. The
+/// inverse direction is the decode.
+///
+/// Nothing is sampled, resampled, baked or fitted. The operations
+/// OpenColorIO built are written exactly as it built them, by
+/// OpenColorIO's own writers, and a definition this cannot state exactly
+/// is refused rather than approximated. In particular a diagonal gain or
+/// offset and a range -- including the unclamped kind OpenColorIO
+/// represents as a matrix -- are part of the curve and are retained, and a
+/// measurement that merely resembles a published curve never stands in for
+/// the definition's own operations.
+///
+/// `format` selects the grammar, each one OpenColorIO's own:
+///
+/// - `ctf` -- Color Transform Format. This is what an empty `format`
+///   selects.
+/// - `clf` -- Academy/ASC Common LUT Format. It has no inverse look-up
+///   table, so a curve authored as a decode table -- which reaches the
+///   encoding direction as an inverse one -- is refused here. The caller
+///   may request `ctf` instead. Nothing is baked forward in its place.
+/// - `ocio` -- the transform as a `.ocio` configuration spells it, which
+///   OpenColorIO's configuration reader accepts. It is indented as the
+///   value of a key that starts a line; placed after an indented key, each
+///   continuation line needs that key's indentation added. The configuration
+///   grammar has no spelling for an inline look-up table, so a curve that
+///   arrived as one is refused in this format.
+///
+/// A definition the separation cannot state is refused, and the refusal
+/// says which: a chain whose channels do not bend alike, one that mixes
+/// channels after the curve has begun, one that interleaves mixing and
+/// bending, and one whose leading matrix cannot be shown to leave the
+/// interchange neutral at the space's own white -- which is what a gain
+/// folded into the primaries matrix looks like, and it is reported rather
+/// than guessed apart. An unresolvable name, a data space, a missing
+/// interchange role, an unknown `format`, an operation the grammar cannot
+/// spell and a context this build could not acquire are refused the same
+/// way.
+///
+/// Every refusal sets the configuration's error state and returns an empty
+/// string. An identity curve exports a native identity transform document.
+///
+/// `colorspace` is a name, alias or role the configuration defines,
+/// expanded under the effective context when it spells a context
+/// variable. Nothing is retained: one export acquires one processor and
+/// walks it once, and no color cache is read or written.
+///
+/// The export runs under the configuration's own context plus `context_key`
+/// and `context_value`, following the comma-separated convention of
+/// `createColorProcessor()`. A color space whose definition varies with a
+/// context variable is a different definition under each context, so this
+/// exports the curve the caller's own conversion would carry. The
+/// configuration's own context is never modified, and a context this build
+/// could not acquire sets the error state rather than answering from the
+/// configuration's own context instead.
+OIIO_API std::string
+serialize_transfer_function(const ColorConfig& config, string_view colorspace,
+                            string_view format        = "ctf",
+                            string_view context_key   = "",
+                            string_view context_value = "");
+
+/// The same transfer function `serialize_transfer_function()` writes in the
+/// `ocio` grammar, on one line: the flow syntax a configuration's mapping can
+/// carry inline as the value of a key. A group of one operation is that
+/// operation, so a pure power reads as
+/// `!<ExponentTransform> {value: 2.4, style: mirror, direction: inverse}`,
+/// and several operations become a `!<GroupTransform>` whose `children` are a
+/// flow sequence.
+///
+/// This is a description of a curve, not a file format. OpenImageIO never
+/// writes it into an image and never reads one out of one; it exists so that
+/// the operations a transfer function is made of can travel as one string
+/// beside the properties measured from them.
+///
+/// The refusals are `serialize_transfer_function()`'s in the `ocio` grammar,
+/// under the same effective context, with one more: an operation OpenColorIO
+/// writes over more than one line cannot be carried inline and is refused
+/// rather than folded. Every refusal sets the configuration's error state and
+/// returns an empty string.
+OIIO_API std::string
+transfer_function_transform(const ColorConfig& config, string_view colorspace,
+                            string_view context_key   = "",
+                            string_view context_value = "");
 }  // namespace pvt
 OIIO_NAMESPACE_3_1_END
 
 OIIO_NAMESPACE_BEGIN
 namespace pvt {
+using v3_1::pvt::serialize_transfer_function;
 using v3_1::pvt::test_read_all_images;
 using v3_1::pvt::test_read_image;
+using v3_1::pvt::transfer_function_transform;
 }  // namespace pvt
 OIIO_NAMESPACE_END
 

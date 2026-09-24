@@ -1907,6 +1907,511 @@ test_private_properties()
 
 
 
+// Exporting a transfer function is a claim about a factorization: the
+// conversion from the interchange is a gamut matrix followed by a curve, and
+// what is exported is the curve alone. That claim cannot be checked against
+// the export itself, and it cannot be checked against the conversion from the
+// interchange either -- the two are functions of different inputs, so a
+// comparison between them says nothing about a gain the separation dropped.
+//
+// Every accepted case below is therefore checked against two transforms this
+// test did not produce: the conversion from the interchange to the space, and
+// the conversion from the interchange to the space's own linear RGB, which
+// OpenColorIO builds from a separately declared linear space. Reloading the
+// export natively and applying it to the second must reproduce the first, at
+// every probe and per channel. The probes carry negatives, values above one,
+// three different channel values and three different alphas, because a
+// channel average would hide exactly the defects this exists to catch.
+static void
+test_transfer_export()
+{
+    if (!ColorConfig::supportsOpenColorIO())
+        return;
+    const std::string directory = Filesystem::temp_directory_path() + "/"
+                                  + Filesystem::unique_path();
+    OIIO_CHECK_ASSERT(Filesystem::create_directory(directory));
+
+    const std::string rec709_to_ap0
+        = "!<MatrixTransform> {matrix: [0.439632981919491, "
+          "0.382988698151554, 0.177378319928955, 0, 0.0897764429588424, "
+          "0.813439428748981, 0.0967841282921771, 0, 0.0175411703831727, "
+          "0.111546553302387, 0.87091227631444, 0, 0, 0, 0, 1]}";
+    const std::string p3d65_to_ap0
+        = "!<MatrixTransform> {matrix: [0.518933487597981, 0.28625658638669, "
+          "0.194809926015329, 0, 0.0738593830470598, 0.819845163936986, "
+          "0.106295453015954, 0, -0.000307011368446647, 0.0438070502536223, "
+          "0.956499961114824, 0, 0, 0, 0, 1]}";
+    const std::string awg3_to_ap0
+        = "!<MatrixTransform> {matrix: [0.680205505106279, "
+          "0.236136601606481, 0.0836578932872398, 0, 0.0854149797421404, "
+          "1.01747087860704, -0.102885858349182, 0, 0.00205652166929683, "
+          "-0.0625625003847921, 1.06050597871549, 0, 0, 0, 0, 1]}";
+    // The Rec.709 matrix with a uniform nine-tenths folded into it. Every
+    // coefficient moved, so nothing in the matrix says which part of it is
+    // primaries and which part is gain.
+    const std::string dimmed_rec709_to_ap0
+        = "!<MatrixTransform> {matrix: [0.3956696837275419, "
+          "0.3446898283363986, 0.1596404879360595, 0, 0.08079879866295816, "
+          "0.7320954858740829, 0.08710571546295939, 0, 0.01578705334485543, "
+          "0.1003918979721483, 0.783821048682996, 0, 0, 0, 0, 1]}";
+    // Rec.709 linear to CIE XYZ at D65. Its rows sum to the D65 white the
+    // display interchange role carries, which is what the separation proof
+    // asks of it in the other direction.
+    const std::string rec709_to_xyz
+        = "!<MatrixTransform> {matrix: [0.4123907992659595, "
+          "0.3575843393838780, 0.1804807884018343, 0, 0.2126390058715104, "
+          "0.7151686787677559, 0.0721923153607337, 0, 0.0193308187155918, "
+          "0.1191947797946259, 0.9505321522496608, 0, 0, 0, 0, 1]}";
+    // The forward direction of a camera log is the encoding one, which is
+    // what an export states; the configuration authors its inverse, which is
+    // the decode.
+    const std::string logc3_encode
+        = "!<LogCameraTransform> {base: 10, log_side_slope: "
+          "0.247189638318671, log_side_offset: 0.385536998692443, "
+          "lin_side_slope: 5.55555555555556, lin_side_offset: "
+          "0.0522722750251688, lin_side_break: 0.0105909904954696}";
+    const std::string logc3 = logc3_encode.substr(0, logc3_encode.size() - 1)
+                              + ", direction: inverse}";
+
+    // Two decode tables in an external resource, selected by a context
+    // variable. OpenColorIO expands the file into operations long before this
+    // walk sees it, so the only thing a file changes is which grammar can
+    // spell the result.
+    auto table = [&](string_view name, double gamma) {
+        std::string text = "LUT_1D_SIZE 64\n";
+        for (int i = 0; i < 64; ++i) {
+            const double v = std::pow(double(i) / 63.0, gamma);
+            text += Strutil::fmt::format("{:.9f} {:.9f} {:.9f}\n", v, v, v);
+        }
+        OIIO_CHECK_ASSERT(Filesystem::write_text_file(
+            Strutil::fmt::format("{}/{}", directory, name), text));
+    };
+    table("g22.cube", 2.2);
+    table("g18.cube", 1.8);
+    // A table whose green channel bends differently from red and blue. It is
+    // per-channel, which is not the same as one curve on three channels.
+    std::string skew = "LUT_1D_SIZE 16\n";
+    for (int i = 0; i < 16; ++i) {
+        const double x = double(i) / 15.0;
+        skew += Strutil::fmt::format("{:.9f} {:.9f} {:.9f}\n", std::pow(x, 2.2),
+                                     std::pow(x, 2.6), std::pow(x, 2.2));
+    }
+    OIIO_CHECK_ASSERT(
+        Filesystem::write_text_file(directory + "/skew.cube", skew));
+    // The same container carrying a three-dimensional table, which mixes the
+    // channels and so is no curve at all.
+    OIIO_CHECK_ASSERT(Filesystem::write_text_file(directory + "/mix.cube",
+                                                  "LUT_3D_SIZE 2\n"
+                                                  "0.00 0.00 0.00\n"
+                                                  "0.90 0.05 0.00\n"
+                                                  "0.05 0.90 0.00\n"
+                                                  "0.95 0.95 0.00\n"
+                                                  "0.00 0.00 0.90\n"
+                                                  "0.90 0.05 0.90\n"
+                                                  "0.05 0.90 0.90\n"
+                                                  "1.00 1.00 1.00\n"));
+
+    // Decode order throughout: the curve linearizes, anything between it and
+    // the primaries follows, and the primaries matrix reaches the interchange
+    // last. The exported encoding direction is the reverse of each of these.
+    auto space = [](string_view name, std::vector<std::string> children,
+                    string_view key = "to_scene_reference") {
+        std::string text = Strutil::fmt::format("  - !<ColorSpace>\n    name: "
+                                                "{}\n    {}: ",
+                                                name, key);
+        if (children.size() == 1)
+            return text + children[0] + "\n";
+        text += "!<GroupTransform>\n      children:\n";
+        for (const auto& child : children)
+            text += "        - " + child + "\n";
+        return text;
+    };
+
+    std::string text
+        = "ocio_profile_version: 2.3\n"
+          "environment: {CURVE: g22.cube, SPACE: TrueSRGB}\n"
+          "search_path: .\n"
+          "roles: {default: ACES, aces_interchange: ACES, scene_linear: ACES, "
+          "cie_xyz_d65_interchange: XYZ}\n"
+          "file_rules:\n  - !<Rule> {name: Default, colorspace: default}\n"
+          "display_colorspaces:\n"
+          "  - !<ColorSpace>\n    name: XYZ\n    encoding: display-linear\n";
+    // The display side: a known linear endpoint and a pure power over it.
+    text += space("Rec709LinearDisplay", { rec709_to_xyz },
+                  "to_display_reference");
+    text += space("Rec709G24Display",
+                  { "!<ExponentTransform> {value: 2.4}", rec709_to_xyz },
+                  "to_display_reference");
+    text += "colorspaces:\n"
+            "  - !<ColorSpace>\n    name: ACES\n    encoding: scene-linear\n";
+    // The known gamut prefixes. Each one is the space's own linear RGB, and
+    // each is what the oracle below feeds the exported curve. They are also
+    // the identity case in their own right: everything their conversion does
+    // is the gamut matrix, so nothing at all is exported, which is the
+    // statement exactly.
+    text += space("Rec709Linear", { rec709_to_ap0 });
+    text += space("AWG3Linear", { awg3_to_ap0 });
+    text += space("TrueSRGB",
+                  { "!<ExponentWithLinearTransform> {gamma: 2.4, offset: "
+                    "0.055}",
+                    rec709_to_ap0 });
+    text += space("CameraLog", { logc3, awg3_to_ap0 });
+    // A headroom scale authored as its own diagonal matrix, which is the
+    // shape a cinema white carries. Dropping it would export a bare 2.6
+    // power.
+    text += space("GainCurve",
+                  { "!<ExponentTransform> {value: 2.6}",
+                    "!<MatrixTransform> {matrix: [0.9166, 0, 0, 0, 0, 0.9166, "
+                    "0, 0, 0, 0, 0.9166, 0, 0, 0, 0, 1]}",
+                    rec709_to_ap0 });
+    // A clamping range and an unclamped affine one over the same curve.
+    // OpenColorIO realizes the second as a matrix, so dropping matrices would
+    // erase a real scale and offset here too.
+    text += space("RangeCurve",
+                  { "!<RangeTransform> {min_in_value: 0, max_in_value: 1, "
+                    "min_out_value: 0, max_out_value: 0.9}",
+                    "!<ExponentTransform> {value: 2.4}",
+                    "!<RangeTransform> {min_in_value: 0, max_in_value: 1, "
+                    "min_out_value: 0.0625, max_out_value: 1, style: noClamp}",
+                    rec709_to_ap0 });
+    // The curve as an external resource the context selects.
+    text += space("TablePlate",
+                  { "!<FileTransform> {src: \"$CURVE\", interpolation: linear}",
+                    rec709_to_ap0 });
+    // The controls. Unequal channels, channel mixing, a curve standing
+    // between two matrices, a gain the primaries matrix absorbed, and a
+    // matrix that scales alpha.
+    text += space("SkewTable",
+                  { "!<FileTransform> {src: skew.cube, interpolation: linear}",
+                    rec709_to_ap0 });
+    text += space("MixTable",
+                  { "!<FileTransform> {src: mix.cube, interpolation: "
+                    "tetrahedral}",
+                    rec709_to_ap0 });
+    text += space("InsetChain",
+                  { "!<ExponentTransform> {value: 2.2}", p3d65_to_ap0,
+                    "!<ExponentTransform> {value: 2.2}", rec709_to_ap0 });
+    text += space("MergedGain", { "!<ExponentTransform> {value: 2.2}",
+                                  dimmed_rec709_to_ap0 });
+    // A diagonal matrix whose three gains differ. It is per-channel, which is
+    // not the same as one curve on three channels, and the uniform gain
+    // retained above is what separates the two.
+    text += space("SkewGain",
+                  { "!<ExponentTransform> {value: 2.2}",
+                    "!<MatrixTransform> {matrix: [1.1, 0, 0, 0, 0, 1, 0, 0, 0, "
+                    "0, 0.9, 0, 0, 0, 0, 1]}",
+                    rec709_to_ap0 });
+    text += space("AlphaCurve",
+                  { "!<ExponentTransform> {value: 2.2}",
+                    "!<MatrixTransform> {matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, "
+                    "0, 1, 0, 0, 0, 0, 2]}",
+                    rec709_to_ap0 });
+    text += "  - !<ColorSpace>\n    name: Plain\n    isdata: true\n";
+    const std::string filename = directory + "/transfer.ocio";
+    OIIO_CHECK_ASSERT(Filesystem::write_text_file(filename, text));
+    ColorConfig config(filename);
+    OIIO_CHECK_EQUAL(config.geterror(false), "");
+
+    // Probes in whichever interchange space the case is stated in. Per
+    // channel, signed, above one, and with alpha varying on its own.
+    static const std::array<float, 4> probes[]
+        = { { 0.0f, 0.0f, 0.0f, 1.0f },      { 0.18f, 0.18f, 0.18f, 0.5f },
+            { 0.9f, 0.1f, 0.02f, 0.0f },     { 0.02f, 0.75f, 0.35f, 0.25f },
+            { 0.004f, 0.011f, 0.002f, 1.f }, { -0.05f, 0.2f, 1.4f, 0.75f },
+            { 3.0f, 6.0f, 0.5f, 1.0f } };
+    using Probes = std::vector<std::array<float, 4>>;
+    const Probes source(std::begin(probes), std::end(probes));
+
+    auto run = [](const ColorProcessorHandle& processor, Probes pixels) {
+        if (processor)
+            for (auto& rgba : pixels)
+                processor->apply(rgba.data(), 1, 1, 4, sizeof(float),
+                                 4 * sizeof(float), 4 * sizeof(float));
+        return pixels;
+    };
+
+    // Read an exported document back the way a configuration would: the
+    // `ocio` text as a color space's own from-reference value, a CTF or CLF
+    // document as the external resource it is. Both are OpenColorIO's own
+    // readers, and there is nothing behind either of them.
+    int serial  = 0;
+    auto reload = [&](const std::string& document, string_view format,
+                      const Probes& input) {
+        std::string body;
+        const std::string stem = Strutil::fmt::format("{}/reload-{}", directory,
+                                                      ++serial);
+        if (format == "ocio") {
+            // The value is indented for a key that starts a line, so each
+            // continuation line takes this key's indentation.
+            body = "    from_scene_reference: "
+                   + Strutil::replace(document, "\n", "\n    ", true) + "\n";
+        } else {
+            // Named relative to the configuration, as the one above names its
+            // curves: a Windows path spelled inside the YAML would have its
+            // backslashes read as escapes.
+            const std::string file = Strutil::fmt::format("reload-{}.{}",
+                                                          serial, format);
+            OIIO_CHECK_ASSERT(
+                Filesystem::write_text_file(directory + "/" + file, document));
+            body = "    from_scene_reference: !<FileTransform> {src: " + file
+                   + "}\n";
+        }
+        OIIO_CHECK_ASSERT(Filesystem::write_text_file(
+            stem + ".ocio",
+            "ocio_profile_version: 2.3\nsearch_path: .\n"
+            "roles: {default: linear}\n"
+            "file_rules:\n  - !<Rule> {name: Default, colorspace: default}\n"
+            "colorspaces:\n  - !<ColorSpace>\n    name: linear\n"
+            "  - !<ColorSpace>\n    name: encoded\n"
+                + body));
+        ColorConfig reader(stem + ".ocio");
+        OIIO_CHECK_EQUAL(reader.geterror(false), "");
+        auto processor = reader.createColorProcessor("linear", "encoded");
+        OIIO_CHECK_ASSERT(processor);
+        return run(processor, input);
+    };
+
+    // One accepted definition, in every grammar that can spell it, against
+    // the two transforms beside it. `linear` names the space's own linear RGB
+    // and `reference` the interchange the case is stated from; neither is
+    // anything this export produced.
+    auto agrees = [&](string_view name, string_view linear,
+                      string_view reference, cspan<const char*> formats,
+                      string_view key = "", string_view value = "") {
+        const Probes full = run(config.createColorProcessor(reference, name,
+                                                            key, value),
+                                source);
+        const Probes onto = run(config.createColorProcessor(reference, linear,
+                                                            key, value),
+                                source);
+        for (const char* format : formats) {
+            const std::string document
+                = pvt::serialize_transfer_function(config, name, format, key,
+                                                   value);
+            OIIO_CHECK_EQUAL(config.geterror(false), "");
+            OIIO_CHECK_ASSERT(!document.empty());
+            if (document.empty())
+                continue;
+            const Probes exported = reload(document, format, onto);
+            for (size_t i = 0; i < source.size(); ++i)
+                for (int c = 0; c < 4; ++c)
+                    OIIO_CHECK_EQUAL_THRESH(exported[i][c], full[i][c], 2e-4f);
+        }
+        // The same curve on one line, which is the only thing an inline
+        // transform can carry. It is read back the same way -- as a color
+        // space's own from-reference value in a configuration OpenColorIO
+        // parses -- and must land on the same pixels, under the caller's
+        // context as under the configuration's own.
+        bool spellable = false;
+        for (const char* format : formats)
+            spellable |= string_view(format) == "ocio";
+        const std::string inlined
+            = pvt::transfer_function_transform(config, name, key, value);
+        OIIO_CHECK_EQUAL(inlined.empty(), !spellable);
+        if (!spellable) {
+            // Whatever the `ocio` grammar refuses, one line of it refuses
+            // too, and says so rather than answering with something shorter.
+            OIIO_CHECK_ASSERT(!config.geterror().empty());
+            return;
+        }
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_EQUAL(inlined.find('\n'), std::string::npos);
+        const Probes one_line = reload(inlined, "ocio", onto);
+        for (size_t i = 0; i < source.size(); ++i)
+            for (int c = 0; c < 4; ++c)
+                OIIO_CHECK_EQUAL_THRESH(one_line[i][c], full[i][c], 2e-4f);
+    };
+
+    // Every grammar, for a definition all of them can spell.
+    static const char* every[] = { "ctf", "clf", "ocio" };
+    // A curve authored as a decode table reaches the encoding direction as an
+    // inverse table, and only one of the three grammars states one: the
+    // configuration grammar names external resources rather than tabulating
+    // them, and the Common LUT Format has no inverse table at all. Both say
+    // so, and neither bakes a forward approximation instead.
+    static const char* only_ctf[] = { "ctf" };
+
+    agrees("Rec709Linear", "Rec709Linear", "ACES", every);
+    agrees("TrueSRGB", "Rec709Linear", "ACES", every);
+    agrees("CameraLog", "AWG3Linear", "ACES", every);
+    agrees("GainCurve", "Rec709Linear", "ACES", every);
+    agrees("RangeCurve", "Rec709Linear", "ACES", every);
+    agrees("Rec709G24Display", "Rec709LinearDisplay", "XYZ", every);
+    agrees("TablePlate", "Rec709Linear", "ACES", only_ctf);
+    agrees("TablePlate", "Rec709Linear", "ACES", only_ctf, "CURVE", "g18.cube");
+
+    // The text itself, not only its pixels: the headroom scale survives as
+    // the one matrix, exactly inverted, and the primaries matrix is gone.
+    {
+        const std::string doc
+            = pvt::serialize_transfer_function(config, "GainCurve", "ocio");
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        const size_t matrix = doc.find("MatrixTransform");
+        OIIO_CHECK_ASSERT(matrix != std::string::npos
+                          && matrix == doc.rfind("MatrixTransform"));
+        const size_t at = doc.find("matrix: [");
+        OIIO_CHECK_ASSERT(at != std::string::npos);
+        if (at != std::string::npos) {
+            string_view first(doc);
+            first.remove_prefix(at + 9);
+            first = first.substr(0, first.find(','));
+            OIIO_CHECK_EQUAL_THRESH(Strutil::stod(first), 1.0 / 0.9166, 1e-12);
+        }
+        OIIO_CHECK_ASSERT(!Strutil::contains(doc, "0.439632981919491"));
+        // Indented for a key that starts a line, not for wherever the
+        // serializer happened to put its own key.
+        OIIO_CHECK_ASSERT(Strutil::contains(doc, "\n  children:\n    - "));
+        // The default grammar is CTF.
+        OIIO_CHECK_EQUAL(pvt::serialize_transfer_function(config, "GainCurve"),
+                         pvt::serialize_transfer_function(config, "GainCurve",
+                                                          "ctf"));
+        // The one-line form carries the same two operations in a flow
+        // sequence, and nothing else: a block sequence, a dropped operation
+        // or a re-punctuated child would all show here.
+        const std::string line = pvt::transfer_function_transform(config,
+                                                                  "GainCurve");
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_EQUAL(line, "!<GroupTransform> {children: ["
+                                   + Strutil::replace(Strutil::strip(doc.substr(
+                                                          doc.find("- ") + 2)),
+                                                      "\n    - ", ", ", true)
+                                   + "]}");
+    }
+
+    // A definition of one operation is that operation, not a group of one:
+    // the spelling an inline transform is asked for.
+    {
+        const std::string line = pvt::transfer_function_transform(config,
+                                                                  "TrueSRGB");
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        OIIO_CHECK_ASSERT(
+            Strutil::starts_with(line, "!<ExponentWithLinearTransform> {"));
+        OIIO_CHECK_ASSERT(!Strutil::contains(line, "GroupTransform"));
+    }
+
+    // The same definition under two contexts is two definitions, and the two
+    // documents have to differ. Nothing about the default context's answer
+    // survives into the override's.
+    const std::string under_default
+        = pvt::serialize_transfer_function(config, "TablePlate", "ctf");
+    const std::string under_override
+        = pvt::serialize_transfer_function(config, "TablePlate", "ctf", "CURVE",
+                                           "g18.cube");
+    OIIO_CHECK_EQUAL(config.geterror(false), "");
+    OIIO_CHECK_ASSERT(!under_default.empty() && !under_override.empty());
+    OIIO_CHECK_ASSERT(under_default != under_override);
+    // And the configuration's own context is untouched by having asked.
+    OIIO_CHECK_EQUAL(pvt::serialize_transfer_function(config, "TablePlate",
+                                                      "ctf"),
+                     under_default);
+
+    // A name nothing defines that spells a context variable is expanded under
+    // the effective context -- the caller's when the caller overrode it --
+    // and the export is the expanded name's own, not a refusal and not the
+    // configuration's answer under a context the caller replaced.
+    const std::string by_variable
+        = pvt::serialize_transfer_function(config, "$SPACE", "ctf");
+    const std::string by_override
+        = pvt::serialize_transfer_function(config, "$SPACE", "ctf", "SPACE",
+                                           "CameraLog");
+    OIIO_CHECK_EQUAL(config.geterror(false), "");
+    OIIO_CHECK_ASSERT(!by_variable.empty() && !by_override.empty());
+    OIIO_CHECK_EQUAL(by_variable,
+                     pvt::serialize_transfer_function(config, "TrueSRGB"));
+    OIIO_CHECK_EQUAL(by_override,
+                     pvt::serialize_transfer_function(config, "CameraLog"));
+
+    // Independent expected transforms. The exported curve is compared against
+    // a transform authored here from the published parameters, applied to the
+    // space's own linear RGB -- not against anything the export produced.
+    auto matches_authored = [&](string_view name, string_view linear,
+                                const std::string& expected) {
+        const std::string stem = Strutil::fmt::format("{}/expect-{}", directory,
+                                                      ++serial);
+        OIIO_CHECK_ASSERT(Filesystem::write_text_file(
+            stem + ".ocio",
+            "ocio_profile_version: 2.3\nroles: {default: linear}\n"
+            "file_rules:\n  - !<Rule> {name: Default, colorspace: default}\n"
+            "colorspaces:\n  - !<ColorSpace>\n    name: linear\n"
+            "  - !<ColorSpace>\n    name: encoded\n"
+            "    from_scene_reference: "
+                + expected + "\n"));
+        ColorConfig authored(stem + ".ocio");
+        OIIO_CHECK_EQUAL(authored.geterror(false), "");
+        const Probes onto = run(config.createColorProcessor("ACES", linear),
+                                source);
+        const Probes want
+            = run(authored.createColorProcessor("linear", "encoded"), onto);
+        const std::string document
+            = pvt::serialize_transfer_function(config, name, "ocio");
+        OIIO_CHECK_EQUAL(config.geterror(false), "");
+        const Probes got = reload(document, "ocio", onto);
+        for (size_t i = 0; i < source.size(); ++i)
+            for (int c = 0; c < 4; ++c)
+                OIIO_CHECK_EQUAL_THRESH(got[i][c], want[i][c], 2e-4f);
+    };
+    matches_authored("TrueSRGB", "Rec709Linear",
+                     "!<ExponentWithLinearTransform> {gamma: 2.4, offset: "
+                     "0.055, direction: inverse}");
+    matches_authored("CameraLog", "AWG3Linear", logc3_encode);
+
+    // What is refused, and that each refusal says which thing it refused. A
+    // refusal is always an error state with a message; `because` is the part
+    // of it that has to name the reason.
+    auto refused = [&](string_view name, string_view format,
+                       string_view because) {
+        OIIO_CHECK_EQUAL(pvt::serialize_transfer_function(config, name, format),
+                         "");
+        const std::string error = config.geterror();
+        OIIO_CHECK_ASSERT(!error.empty());
+        OIIO_CHECK_ASSERT(Strutil::contains(error, because));
+        if (!Strutil::contains(error, because))
+            Strutil::print("{} ({}): {}\n", name, format, error);
+    };
+    refused("SkewGain", "ctf", "differently");
+    refused("SkewTable", "ctf", "one-dimensional look-up table");
+    refused("MixTable", "ctf", "three-dimensional look-up table");
+    refused("InsetChain", "ctf", "after its curve has begun");
+    refused("MergedGain", "ctf", "interchange neutral");
+    refused("AlphaCurve", "ctf", "changes alpha");
+    // The configuration grammar cannot spell an inline table, and the Common
+    // LUT Format cannot spell an inverse one. Each refusal is the whole of
+    // the answer: no resampled or fitted stand-in follows either.
+    refused("TablePlate", "ocio", "");
+    refused("TablePlate", "clf", "CLF");
+    refused("Plain", "ctf", "data space");
+    refused("NotASpace", "ctf", "Unknown color space");
+    refused("TrueSRGB", "cube", "Unknown transfer function format");
+    refused("TrueSRGB", "cdl", "Unknown transfer function format");
+
+    // An empty format is the default, not an error.
+    OIIO_CHECK_EQUAL(pvt::serialize_transfer_function(config, "TrueSRGB", ""),
+                     pvt::serialize_transfer_function(config, "TrueSRGB",
+                                                      "ctf"));
+    OIIO_CHECK_EQUAL(config.geterror(false), "");
+
+    // A configuration with no interchange role for the space's image state
+    // has no encoding direction to state a curve in, and says so.
+    const std::string bare_name = directory + "/bare.ocio";
+    OIIO_CHECK_ASSERT(Filesystem::write_text_file(
+        bare_name,
+        "ocio_profile_version: 2.3\nroles: {default: Working}\n"
+        "file_rules:\n  - !<Rule> {name: Default, colorspace: "
+        "default}\ncolorspaces:\n"
+        "  - !<ColorSpace>\n    name: Working\n"
+        "  - !<ColorSpace>\n    name: Plate\n"
+        "    to_scene_reference: !<ExponentTransform> {value: 2.2}\n"));
+    ColorConfig bare(bare_name);
+    OIIO_CHECK_EQUAL(bare.geterror(false), "");
+    OIIO_CHECK_EQUAL(pvt::serialize_transfer_function(bare, "Plate", "ctf"),
+                     "");
+    OIIO_CHECK_ASSERT(Strutil::contains(bare.geterror(), "aces_interchange"));
+
+    Filesystem::remove_all(directory);
+}
+
+
+
 int
 main(int argc, char* argv[])
 {
@@ -1938,6 +2443,7 @@ main(int argc, char* argv[])
     test_color_space_info_context();
     test_encoding_tie_break();
     test_private_properties();
+    test_transfer_export();
 
     return unit_test_failures != 0;
 }

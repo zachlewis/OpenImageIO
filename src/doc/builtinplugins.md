@@ -2009,8 +2009,12 @@ the file cannot carry (ACEScc, ACEScct, a camera log encoding, or a D50
 display gamma, for example) is written with no color chunk at all. An
 embedded ICC profile states the primaries and the transfer function itself,
 so it suppresses `cHRM` and any `gAMA` taken from the color space's measured
-properties. With `OPENIMAGEIO_DEBUG` set, the writer says when it drops a
-color space's primaries or transfer function.
+properties. An image with no `oiio:ColorSpace` is written as sRGB, unless
+its `colorInteropID` is `unknown`, as a camera-native RAW decode's is. Such
+an image makes no color claim and gets no color chunk, except that
+`chromaticities` and `oiio:Gamma` it carries, as the RAW reader's `Wide`
+decode does, are written as `cHRM` and `gAMA`. With `OPENIMAGEIO_DEBUG` set,
+the writer says when it drops a color space's primaries or transfer function.
 
 The PNG reader names a file with a `gAMA` chunk as a Rec.709 gamma, such as
 `g22_rec709_scene`, and does not read `cHRM`.
@@ -2366,11 +2370,36 @@ options are supported:
        ``raw:greybox`` box is zero size.
    * - ``raw:ColorSpace``
      - string
-     - Which color primaries to use for the returned pixel values: ``raw``,
-       ``sRGB``, ``sRGB-linear`` (sRGB primaries, but a linear transfer
-       function), ``Adobe``, ``Wide``, ``ProPhoto``, ``ProPhoto-linear``,
-       ``XYZ``, ``ACES`` (only supported by LibRaw >= 0.18), ``DCI-P3``
-       (LibRaw >= 0.21), ``Rec2020`` (LibRaw >= 0.2). (Default: ``sRGB``)
+     - The color encoding of the returned pixel values, as a color interop
+       ID: ``srgb_rec709_scene``, ``lin_rec709_scene``, ``g24_rec709_scene``,
+       ``g22_rec709_scene``, ``g18_rec709_scene``,
+       ``ocio:itu709_rec709_scene``, ``lin_adobergb_scene``,
+       ``g22_adobergb_scene``, ``lin_p3d65_scene``, ``srgb_p3d65_scene``,
+       ``lin_rec2020_scene``, ``lin_ap0_scene``, ``lin_ciexyzd65_scene``,
+       ``srgb_texture``, ``oiio:lin_prophoto_scene`` or
+       ``oiio:g18_prophoto_scene`` (ProPhoto RGB Bradford-adapted to its D50
+       white, as LibRaw writes it). The ID is set as ``oiio:ColorSpace``.
+       Some decodes are camera-native: ``raw``, any request for a
+       monochrome sensor or for a camera LibRaw has no color matrix for, and
+       any request when ``raw:Demosaic`` is ``none``. No color space names
+       those pixels, so they get no ``oiio:ColorSpace``, and
+       ``colorInteropID`` is set to ``unknown``, which a color config's file
+       rules can still resolve. The older names ``sRGB``, ``sRGB-linear``,
+       ``linear``, ``lin_srgb``, ``lin_rec709``, ``Adobe``, ``Wide``,
+       ``ProPhoto``, ``ProPhoto-linear``, ``XYZ``, ``ACES``, ``DCI-P3``
+       (P3-D65) and ``Rec2020`` keep their decodes and set
+       ``oiio:ColorSpace`` to the ID of that decode. ``Adobe`` keeps its 2.2
+       exponent and is tagged
+       ``g22_adobergb_scene`` (exponent 563/256, within 1.3e-4). ``Wide``
+       (linear Wide Gamut RGB) has no ID, so it sets no ``oiio:ColorSpace``
+       and sets ``colorInteropID`` to ``unknown``, but it does describe
+       itself: ``chromaticities`` holds the primaries and D65 white of that
+       decode, and ``oiio:Gamma`` is 1.0.
+       These names are deprecated and will be removed no earlier than 4.0;
+       using one prints a warning when debugging output is enabled (with
+       the ``OPENIMAGEIO_DEBUG`` environment variable set, or by default in
+       debug builds).
+       (Default: ``srgb_rec709_scene``)
    * - ``raw:Exposure``
      - float
      - Amount of exposure before de-mosaicing, from 0.25 (2 stop darken) to

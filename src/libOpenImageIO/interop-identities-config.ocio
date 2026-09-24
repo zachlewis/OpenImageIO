@@ -397,6 +397,15 @@ colorspaces:
     encoding: scene-linear
     to_scene_reference: !<MatrixTransform> { matrix: [1.0634954914942, 0.00640891019711789, -0.0158067866176054, 0, -0.492074127923892, 1.36822340747333, 0.0913370883144736, 0, -0.00281646163925351, 0.00464417105680067, 0.916418574593656, 0, 0, 0, 0, 1]}
 
+  # ProPhoto primaries with a D50 white, Bradford-adapted like LibRaw's
+  # ProPhoto output.
+  - !<ColorSpace>
+    name: oiio:lin_prophoto_scene
+    aliases: [lin_prophoto_scene]
+    interop_id: oiio:lin_prophoto_scene
+    encoding: scene-linear
+    to_scene_reference: !<MatrixTransform> {matrix: [0.80521891298626, 0.124669059595803, 0.0701120274179371, 0, -0.00432677792113727, 0.921798414646975, 0.082528363274162, 0, 0.0027067102395218, -0.00884887444206907, 1.00614216420255, 0, 0, 0, 0, 1]}
+
   - !<ColorSpace>
     name: ocio:acescc_ap1_scene
     aliases: [acescc_ap1_scene]
@@ -691,6 +700,16 @@ colorspaces:
       children:
         - !<ExponentWithLinearTransform> {gamma: 2.22222222222222, offset: 0.099}
         - !<MatrixTransform> {matrix: [0.439632981919491, 0.382988698151554, 0.177378319928955, 0, 0.0897764429588424, 0.813439428748981, 0.0967841282921771, 0, 0.0175411703831727, 0.111546553302387, 0.87091227631444, 0, 0, 0, 0, 1]}
+
+  - !<ColorSpace>
+    name: oiio:g18_prophoto_scene
+    aliases: [g18_prophoto_scene]
+    interop_id: oiio:g18_prophoto_scene
+    encoding: sdr-video
+    to_scene_reference: !<GroupTransform>
+      children:
+        - !<ExponentTransform> {value: 1.8, style: pass_thru}
+        - !<MatrixTransform> {matrix: [0.80521891298626, 0.124669059595803, 0.0701120274179371, 0, -0.00432677792113727, 0.921798414646975, 0.082528363274162, 0, 0.0027067102395218, -0.00884887444206907, 1.00614216420255, 0, 0, 0, 0, 1]}
 
   - !<ColorSpace>
     name: oiio:tlog_egamut2_scene

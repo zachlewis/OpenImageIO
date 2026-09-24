@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <limits>
 #include <map>
@@ -172,6 +173,132 @@ effective_context(const OCIO::ConstConfigRcPtr& config, string_view context_key,
         context = ctx;
     }
     return context;
+}
+
+
+
+// Parsed source captures are separate from resource-dependent derived results.
+// Keep one owning revision per descriptor; a replacement never changes an
+// existing wrapper's working copy. Native OCIO still owns parsing and IDs.
+struct SourceConfig {
+    std::string text;
+    OCIO::ConstConfigRcPtr config;
+    std::array<std::string, 3> active;
+    std::string context_id;
+};
+
+static spin_rw_mutex source_config_mutex;
+// One entry per (path as given, working directory) until exit; no eviction.
+static std::map<std::pair<std::string, std::string>,
+                std::shared_ptr<const SourceConfig>>
+    source_configs;
+
+static std::array<std::string, 3>
+source_active_environment()
+{
+    return { std::string(Sysutil::getenv("OCIO_ACTIVE_DISPLAYS")),
+             std::string(Sysutil::getenv("OCIO_ACTIVE_VIEWS")),
+             std::string(Sysutil::getenv("OCIO_INACTIVE_COLORSPACES")) };
+}
+
+static std::string
+source_context_id(const OCIO::ConstConfigRcPtr& config)
+{
+    auto context = config->getCurrentContext()->createEditableCopy();
+    context->setEnvironmentMode(config->getEnvironmentMode());
+    // Start from authored defaults, not previously loaded values: an unset
+    // variable must not retain its last value, including in LOAD_ALL mode.
+    context->clearStringVars();
+    for (int i = 0; i < config->getNumEnvironmentVars(); ++i) {
+        const char* name = config->getEnvironmentVarNameByIndex(i);
+        context->setStringVar(name, config->getEnvironmentVarDefault(name));
+    }
+    context->loadEnvironment();
+    return context->getCacheID();
+}
+
+// Reuse an already parsed ordinary-file config, but only after rereading the
+// file and finding its exact bytes, effective environment context and
+// parse-time active selection unchanged. Every caller still gets its own
+// working copy (Impl::init copies what this returns).
+static OCIO::ConstConfigRcPtr
+load_source_config(const std::string& filename)
+{
+    // Native URI/archive handling and nonregular sources retain their loader.
+    if (!Filesystem::is_regular(filename))
+        return OCIO::Config::CreateFromFile(filename.c_str());
+    ifstream input;
+    Filesystem::open(input, filename, std::ios::in | std::ios::binary);
+    if (!input)
+        return OCIO::Config::CreateFromFile(filename.c_str());
+    char magic[2] = {};
+    input.read(magic, 2);
+    if (input.gcount() == 2 && magic[0] == 'P' && magic[1] == 'K')
+        return OCIO::Config::CreateFromFile(filename.c_str());
+    input.clear();
+    input.seekg(0);
+    std::string text;
+    char buffer[8192];
+    while (input.read(buffer, sizeof(buffer)) || input.gcount())
+        text.append(buffer, size_t(input.gcount()));
+    if (input.bad() || !input.eof())
+        return OCIO::Config::CreateFromFile(filename.c_str());
+
+    // OCIO uses a lexical absolute parent, not a canonical/symlink target.
+    // Read the original descriptor, just as CreateFromFile does.
+#ifdef _WIN32
+    const std::filesystem::path path(Strutil::utf8_to_utf16wstring(filename));
+#else
+    const std::filesystem::path path(filename);
+#endif
+    const auto parent
+        = std::filesystem::absolute(path).lexically_normal().parent_path();
+#ifdef _WIN32
+    const std::string working_dir = Strutil::utf16_to_utf8(parent.native());
+#else
+    const std::string working_dir = parent.string();
+#endif
+    const auto key    = std::make_pair(filename, working_dir);
+    const auto active = source_active_environment();
+    std::shared_ptr<const SourceConfig> previous;
+    {
+        spin_rw_read_lock lock(source_config_mutex);
+        auto found = source_configs.find(key);
+        if (found != source_configs.end())
+            previous = found->second;
+    }
+    if (previous && previous->text == text && previous->active == active
+        && previous->context_id == source_context_id(previous->config)) {
+        DBG("OCIO source cache hit: {}\n", filename);
+        return previous->config;
+    }
+
+    DBG("OCIO source parse: {}\n", filename);
+    std::istringstream stream(text);
+    auto config = copy_config(OCIO::Config::CreateFromStream(stream));
+    config->setWorkingDir(working_dir.c_str());
+    auto capture        = std::make_shared<SourceConfig>();
+    capture->text       = std::move(text);
+    capture->config     = config;
+    capture->active     = active;
+    capture->context_id = config->getCurrentContext()->getCacheID();
+    // Do not retain a capture if its environment changed during parsing.
+    if (active != source_active_environment()
+        || capture->context_id != source_context_id(config))
+        return config;
+    try {
+        // Prime the lazy structural ID used by inventory(). Copies preserve
+        // it unless restoring a lost environment mode invalidates native IDs.
+        // A config that cannot provide one keeps the existing uncached path.
+        (void)config->getCacheID(nullptr);
+    } catch (...) {
+        return config;
+    }
+    {
+        spin_rw_write_lock lock(source_config_mutex);
+        source_configs[key] = std::move(capture);
+    }
+    return config;
 }
 
 
@@ -1418,8 +1545,7 @@ ColorConfig::Impl::init(string_view filename)
         // Either filename passed, or taken from $OCIO, and it seems to exist
         try {
             configname(filename);
-            auto cfg = OCIO::Config::CreateFromFile(
-                std::string(filename).c_str());
+            auto cfg = load_source_config(std::string(filename));
             if (cfg)
                 config_ = copy_config(cfg);
             if (config_ && Strutil::istarts_with(filename, "ocio://"))

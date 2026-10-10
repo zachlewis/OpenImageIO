@@ -4053,7 +4053,7 @@ if xy:
     rx, ry, gx, gy, bx, by, wx, wy = xy
 ```
 
-This function was added in OpenImageIO 3.3.
+This function was added in OpenImageIO 3.2.
 :::
 
 :::{py:method} get_transfer_gamma (colorspace)
@@ -4067,7 +4067,7 @@ Example:
 gamma = colorconfig.get_transfer_gamma("g22_rec709_scene")  # 2.2
 ```
 
-This function was added in OpenImageIO 3.3.
+This function was added in OpenImageIO 3.2.
 :::
 
 :::{py:method} get_cicp (colorspace)

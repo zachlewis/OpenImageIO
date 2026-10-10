@@ -441,7 +441,7 @@ public:
     /// By, Wx, Wy, CIE 1931 xy), or an empty span if they are unknown. The
     /// span points into OIIO's own table, so it stays valid.
     ///
-    /// @version 3.3
+    /// @version 3.2
     OIIO_NODISCARD cspan<float> get_chromaticities(string_view colorspace) const;
 
     /// Get the exponent of a color space's transfer function if it decodes
@@ -451,7 +451,7 @@ public:
     /// it reports 1.0 for any color space whose config declares a linear
     /// encoding.
     ///
-    /// @version 3.3
+    /// @version 3.2
     OIIO_NODISCARD float get_transfer_gamma(string_view colorspace) const;
 
     /// Find color interop ID corresponding to the CICP code.
